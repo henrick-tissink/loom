@@ -337,6 +337,12 @@ func (a *App) View() string {
 		body = append(body, "", styErr.Render(truncPlain("! "+a.errStr, inner)))
 	}
 	if a.deps.InsideTmux {
+		// Breathing room before the hint — but skip it if the line above is
+		// already blank (e.g. the empty-state block already ends with one),
+		// so populated and empty dashboards don't end up with a double gap.
+		if n := len(body); n > 0 && body[n-1] != "" {
+			body = append(body, "")
+		}
 		body = append(body, styHelp.Render(truncPlain("(inside tmux — attach nests; F12 detaches)", inner)))
 	}
 
