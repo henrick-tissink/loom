@@ -107,6 +107,49 @@ func TestPollDeadPaneClassifiesAndReaps(t *testing.T) {
 	}
 }
 
+// TestPollDeadOrphanRecordedBeforeReap covers the case where a tmux session
+// is found already-dead on the very first poll (e.g. loom just started and
+// discovered a `loom-*` session left over from a prior run) with no store
+// row backing it yet. It must be adopted into the store BEFORE it's reaped,
+// so it leaves a history record instead of silently vanishing (spec §6
+// "record before reap").
+func TestPollDeadOrphanRecordedBeforeReap(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	id := "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	name := "loom-" + id
+	if err := tm.NewSession(name, cwd, "exit 5", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	// deliberately no st.Upsert: this session has NO store row at all
+
+	e := NewEngine(tm, st, ccd)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snap, err := e.Poll(time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Recent) == 1 {
+			r := snap.Recent[0]
+			if r.Name != name {
+				t.Fatalf("Recent = %+v (want name %q)", r, name)
+			}
+			if r.LastStatus != "error" || r.ExitCode != 5 {
+				t.Fatalf("Recent = %+v (want error/5)", r)
+			}
+			if tm.HasSession(name) {
+				t.Fatal("dead orphan session not reaped")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("orphan never adopted+classified; snap=%+v", snap)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
 func TestPollAdoptsOrphanAndRetiresVanished(t *testing.T) {
 	tm, st, ccd := testEnv(t)
 	cwd := t.TempDir()

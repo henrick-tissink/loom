@@ -53,18 +53,10 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 		if err != nil {
 			continue // raced a kill; next poll settles it
 		}
-		if ps.Dead {
-			st := "done"
-			if ps.ExitCode != 0 {
-				st = "error"
-			}
-			_ = e.st.MarkEnded(s.Name, st, int64(ps.ExitCode), now.Unix())
-			_ = e.tm.KillSession(s.Name) // reap after recording (spec §6)
-			delete(e.readers, s.Name)
-			continue
-		}
 		if _, ok, _ := e.st.Get(s.Name); !ok {
-			// adopt orphan: rebuild what we can from tmux alone (spec §3)
+			// adopt orphan BEFORE branching on Dead: a tmux session found on
+			// startup with no store row must be recorded before it can be
+			// reaped, dead or alive (spec §6 "record before reap").
 			id, _ := session.SessionIDFromTmuxName(s.Name)
 			_ = e.st.Upsert(store.SessionRow{
 				Name: s.Name, ClaudeSessionID: id,
@@ -73,9 +65,23 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 				LastStatus: string(Unknown),
 			})
 		}
+		if ps.Dead {
+			st := "done"
+			if ps.ExitCode != 0 {
+				st = "error"
+			}
+			_ = e.st.MarkEnded(s.Name, st, int64(ps.ExitCode), now.Unix())
+			_ = e.tm.KillSession(s.Name) // reap after recording (spec §6)
+			continue
+		}
 		aliveNames = append(aliveNames, s.Name)
 		activity[s.Name] = s.Activity
 	}
+
+	// drop cached readers for anything not observed live this poll, so
+	// sessions that vanish from tmux without a dead pane (e.g. an external
+	// `tmux kill-session`) don't leak their Reader forever.
+	e.GC(aliveNames)
 
 	// store rows that claim live but have no tmux backing → history (never deleted)
 	if err := e.st.MarkLiveOrphansEnded(aliveNames, now.Unix()); err != nil {
@@ -110,7 +116,9 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 	return Snapshot{Live: live, Recent: recent}, nil
 }
 
-// GC drops cached readers for names not in the given set (call rarely; cheap).
+// GC drops cached readers for names not in the given set. Called once per
+// Poll with the set of tmux-alive session names, so readers for anything
+// that vanished from tmux (dead pane or external kill) don't leak.
 func (e *Engine) GC(names []string) {
 	keep := map[string]bool{}
 	for _, n := range names {
