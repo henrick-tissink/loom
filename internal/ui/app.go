@@ -55,10 +55,17 @@ type App struct {
 	errStr string
 	width  int
 	height int
+
+	// actionTarget is the row captured at the moment viewConfirmKill/viewTag
+	// is opened. Rows reorder under the cursor every poll (1.5s) as statuses
+	// change, so the kill/tag-save handlers must act on this captured target
+	// rather than re-reading selected() at confirm/save time (finding 5).
+	actionTarget uiRow
 }
 
 type (
 	tickMsg     time.Time
+	pollNowMsg  struct{} // one-shot: "poll now", does NOT arm a new tick chain
 	snapMsg     status.Snapshot
 	errMsg      struct{ err error }
 	attachedMsg struct{ err error }
@@ -130,6 +137,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case tickMsg:
 		return a, tea.Batch(a.pollCmd(), tickAfter())
+	case pollNowMsg:
+		// one-shot refresh after launch/kill/resume — NOT a new tick chain.
+		// Returning tickMsg here (as launch/kill/resume commands used to)
+		// would permanently add another perpetual pollInterval tick loop per
+		// action, stacking concurrent Engine.Poll goroutines (finding 1).
+		return a, a.pollCmd()
 	case snapMsg:
 		a.snap = status.Snapshot(m)
 		a.errStr = ""
@@ -168,7 +181,7 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if _, err := l.Launch(r, w, h, time.Now()); err != nil {
 					return errMsg{err}
 				}
-				return tickMsg(time.Now())
+				return pollNowMsg{}
 			}
 		}
 		return a, a.form.update(msg)
@@ -177,14 +190,14 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s := msg.String()
 		if s == "y" {
 			a.view = viewDash
-			if r, ok := a.selected(); ok && a.deps.Tmux != nil {
-				name := r.name
+			if a.deps.Tmux != nil {
+				name := a.actionTarget.name
 				tm := a.deps.Tmux
 				return a, func() tea.Msg {
 					if err := tm.KillSession(name); err != nil {
 						return errMsg{err}
 					}
-					return tickMsg(time.Now())
+					return pollNowMsg{}
 				}
 			}
 			return a, nil
@@ -201,8 +214,8 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case tea.KeyEnter:
 			a.view = viewDash
-			if r, ok := a.selected(); ok && a.deps.Launcher != nil {
-				_ = a.deps.Launcher.Store.SetTags(r.name, a.tag.Value())
+			if a.deps.Launcher != nil {
+				_ = a.deps.Launcher.Store.SetTags(a.actionTarget.name, a.tag.Value())
 			}
 			return a, a.pollCmd()
 		}
@@ -228,11 +241,13 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.form.setFocus(0)
 		a.view = viewLauncher
 	case "x":
-		if _, ok := a.selected(); ok {
+		if r, ok := a.selected(); ok {
+			a.actionTarget = r
 			a.view = viewConfirmKill
 		}
 	case "t":
 		if r, ok := a.selected(); ok {
+			a.actionTarget = r
 			a.tag.SetValue(r.row.Tags)
 			a.tag.Focus()
 			a.view = viewTag
@@ -246,7 +261,7 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if _, err := l.Resume(old, w, h, time.Now()); err != nil {
 					return errMsg{err}
 				}
-				return tickMsg(time.Now())
+				return pollNowMsg{}
 			}
 		}
 	case "enter":
@@ -270,7 +285,7 @@ func (a *App) View() string {
 	case viewLauncher:
 		return a.form.view()
 	case viewConfirmKill:
-		r, _ := a.selected()
+		r := a.actionTarget
 		return fmt.Sprintf("kill %s (%s)? %s",
 			r.label, r.name, styHelp.Render("y/n"))
 	case viewTag:
@@ -303,9 +318,13 @@ func (a *App) View() string {
 		if hint != "" {
 			hint = "⏺ " + hint
 		}
+		meta := trimMeta(r.model, r.mode)
+		if r.row.SeedStatus == "failed" {
+			meta += " · seed failed"
+		}
 		out += fmt.Sprintf("%s%s %-14s %-18s %s\n",
 			cursor, statusIcon(r.status), r.label, hint,
-			styMeta.Render(trimMeta(r.model, r.mode)))
+			styMeta.Render(meta))
 	}
 	if len(a.rows) == 0 {
 		out += styHelp.Render("no sessions — press n to launch one") + "\n"

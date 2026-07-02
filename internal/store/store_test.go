@@ -83,7 +83,9 @@ func TestMarkLiveOrphansEnded(t *testing.T) {
 	orphan.ExitCode = 7
 	s.Upsert(orphan)
 
-	if err := s.MarkLiveOrphansEnded([]string{"loom-aaa"}, 3000); err != nil {
+	// graceUnix=9999 is permissive here (after every row's created_at=1000),
+	// preserving this test's original "retire everything not tmux-alive" intent.
+	if err := s.MarkLiveOrphansEnded([]string{"loom-aaa"}, 9999, 3000); err != nil {
 		t.Fatal(err)
 	}
 	live, _ := s.Live()
@@ -98,5 +100,60 @@ func TestMarkLiveOrphansEnded(t *testing.T) {
 	bbb, _, _ := s.Get("loom-bbb")
 	if bbb.LastStatus != "done" || bbb.ExitCode != -1 || bbb.EndedAt != 3000 {
 		t.Fatalf("orphan not retired: %+v", bbb)
+	}
+}
+
+// TestMarkLiveOrphansEndedRespectsGraceWindow guards finding 2a: a session
+// just launched can be observed by a poll that races the tmux session's own
+// creation (store row written, tmux session not yet visible to ListSessions,
+// or vice versa). Such a row must NOT be retired as an orphan while it's
+// still within the grace window, even though it isn't in liveTmuxNames.
+func TestMarkLiveOrphansEndedRespectsGraceWindow(t *testing.T) {
+	s := open(t)
+	young := row("loom-young")
+	young.CreatedAt = 995 // "now" (1000) minus a 5s grace window
+	s.Upsert(young)
+
+	// graceUnix=990 < created_at=995: too young to retire yet, protected
+	if err := s.MarkLiveOrphansEnded(nil, 990, 2000); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := s.Get("loom-young")
+	if got.LastStatus != "unknown" || got.EndedAt != -1 {
+		t.Fatalf("young row retired despite grace window: %+v", got)
+	}
+
+	// once it ages past the grace cutoff (graceUnix=1000 > created_at=995), it
+	// IS eligible for retirement
+	if err := s.MarkLiveOrphansEnded(nil, 1000, 3000); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = s.Get("loom-young")
+	if got.LastStatus != "done" || got.EndedAt != 3000 {
+		t.Fatalf("aged row not retired: %+v", got)
+	}
+}
+
+func TestSetSeedStatus(t *testing.T) {
+	s := open(t)
+	r := row("loom-aaa")
+	s.Upsert(r)
+	got, _, _ := s.Get("loom-aaa")
+	if got.SeedStatus != "" {
+		t.Fatalf("default SeedStatus = %q, want empty (migration v2 default)", got.SeedStatus)
+	}
+	if err := s.SetSeedStatus("loom-aaa", "sent"); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = s.Get("loom-aaa")
+	if got.SeedStatus != "sent" {
+		t.Fatalf("SeedStatus = %q, want sent", got.SeedStatus)
+	}
+	if err := s.SetSeedStatus("loom-aaa", "failed"); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = s.Get("loom-aaa")
+	if got.SeedStatus != "failed" {
+		t.Fatalf("SeedStatus = %q, want failed", got.SeedStatus)
 	}
 }

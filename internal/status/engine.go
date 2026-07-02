@@ -2,6 +2,7 @@ package status
 
 import (
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/henricktissink/loom/internal/session"
@@ -11,6 +12,12 @@ import (
 )
 
 const activeWindow = 3 * time.Second
+
+// orphanGrace is how long a store row is protected from
+// MarkLiveOrphansEnded even if its tmux session isn't (yet) observed live —
+// guards the launch-vs-reconcile race (finding 2a): a session just launched
+// can be polled before its tmux session is visible to ListSessions.
+const orphanGrace = 5 * time.Second
 
 type Row struct {
 	store.SessionRow
@@ -30,6 +37,13 @@ type Engine struct {
 	st      *store.Store
 	ccd     string
 	readers map[string]*transcript.Reader
+
+	// mu serializes Poll end-to-end. Defense in depth against finding 1: the
+	// UI must never fire two concurrent Poll goroutines against the same
+	// Engine (that's the primary fix, in ui/app.go), but this mutex makes a
+	// concurrent-Poll bug a serialization delay instead of a `fatal error:
+	// concurrent map writes` crash on e.readers.
+	mu sync.Mutex
 }
 
 func NewEngine(tm *tmux.Client, st *store.Store, claudeConfigDir string) *Engine {
@@ -38,6 +52,9 @@ func NewEngine(tm *tmux.Client, st *store.Store, claudeConfigDir string) *Engine
 }
 
 func (e *Engine) Poll(now time.Time) (Snapshot, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	sessions, err := e.tm.ListSessions()
 	if err != nil {
 		return Snapshot{}, err
@@ -53,7 +70,7 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 		if err != nil {
 			continue // raced a kill; next poll settles it
 		}
-		if _, ok, _ := e.st.Get(s.Name); !ok {
+		if row, ok, _ := e.st.Get(s.Name); !ok {
 			// adopt orphan BEFORE branching on Dead: a tmux session found on
 			// startup with no store row must be recorded before it can be
 			// reaped, dead or alive (spec §6 "record before reap").
@@ -64,6 +81,16 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 				CreatedAt: now.Unix(), EndedAt: -1, ExitCode: -1,
 				LastStatus: string(Unknown),
 			})
+		} else if row.LastStatus == string(Done) || row.LastStatus == string(Error) {
+			// resurrection (finding 2b): a launch-vs-reconcile race can let a
+			// poll observe the store row as already retired (terminal status)
+			// while its tmux session is, in fact, still alive — e.g. the
+			// session finished quickly and MarkLiveOrphansEnded fired on a
+			// poll that raced the tmux session's own teardown/creation. tmux
+			// is the source of truth for liveness (spec §6): if it says the
+			// pane is alive, the row must not stay stuck in a terminal
+			// status, or the session becomes permanently invisible to Live().
+			_ = e.st.SetStatus(s.Name, string(Unknown))
 		}
 		if ps.Dead {
 			st := "done"
@@ -83,8 +110,10 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 	// `tmux kill-session`) don't leak their Reader forever.
 	e.GC(aliveNames)
 
-	// store rows that claim live but have no tmux backing → history (never deleted)
-	if err := e.st.MarkLiveOrphansEnded(aliveNames, now.Unix()); err != nil {
+	// store rows that claim live but have no tmux backing → history (never
+	// deleted). graceUnix protects rows created within orphanGrace of now so
+	// a poll that races a session's own launch never retires it (finding 2a).
+	if err := e.st.MarkLiveOrphansEnded(aliveNames, now.Add(-orphanGrace).Unix(), now.Unix()); err != nil {
 		return Snapshot{}, err
 	}
 

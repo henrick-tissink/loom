@@ -54,6 +54,11 @@ func (s *Store) migrate() error {
 			exit_code         INTEGER NOT NULL DEFAULT -1,
 			last_status       TEXT NOT NULL DEFAULT 'unknown'
 		)`,
+		// v2: track whether an async seed (session/launch.go seedWhenReady) was
+		// actually delivered, so a silently-dropped seed (timeout/send error) is
+		// visible instead of vanishing. '' = no seed or not yet resolved,
+		// 'sent' = delivered, 'failed' = timed out or the tmux send failed.
+		`ALTER TABLE sessions ADD COLUMN seed_status TEXT NOT NULL DEFAULT ''`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if _, err := s.db.Exec(migrations[i]); err != nil {
@@ -79,27 +84,36 @@ type SessionRow struct {
 	EndedAt         int64 // -1 = still live
 	ExitCode        int64 // -1 = unknown
 	LastStatus      string
+	SeedStatus      string // '', 'sent', 'failed' — see migration v2
 }
 
-const cols = "name, claude_session_id, project_label, cwd, model, mode, seed, tags, created_at, ended_at, exit_code, last_status"
+const cols = "name, claude_session_id, project_label, cwd, model, mode, seed, tags, created_at, ended_at, exit_code, last_status, seed_status"
 
 func (s *Store) Upsert(r SessionRow) error {
 	_, err := s.db.Exec(`INSERT INTO sessions (`+cols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET
 			claude_session_id=excluded.claude_session_id,
 			project_label=excluded.project_label, cwd=excluded.cwd,
 			model=excluded.model, mode=excluded.mode, seed=excluded.seed,
 			tags=excluded.tags, created_at=excluded.created_at,
 			ended_at=excluded.ended_at, exit_code=excluded.exit_code,
-			last_status=excluded.last_status`,
+			last_status=excluded.last_status, seed_status=excluded.seed_status`,
 		r.Name, r.ClaudeSessionID, r.ProjectLabel, r.Cwd, r.Model, r.Mode,
-		r.Seed, r.Tags, r.CreatedAt, r.EndedAt, r.ExitCode, r.LastStatus)
+		r.Seed, r.Tags, r.CreatedAt, r.EndedAt, r.ExitCode, r.LastStatus, r.SeedStatus)
 	return err
 }
 
 func (s *Store) SetStatus(name, status string) error {
 	_, err := s.db.Exec("UPDATE sessions SET last_status=? WHERE name=?", status, name)
+	return err
+}
+
+// SetSeedStatus records the outcome of an async seed delivery (spec §3.2,
+// finding 4): 'sent' once SendLiteral+SendEnter both succeed, 'failed' on
+// timeout or a tmux send error. Never silently drops the outcome.
+func (s *Store) SetSeedStatus(name, status string) error {
+	_, err := s.db.Exec("UPDATE sessions SET seed_status=? WHERE name=?", status, name)
 	return err
 }
 
@@ -142,14 +156,22 @@ func (s *Store) Recent(limit int) ([]SessionRow, error) {
 
 // MarkLiveOrphansEnded retires live rows with no tmux backing to history as
 // 'done' (exit unknown). NEVER deletes — history survives restarts (spec §6).
-func (s *Store) MarkLiveOrphansEnded(liveTmuxNames []string, endedAt int64) error {
+//
+// graceUnix protects rows created after that cutoff: a session just launched
+// (Launch/Resume writes its store row, THEN creates the tmux session — or the
+// reverse, depending on the caller) can otherwise be observed by a poll that
+// races the tmux session's own creation and get retired as an orphan before
+// it's ever seen alive. Callers should pass something like now-5s so only
+// rows old enough to have had a fair chance to appear in tmux are eligible.
+func (s *Store) MarkLiveOrphansEnded(liveTmuxNames []string, graceUnix, endedAt int64) error {
 	placeholders := make([]string, len(liveTmuxNames))
-	args := []any{endedAt}
+	args := []any{endedAt, graceUnix}
 	for i, n := range liveTmuxNames {
 		placeholders[i] = "?"
 		args = append(args, n)
 	}
-	q := "UPDATE sessions SET last_status='done', exit_code=-1, ended_at=? WHERE last_status IN " + liveSet
+	q := "UPDATE sessions SET last_status='done', exit_code=-1, ended_at=? WHERE last_status IN " + liveSet +
+		" AND created_at < ?"
 	if len(liveTmuxNames) > 0 {
 		q += " AND name NOT IN (" + strings.Join(placeholders, ",") + ")"
 	}
@@ -168,7 +190,7 @@ func (s *Store) query(q string, args ...any) ([]SessionRow, error) {
 		var r SessionRow
 		if err := rows.Scan(&r.Name, &r.ClaudeSessionID, &r.ProjectLabel, &r.Cwd,
 			&r.Model, &r.Mode, &r.Seed, &r.Tags, &r.CreatedAt, &r.EndedAt,
-			&r.ExitCode, &r.LastStatus); err != nil {
+			&r.ExitCode, &r.LastStatus, &r.SeedStatus); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -182,6 +204,6 @@ func scanOne(row rowScanner) (SessionRow, error) {
 	var r SessionRow
 	err := row.Scan(&r.Name, &r.ClaudeSessionID, &r.ProjectLabel, &r.Cwd,
 		&r.Model, &r.Mode, &r.Seed, &r.Tags, &r.CreatedAt, &r.EndedAt,
-		&r.ExitCode, &r.LastStatus)
+		&r.ExitCode, &r.LastStatus, &r.SeedStatus)
 	return r, err
 }

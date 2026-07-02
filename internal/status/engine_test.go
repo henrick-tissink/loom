@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -170,5 +171,72 @@ func TestPollAdoptsOrphanAndRetiresVanished(t *testing.T) {
 	gone, _, _ := st.Get("loom-gone")
 	if gone.LastStatus != "done" {
 		t.Fatalf("vanished row not retired: %+v", gone)
+	}
+}
+
+// TestPollResurrectsTerminalRowWithLiveTmux guards finding 2b: a
+// launch-vs-reconcile race can leave a store row stuck in a terminal status
+// (done/error) while its tmux session is, in fact, still alive. tmux is the
+// source of truth for liveness (spec §6) — Poll must flip such a row back to
+// 'unknown' so it reappears in Live(), instead of hiding a live session
+// forever behind a stale terminal status.
+func TestPollResurrectsTerminalRowWithLiveTmux(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	id := "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	name := launchFake(t, tm, ccd, cwd, id) // real tmux session, alive
+	st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id, ProjectLabel: "p",
+		Cwd: cwd, CreatedAt: 1, EndedAt: 5, ExitCode: 0, LastStatus: "done"}) // but store says terminal
+
+	e := NewEngine(tm, st, ccd)
+	snap, err := e.Poll(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range snap.Live {
+		if r.Name == name {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("terminal row with a live tmux session was not resurrected into Live: %+v", snap.Live)
+	}
+}
+
+// TestPollConcurrentSafe guards finding 1: Engine.Poll must be safe to call
+// concurrently (defense in depth — the UI's real fix is to never launch two
+// overlapping poll loops, but the engine itself must not crash if it
+// happens). Run under `go test -race`: before the finding-1 fix, concurrent
+// Polls raced on e.readers (a plain map) and `go test -race` catches it
+// even when it doesn't happen to panic outright.
+func TestPollConcurrentSafe(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	id := "ffffffff-ffff-ffff-ffff-ffffffffffff"
+	name := launchFake(t, tm, ccd, cwd, id)
+	st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id, ProjectLabel: "p",
+		Cwd: cwd, CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "unknown"})
+
+	e := NewEngine(tm, st, ccd)
+	const goroutines = 8
+	const pollsEach = 5
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines*pollsEach)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < pollsEach; j++ {
+				if _, err := e.Poll(time.Now().Add(time.Hour)); err != nil {
+					errs <- err
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent Poll error: %v", err)
 	}
 }

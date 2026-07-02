@@ -13,10 +13,16 @@ import (
 // build — the spike found the ready state is a bare "❯" input prompt glyph
 // (pre-mount, before claude's TUI renders, there is no "❯" at all, so its
 // appearance is a safe mount signal even though it also persists through
-// busy/generating states). DefaultTrustMarker could not be triggered in the
-// spike's environment (trust is inherited from an already-trusted ancestor
-// directory) and remains a defensive, unverified candidate — safe by
-// construction because the seed only ever fires once ReadyMarker is seen.
+// busy/generating states). Critically, "❯" is NOT unique to the ready
+// prompt: the trust dialog's own "❯ 1. Yes, proceed" select-cursor line also
+// contains it. That means ReadyMarker is NOT safe by construction on its
+// own — waitReady MUST test TrustMarker before ReadyMarker on every poll
+// iteration (see below), or a still-open trust dialog gets misread as ready
+// and the seed fires into it, mashing "1" or worse into the trust prompt.
+// DefaultTrustMarker could not be triggered in the spike's environment
+// (trust is inherited from an already-trusted ancestor directory) and
+// remains a defensive, unverified candidate; ordering it first is still the
+// safe choice even though it wasn't observed live.
 const (
 	DefaultReadyMarker = "❯"
 	DefaultTrustMarker = "Do you trust the files in this folder?"
@@ -96,12 +102,16 @@ func (l *Launcher) waitReady(name string) bool {
 		if err != nil {
 			return false // session gone
 		}
-		if strings.Contains(out, l.ReadyMarker) {
-			return true
-		}
+		// TrustMarker must be checked BEFORE ReadyMarker: the trust dialog's
+		// "❯ 1. Yes, proceed" cursor line contains the ReadyMarker glyph too,
+		// so testing ReadyMarker first could fire the seed into an unanswered
+		// trust prompt (finding 3).
 		if strings.Contains(out, l.TrustMarker) {
 			time.Sleep(poll)
 			continue // trust pending: clock paused
+		}
+		if strings.Contains(out, l.ReadyMarker) {
+			return true
 		}
 		time.Sleep(poll)
 		waited += poll
@@ -109,12 +119,22 @@ func (l *Launcher) waitReady(name string) bool {
 	return false
 }
 
+// seedWhenReady is best-effort about the SESSION (never fatal to it), but the
+// seed's own outcome must not be silently dropped (finding 4): the store
+// records 'sent' or 'failed' so the UI can surface a missed seed instead of
+// it vanishing without a trace.
 func (l *Launcher) seedWhenReady(name, seed string) {
 	if !l.waitReady(name) {
-		return // best-effort: session unharmed, seed skipped
-	}
-	if err := l.Tmux.SendLiteral(name, seed); err != nil {
+		_ = l.Store.SetSeedStatus(name, "failed") // timed out or session gone
 		return
 	}
-	_ = l.Tmux.SendEnter(name)
+	if err := l.Tmux.SendLiteral(name, seed); err != nil {
+		_ = l.Store.SetSeedStatus(name, "failed")
+		return
+	}
+	if err := l.Tmux.SendEnter(name); err != nil {
+		_ = l.Store.SetSeedStatus(name, "failed")
+		return
+	}
+	_ = l.Store.SetSeedStatus(name, "sent")
 }
