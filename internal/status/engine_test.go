@@ -207,9 +207,16 @@ func TestPollResurrectsTerminalRowWithLiveTmux(t *testing.T) {
 // TestPollConcurrentSafe guards finding 1: Engine.Poll must be safe to call
 // concurrently (defense in depth — the UI's real fix is to never launch two
 // overlapping poll loops, but the engine itself must not crash if it
-// happens). Run under `go test -race`: before the finding-1 fix, concurrent
-// Polls raced on e.readers (a plain map) and `go test -race` catches it
-// even when it doesn't happen to panic outright.
+// happens).
+//
+// `go test -race` alone does NOT give this test teeth: the store sits behind
+// a single SQLite connection, and that connection's own internal
+// serialization masks a deleted mu.Lock/Unlock in Poll — concurrent Polls
+// still don't produce a detectable data race or crash on e.readers in
+// practice, so the regression can slip through with -race clean. Instead,
+// this test asserts mutual exclusion directly via Engine's test-only
+// pollDepth/maxPollDepth atomic gauges (see engine.go): if two Polls ever
+// run their critical sections concurrently, maxPollDepth will be >1.
 func TestPollConcurrentSafe(t *testing.T) {
 	tm, st, ccd := testEnv(t)
 	cwd := t.TempDir()
@@ -238,5 +245,9 @@ func TestPollConcurrentSafe(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Errorf("concurrent Poll error: %v", err)
+	}
+
+	if max := e.maxPollDepth.Load(); max != 1 {
+		t.Fatalf("maxPollDepth = %d, want 1 (concurrent Poll critical sections overlapped — finding 1 regression)", max)
 	}
 }

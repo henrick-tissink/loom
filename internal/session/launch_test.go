@@ -15,10 +15,35 @@ import (
 // proceed" select-cursor line that ALSO contains the bare ReadyMarker glyph
 // (finding 3 regression bait) — then clears and prints the real ready
 // marker, then cats input to a sink file for assertion.
+//
+// During the 1s dialog phase, stdin is ALSO consumed (into a second,
+// dialog-sink file, $2) by a backgrounded `cat` that is killed the instant
+// the dialog phase ends. This gives the trust-ordering regression real
+// teeth: previously a seed sent during the (buggy) ready-first dialog phase
+// just sat buffered in the pty until the final `exec cat > "$1"` started, so
+// every assertion passed even against the old, unfixed ordering. Now, if the
+// seed is sent while the dialog is still showing, those bytes are consumed
+// by the dialog-phase cat and permanently lost from $2 (macOS lacks a
+// `timeout` binary, hence the manual background-cat + sleep + kill instead
+// of `timeout 1 cat`) — so the dialog-sink file must be empty at the end.
+//
+// `exec 3<&0` before backgrounding is required: POSIX shells default an
+// asynchronous (`&`) command's stdin to /dev/null unless the command
+// explicitly redirects it, so a bare `(cat > "$2") &` silently reads
+// /dev/null instead of the pty and never captures anything — confirmed by
+// direct tmux experiments while building this test. Duplicating stdin onto
+// fd 3 first and having the background cat read `<&3` counts as an
+// explicit redirection, so it keeps the pty attachment.
 const fakeClaudeScript = `#!/bin/sh
 echo "Do you trust the files in this folder?"
 echo "❯ 1. Yes, proceed"
+exec 3<&0
+cat <&3 > "$2" &
+dialogcat=$!
 sleep 1
+kill "$dialogcat" 2>/dev/null
+wait "$dialogcat" 2>/dev/null
+exec 3<&-
 clear 2>/dev/null || printf '\033[2J'
 echo "❯"
 exec cat > "$1"
@@ -77,13 +102,14 @@ func TestLaunchCreatesSessionAndRow(t *testing.T) {
 func TestSeedWaitsForTrustThenReady(t *testing.T) {
 	l, dir := testLauncher(t)
 	sink := filepath.Join(dir, "sink.txt")
+	dialogSink := filepath.Join(dir, "dialog-sink.txt")
 	script := filepath.Join(dir, "fake-claude.sh")
 	os.WriteFile(script, []byte(fakeClaudeScript), 0o755)
 
 	// launch manually with the fake command, then drive seedWhenReady directly
 	id := NewSessionID()
 	name := TmuxName(id)
-	if err := l.Tmux.NewSession(name, dir, "'"+script+"' '"+sink+"'", 80, 24); err != nil {
+	if err := l.Tmux.NewSession(name, dir, "'"+script+"' '"+sink+"' '"+dialogSink+"'", 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	// a store row is required for SetSeedStatus (finding 4) to have somewhere
@@ -130,6 +156,21 @@ func TestSeedWaitsForTrustThenReady(t *testing.T) {
 	}
 	if row.SeedStatus != "sent" {
 		t.Fatalf("SeedStatus = %q, want sent", row.SeedStatus)
+	}
+
+	// The real regression teeth: if the seed had been sent during the
+	// dialog phase (old, buggy ready-first ordering), those bytes would
+	// have been consumed by the dialog-phase's backgrounded `cat` into
+	// dialog-sink before it was killed, and would never reach $1. With the
+	// correct trust-first ordering the seed is only ever sent after the
+	// dialog phase's cat has already been killed, so dialog-sink must be
+	// empty.
+	db, err := os.ReadFile(dialogSink)
+	if err != nil {
+		t.Fatalf("reading dialog-sink: %v", err)
+	}
+	if len(db) != 0 {
+		t.Fatalf("seed leaked into dialog-phase sink (finding 3 regression): dialog-sink = %q", db)
 	}
 }
 

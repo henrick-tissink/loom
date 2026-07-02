@@ -3,6 +3,7 @@ package status
 import (
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/henricktissink/loom/internal/session"
@@ -44,6 +45,17 @@ type Engine struct {
 	// concurrent-Poll bug a serialization delay instead of a `fatal error:
 	// concurrent map writes` crash on e.readers.
 	mu sync.Mutex
+
+	// pollDepth/maxPollDepth are test-only instrumentation (no behavioral
+	// effect): pollDepth tracks how many goroutines are currently inside the
+	// mu-guarded critical section of Poll, and maxPollDepth records the
+	// high-water mark. TestPollConcurrentSafe asserts maxPollDepth stays at
+	// 1 for the whole concurrent run — `go test -race` alone doesn't catch a
+	// deleted mu.Lock/Unlock here because the store's single SQLite
+	// connection already serializes most of the interesting access,
+	// masking the race. This gauge asserts mutual exclusion directly.
+	pollDepth    atomic.Int32
+	maxPollDepth atomic.Int32
 }
 
 func NewEngine(tm *tmux.Client, st *store.Store, claudeConfigDir string) *Engine {
@@ -54,6 +66,17 @@ func NewEngine(tm *tmux.Client, st *store.Store, claudeConfigDir string) *Engine
 func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	// test-only depth gauge (see field docs above): records how many
+	// goroutines are concurrently inside this critical section.
+	d := e.pollDepth.Add(1)
+	defer e.pollDepth.Add(-1)
+	for {
+		cur := e.maxPollDepth.Load()
+		if d <= cur || e.maxPollDepth.CompareAndSwap(cur, d) {
+			break
+		}
+	}
 
 	sessions, err := e.tm.ListSessions()
 	if err != nil {
