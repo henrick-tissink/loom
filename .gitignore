@@ -1,4 +1,4 @@
-loom
+/loom
 *.db
 *.db-wal
 *.db-shm
