@@ -36,8 +36,8 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-func (c *Config) DBPath() string          { return filepath.Join(c.LoomDir, "loom.db") }
-func (c *Config) ClaudeJSONPath() string  { return filepath.Join(c.Home, ".claude.json") }
+func (c *Config) DBPath() string         { return filepath.Join(c.LoomDir, "loom.db") }
+func (c *Config) ClaudeJSONPath() string { return filepath.Join(c.Home, ".claude.json") }
 
 // CheckBinaries verifies tmux and claude are on PATH.
 func CheckBinaries() error {
