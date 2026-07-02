@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -299,5 +300,39 @@ func TestLaunchAndResumeCmdsEmitPollNowNotTick(t *testing.T) {
 	}
 	if _, ok := msg.(pollNowMsg); !ok {
 		t.Fatalf("resume command returned %T, want pollNowMsg (NOT tickMsg — finding 1)", msg)
+	}
+}
+
+func TestViewFrameInvariantAllViews(t *testing.T) {
+	a := fixtureApp()
+	views := []func(){
+		func() {},                     // dashboard
+		func() { a.Update(key("n")) }, // launcher
+		func() { a.Update(tea.KeyMsg{Type: tea.KeyEsc}); a.Update(key("x")) },                     // confirm
+		func() { a.Update(key("n")); a.Update(tea.KeyMsg{Type: tea.KeyEsc}); a.Update(key("t")) }, // tag
+	}
+	for i, setup := range views {
+		setup()
+		for j, line := range strings.Split(a.View(), "\n") {
+			if lw := lipgloss.Width(line); lw != a.width {
+				t.Fatalf("view %d line %d: %d cells (want %d): %q", i, j, lw, a.width, line)
+			}
+		}
+	}
+}
+
+func TestViewNarrowNoPanic(t *testing.T) {
+	a := fixtureApp()
+	a.width, a.height = 40, 12
+	_ = a.View() // must not panic; invariant checked by frame tests
+}
+
+func TestRowShowsAge(t *testing.T) {
+	a := fixtureApp()
+	a.now = time.Unix(2000, 0)
+	a.snap.Live[1].Activity = 2000 - 120 // parallax row: 2m ago
+	a.rebuildRows()
+	if !strings.Contains(a.View(), "2m") {
+		t.Fatal("age column missing")
 	}
 }

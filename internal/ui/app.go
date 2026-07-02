@@ -2,10 +2,12 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -40,6 +42,7 @@ type uiRow struct {
 	lastTool string
 	model    string
 	mode     string
+	activity int64
 	recent   bool
 	row      store.SessionRow
 }
@@ -55,6 +58,7 @@ type App struct {
 	errStr string
 	width  int
 	height int
+	now    time.Time
 
 	// actionTarget is the row captured at the moment viewConfirmKill/viewTag
 	// is opened. Rows reorder under the cursor every poll (1.5s) as statuses
@@ -103,7 +107,7 @@ func (a *App) rebuildRows() {
 	var needs, running, idle, recent []uiRow
 	for _, r := range a.snap.Live {
 		u := uiRow{name: r.Name, label: r.ProjectLabel, status: string(r.Status),
-			lastTool: r.LastTool, model: r.Model, mode: r.Mode, row: r.SessionRow}
+			lastTool: r.LastTool, model: r.Model, mode: r.Mode, activity: r.Activity, row: r.SessionRow}
 		switch r.Status {
 		case status.NeedsYou:
 			needs = append(needs, u)
@@ -146,6 +150,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snapMsg:
 		a.snap = status.Snapshot(m)
 		a.errStr = ""
+		a.now = time.Now()
 		a.rebuildRows()
 		return a, nil
 	case errMsg:
@@ -281,18 +286,25 @@ func (a *App) selected() (uiRow, bool) {
 }
 
 func (a *App) View() string {
+	w := a.width
+	if w == 0 {
+		w = 80
+	}
 	switch a.view {
 	case viewLauncher:
-		return a.form.view()
+		return frame(w, "new session", "", strings.Split(a.form.view(), "\n"),
+			"tab field · ←/→ value · ↵ launch · esc cancel")
 	case viewConfirmKill:
 		r := a.actionTarget
-		return fmt.Sprintf("kill %s (%s)? %s",
-			r.label, r.name, styHelp.Render("y/n"))
+		return frame(w, "kill session", "",
+			[]string{"", "  kill " + styNeedsYou.Render(r.label) + styMeta.Render(" ("+r.name+")") + " ?", ""},
+			"y confirm · n/esc cancel")
 	case viewTag:
-		return styTitle.Render("tags") + "\n\n" + a.tag.View() + "\n\n" +
-			styHelp.Render("enter save · esc cancel")
+		return frame(w, "tags", "", []string{"", "  " + a.tag.View(), ""},
+			"↵ save · esc cancel")
 	}
 
+	inner := w - 4
 	live, needs := 0, 0
 	for _, r := range a.snap.Live {
 		live++
@@ -300,43 +312,125 @@ func (a *App) View() string {
 			needs++
 		}
 	}
-	out := styTitle.Render("LOOM") +
-		styMeta.Render(fmt.Sprintf("   %d live · %d needs you", live, needs)) + "\n\n"
 
+	var body []string
+	body = append(body, "")
 	section := ""
 	for i, r := range a.rows {
-		sec := sectionFor(r)
-		if sec != section {
+		if sec := sectionFor(r); sec != section {
+			if section != "" {
+				body = append(body, "")
+			}
 			section = sec
-			out += stySection.Render(section) + "\n"
+			body = append(body, sectionRule(sec, inner, sec == "NEEDS YOU"))
 		}
-		cursor := "  "
-		if i == a.cursor {
-			cursor = styCursor.Render("▸ ")
-		}
-		hint := r.lastTool
-		if hint != "" {
-			hint = "⏺ " + hint
-		}
-		meta := trimMeta(r.model, r.mode)
-		if r.row.SeedStatus == "failed" {
-			meta += " · seed failed"
-		}
-		out += fmt.Sprintf("%s%s %-14s %-18s %s\n",
-			cursor, statusIcon(r.status), r.label, hint,
-			styMeta.Render(meta))
+		body = append(body, a.renderRow(i, r, inner))
 	}
 	if len(a.rows) == 0 {
-		out += styHelp.Render("no sessions — press n to launch one") + "\n"
+		pad := (inner - lipgloss.Width("no sessions — press n to launch one")) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		body = append(body, "", strings.Repeat(" ", pad)+styHelp.Render("no sessions — press n to launch one"), "")
 	}
 	if a.errStr != "" {
-		out += "\n" + styErr.Render("! "+a.errStr) + "\n"
+		body = append(body, "", styErr.Render(truncPlain("! "+a.errStr, inner)))
 	}
 	if a.deps.InsideTmux {
-		out += styHelp.Render("(running inside tmux — attach opens a nested client; F12 detaches)") + "\n"
+		body = append(body, styHelp.Render(truncPlain("(inside tmux — attach nests; F12 detaches)", inner)))
 	}
-	out += "\n" + styHelp.Render("[↵]attach [n]ew [x]kill [t]ag [r]eopen [q]uit  ·  [/]search·soon [w]orkflows·soon")
-	return out
+
+	counts := fmt.Sprintf("%d live · %d needs you", live, needs)
+	keybar := "↵ attach · n new · x kill · t tag · r reopen · q quit"
+	if inner > lipgloss.Width(keybar)+24 {
+		keybar += " · / search·soon · w workflows·soon"
+	}
+	return frame(w, "LOOM", counts, body, keybar)
+}
+
+func sectionRule(label string, inner int, alert bool) string {
+	sty := styChrome
+	if alert {
+		sty = styNeedsYou
+	}
+	fill := inner - len([]rune(label)) - 1
+	if fill < 0 {
+		fill = 0
+	}
+	return sty.Bold(true).Render(label) + " " + styChrome.Render(strings.Repeat("─", fill))
+}
+
+// renderRow: cursor(2) icon(1)+1 project(12)+1 activity(flex)+1 model·mode(13)+1 age(4)
+func (a *App) renderRow(i int, r uiRow, inner int) string {
+	actW := inner - 36
+	cursor := "  "
+	if i == a.cursor {
+		cursor = styCursor.Render("▸ ")
+	}
+	proj := padPlain(truncPlain(r.label, 12), 12)
+	act := padPlain(truncPlain(activityText(r), actW), actW)
+	meta := padPlain(truncPlain(metaText(r.model, r.mode), 13), 13)
+	age := padPlain(humanAge(a.now, ageOf(r)), 4)
+	if actW <= 0 { // ultra-narrow: drop the activity column entirely
+		return cursor + statusIcon(r.status) + " " + styNeedsYouIf(r, proj)
+	}
+	return cursor + statusIcon(r.status) + " " + styNeedsYouIf(r, proj) + " " +
+		styMeta.Render(act) + " " + styMeta.Render(meta) + " " + styMeta.Render(age)
+}
+
+// styNeedsYouIf highlights the project name on attention rows.
+func styNeedsYouIf(r uiRow, s string) string {
+	if r.status == "needs_you" {
+		return styNeedsYou.Bold(true).Render(s)
+	}
+	return s
+}
+
+func activityText(r uiRow) string {
+	if r.recent {
+		switch {
+		case r.status == "error":
+			return fmt.Sprintf("error · exit %d", r.row.ExitCode)
+		case r.row.ExitCode == 0:
+			return "done"
+		default:
+			return "ended"
+		}
+	}
+	hint := ""
+	switch r.status {
+	case "running":
+		if r.lastTool != "" {
+			hint = "⏺ " + r.lastTool
+		} else {
+			hint = "working"
+		}
+	case "needs_you":
+		hint = "reply ready"
+	default:
+		hint = "your turn"
+	}
+	if r.row.SeedStatus == "failed" {
+		hint += " · seed failed"
+	}
+	return hint
+}
+
+func ageOf(r uiRow) int64 {
+	if r.recent {
+		return r.row.EndedAt
+	}
+	return r.activity
+}
+
+func metaText(model, mode string) string {
+	if model == "" {
+		model = "default"
+	}
+	if mode == "" {
+		mode = "normal"
+	}
+	return model + "·" + mode
 }
 
 func sectionFor(r uiRow) string {
@@ -351,14 +445,4 @@ func sectionFor(r uiRow) string {
 	default:
 		return "IDLE"
 	}
-}
-
-func trimMeta(model, mode string) string {
-	if model == "" {
-		model = "default"
-	}
-	if mode == "" {
-		mode = "normal"
-	}
-	return model + " · " + mode
 }
