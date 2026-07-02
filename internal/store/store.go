@@ -149,7 +149,7 @@ func (s *Store) MarkLiveOrphansEnded(liveTmuxNames []string, endedAt int64) erro
 		placeholders[i] = "?"
 		args = append(args, n)
 	}
-	q := "UPDATE sessions SET last_status='done', ended_at=? WHERE last_status IN " + liveSet
+	q := "UPDATE sessions SET last_status='done', exit_code=-1, ended_at=? WHERE last_status IN " + liveSet
 	if len(liveTmuxNames) > 0 {
 		q += " AND name NOT IN (" + strings.Join(placeholders, ",") + ")"
 	}

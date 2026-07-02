@@ -78,6 +78,11 @@ func TestMarkLiveOrphansEnded(t *testing.T) {
 	s.Upsert(SessionRow{Name: "loom-ccc", ClaudeSessionID: "ccc", ProjectLabel: "x",
 		Cwd: "/x", CreatedAt: 1, EndedAt: 400, ExitCode: 0, LastStatus: "done"}) // history
 
+	// Mutate orphan exit_code away from -1 to test that UPDATE enforces the contract
+	orphan := row("loom-bbb")
+	orphan.ExitCode = 7
+	s.Upsert(orphan)
+
 	if err := s.MarkLiveOrphansEnded([]string{"loom-aaa"}, 3000); err != nil {
 		t.Fatal(err)
 	}
