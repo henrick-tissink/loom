@@ -16,9 +16,18 @@ func New() *Client { return &Client{Socket: "loom"} }
 // target returns the exact-match -t form (tmux prefix-matches bare names).
 func target(name string) string { return "=" + name }
 
-// paneTarget returns the exact-match pane target for session commands that require
-// a full pane specification (e.g., send-keys, capture-pane). Uses the first pane (0.0).
-func paneTarget(name string) string { return "=" + name + ":0.0" }
+// paneTarget returns the exact-match target for session commands that require a
+// pane specification (e.g., send-keys, capture-pane, list-panes). The trailing
+// colon leaves the window/pane unspecified so tmux resolves the session's
+// active window/pane, which is correct regardless of a user's base-index /
+// pane-base-index settings (a hardcoded ":0.0" breaks when those are non-zero).
+func paneTarget(name string) string { return "=" + name + ":" }
+
+// isNoServerErr reports whether out (from a failed tmux invocation) indicates
+// there is simply no server/session yet, as opposed to a real error.
+func isNoServerErr(out string) bool {
+	return strings.Contains(out, "no server running") || strings.Contains(out, "error connecting")
+}
 
 func (c *Client) run(args ...string) (string, error) {
 	full := append([]string{"-L", c.Socket}, args...)
@@ -27,41 +36,38 @@ func (c *Client) run(args ...string) (string, error) {
 }
 
 // EnsureServer starts the loom server (idempotent) and applies global options:
+// exit-empty off → the server survives with zero sessions instead of exiting
+// the instant the last session closes (tmux's default), so callers can rely
+// on a long-lived server without a phantom keep-alive session;
 // remain-on-exit → dead panes keep exit codes for Done/Error classification (spec §6);
 // status off → native-claude fidelity (spec §3.4); F12 detaches without a prefix.
+//
+// start-server and the option calls are issued as a single tmux invocation
+// (commands joined with ";") rather than separate exec.Command calls. tmux's
+// default exit-empty is "on", so a freshly started server with zero sessions
+// exits immediately once its client detaches; a second, separate process
+// connecting afterward to flip exit-empty off loses that race almost every
+// time. Chaining the commands means one client connection issues them all
+// against the server it just started, before that server ever has a chance
+// to see zero sessions/clients and exit.
 func (c *Client) EnsureServer() error {
-	// On macOS, start-server alone doesn't create a persistent background server.
-	// We check if the server is already running (by listing sessions) and only create
-	// a temporary session if needed. This makes EnsureServer truly idempotent.
-	tempName := fmt.Sprintf("loom-ensure-%d", os.Getpid())
-	serverRunning := false
-
-	// Check if the server is already running by trying to list sessions.
-	if out, err := c.run("list-sessions"); err == nil {
-		serverRunning = true
-	} else if !strings.Contains(out, "no server running") && !strings.Contains(out, "error connecting") {
-		// Some other error occurred (not "server not running" or "connection error").
-		return fmt.Errorf("tmux list-sessions: %s: %w", strings.TrimSpace(out), err)
-	}
-
-	// If server is not running, create a temporary session to start it.
-	// It must stay alive while we set options, so we use 'sleep 86400' (24h).
-	// The session is left running; callers will kill the server via KillServer().
-	if !serverRunning {
-		_, _ = c.run("new-session", "-d", "-s", tempName, "-c", os.TempDir(), "sleep", "86400")
-	}
-
+	args := []string{"start-server", ";"}
 	opts := [][]string{
+		{"set-option", "-g", "exit-empty", "off"},
 		{"set-option", "-g", "remain-on-exit", "on"},
 		{"set-option", "-g", "status", "off"},
 		{"set-option", "-g", "history-limit", "50000"},
 		{"set-option", "-g", "window-size", "latest"},
 		{"bind-key", "-n", "F12", "detach-client"},
 	}
-	for _, o := range opts {
-		if out, err := c.run(o...); err != nil {
-			return fmt.Errorf("tmux %v: %s: %w", o, strings.TrimSpace(out), err)
+	for i, o := range opts {
+		args = append(args, o...)
+		if i != len(opts)-1 {
+			args = append(args, ";")
 		}
+	}
+	if out, err := c.run(args...); err != nil {
+		return fmt.Errorf("tmux %v: %s: %w", args, strings.TrimSpace(out), err)
 	}
 	return nil
 }
@@ -84,7 +90,7 @@ func (c *Client) ListSessions() ([]Session, error) {
 	out, err := c.run("list-sessions", "-F", "#{session_name}\t#{session_activity}")
 	if err != nil {
 		// "no server running" / "error connecting" == zero sessions, not an error
-		if strings.Contains(out, "no server running") || strings.Contains(out, "error connecting") {
+		if isNoServerErr(out) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("tmux list-sessions: %s: %w", strings.TrimSpace(out), err)
@@ -96,10 +102,6 @@ func (c *Client) ListSessions() ([]Session, error) {
 		}
 		parts := strings.SplitN(line, "\t", 2)
 		name := parts[0]
-		// Skip internal temporary sessions created by EnsureServer.
-		if strings.HasPrefix(name, "loom-ensure-") {
-			continue
-		}
 		s := Session{Name: name}
 		if len(parts) == 2 {
 			s.Activity, _ = strconv.ParseInt(parts[1], 10, 64)
@@ -116,7 +118,7 @@ type PaneStatus struct {
 }
 
 func (c *Client) PaneStatus(name string) (PaneStatus, error) {
-	out, err := c.run("list-panes", "-t", target(name), "-F",
+	out, err := c.run("list-panes", "-t", paneTarget(name), "-F",
 		"#{pane_dead}\t#{pane_dead_status}\t#{pane_current_path}")
 	if err != nil {
 		return PaneStatus{}, fmt.Errorf("tmux list-panes %s: %s: %w", name, strings.TrimSpace(out), err)
