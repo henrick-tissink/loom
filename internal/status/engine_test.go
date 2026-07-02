@@ -71,6 +71,9 @@ func TestPollLiveNeedsYou(t *testing.T) {
 	if snap.Live[0].Status != NeedsYou {
 		t.Fatalf("Status = %v, want NeedsYou", snap.Live[0].Status)
 	}
+	if snap.Live[0].Activity <= 0 {
+		t.Fatalf("Activity not threaded: %d", snap.Live[0].Activity)
+	}
 }
 
 func TestPollDeadPaneClassifiesAndReaps(t *testing.T) {

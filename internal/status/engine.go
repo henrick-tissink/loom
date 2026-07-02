@@ -24,6 +24,7 @@ type Row struct {
 	store.SessionRow
 	Status   Status
 	LastTool string
+	Activity int64 // unix seconds of last tmux session activity; 0 = unknown
 }
 
 type Snapshot struct {
@@ -158,7 +159,7 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 			_ = e.st.SetStatus(r.Name, string(st))
 			r.LastStatus = string(st)
 		}
-		live = append(live, Row{SessionRow: r, Status: st, LastTool: tool})
+		live = append(live, Row{SessionRow: r, Status: st, LastTool: tool, Activity: activity[r.Name]})
 	}
 
 	recent, err := e.st.Recent(10)
