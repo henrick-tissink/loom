@@ -303,6 +303,33 @@ func TestLaunchAndResumeCmdsEmitPollNowNotTick(t *testing.T) {
 	}
 }
 
+// TestViewWideRuneProjectLabelNoPanic is the end-to-end regression test for
+// the MAJOR wide-rune finding: renderRow truncates/pads the project column
+// by RUNE count (truncPlain/padPlain), so a CJK ProjectLabel can come out
+// wider in CELLS than the column's budget without being clipped at all,
+// pushing the whole row past `inner` and hitting frame()'s (now-fixed)
+// hard-clip path. View() must never panic and every line must stay exactly
+// a.width cells.
+//
+// Note: at width 40, renderRow's actW (inner-36) is <=0, so rows take the
+// short "no activity/meta/age columns" branch and the overflow this finding
+// describes doesn't reach frame() at that width — the row is short enough
+// regardless of the label. Width 80 (inner=76, actW=40) is the narrowest
+// width where the row is built with all columns and reliably reproduces the
+// pre-fix panic, so that's what this test uses.
+func TestViewWideRuneProjectLabelNoPanic(t *testing.T) {
+	a := fixtureApp()
+	a.width, a.height = 80, 24
+	a.snap.Live[0].ProjectLabel = strings.Repeat("漢", 12)
+	a.rebuildRows()
+	out := a.View()
+	for i, line := range strings.Split(out, "\n") {
+		if lw := lipgloss.Width(line); lw != a.width {
+			t.Errorf("wide-rune project label line %d: got %d cells, want %d: %q", i, lw, a.width, line)
+		}
+	}
+}
+
 func TestViewFrameInvariantAllViews(t *testing.T) {
 	a := fixtureApp()
 	views := []func(){

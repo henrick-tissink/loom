@@ -113,10 +113,12 @@ func (f *launcherForm) view() string {
 	if f.focus == 3 {
 		seedMarker = styCursor.Render("▸ ")
 	}
-	return styTitle.Render("new session") + "\n\n" +
-		sel(0, "project", proj) + "\n" +
+	// The title and a help footer are NOT rendered here: View() wraps this
+	// form in frame(), which already supplies both (frame title + keybar).
+	// Emitting them here too produced a duplicated title and a keybar that
+	// could drift from the frame's (finding: launcher double-title/hints).
+	return sel(0, "project", proj) + "\n" +
 		sel(1, "model", optLabel(modelOptions[f.modelIdx])) + "\n" +
 		sel(2, "mode", optLabel(modeOptions[f.modeIdx])) + "\n" +
-		seedMarker + "seed      " + f.seed.View() + "\n\n" +
-		styHelp.Render("tab/↑↓ field · ←/→ value · enter launch · esc cancel")
+		seedMarker + "seed      " + f.seed.View()
 }

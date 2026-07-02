@@ -293,7 +293,7 @@ func (a *App) View() string {
 	switch a.view {
 	case viewLauncher:
 		return frame(w, "new session", "", strings.Split(a.form.view(), "\n"),
-			"tab field · ←/→ value · ↵ launch · esc cancel")
+			"tab/↑↓ field · ←/→ value · ↵ launch · esc cancel")
 	case viewConfirmKill:
 		r := a.actionTarget
 		return frame(w, "kill session", "",
@@ -366,6 +366,10 @@ func sectionRule(label string, inner int, alert bool) string {
 	return sty.Bold(true).Render(label) + " " + styChrome.Render(strings.Repeat("─", fill))
 }
 
+// seedFailedSuffix is appended (dim/chrome, not meta) to the activity cell
+// when a session's seed prompt failed to deliver — see renderRow.
+const seedFailedSuffix = " · seed failed"
+
 // renderRow: cursor(2) icon(1)+1 project(12)+1 activity(flex)+1 model·mode(13)+1 age(4)
 func (a *App) renderRow(i int, r uiRow, inner int) string {
 	actW := inner - 36
@@ -374,14 +378,37 @@ func (a *App) renderRow(i int, r uiRow, inner int) string {
 		cursor = styCursor.Render("▸ ")
 	}
 	proj := padPlain(truncPlain(r.label, 12), 12)
-	act := padPlain(truncPlain(activityText(r), actW), actW)
 	meta := padPlain(truncPlain(metaText(r.model, r.mode), 13), 13)
 	age := padPlain(humanAge(a.now, ageOf(r)), 4)
 	if actW <= 0 { // ultra-narrow: drop the activity column entirely
 		return cursor + statusIcon(r.status) + " " + styNeedsYouIf(r, proj)
 	}
 	return cursor + statusIcon(r.status) + " " + styNeedsYouIf(r, proj) + " " +
-		styMeta.Render(act) + " " + styMeta.Render(meta) + " " + styMeta.Render(age)
+		a.renderActivityCell(r, actW) + " " + styMeta.Render(meta) + " " + styMeta.Render(age)
+}
+
+// renderActivityCell renders the activity column, exactly actW cells.
+// Per spec the " · seed failed" note is "appended dim" — styled separately
+// from the base activity text (meta) rather than folded into the same
+// style. That means truncating the base text to make room for the suffix
+// BEFORE styling either segment (styled strings must never be re-sliced).
+// If actW is too narrow to fit the suffix at all, this degrades to the
+// simplest correct rendering: the combined text truncated as one dim-meta
+// cell, same as before the suffix existed.
+func (a *App) renderActivityCell(r uiRow, actW int) string {
+	base := activityText(r)
+	suffix := ""
+	if r.row.SeedStatus == "failed" {
+		suffix = seedFailedSuffix
+	}
+	// rune count, not len(suffix): suffix contains "·" (U+00B7), which is
+	// 2 bytes in UTF-8 — len() would overcount its width by one.
+	suffixW := len([]rune(suffix))
+	if suffix == "" || actW <= suffixW {
+		return styMeta.Render(padPlain(truncPlain(base+suffix, actW), actW))
+	}
+	baseW := actW - suffixW
+	return styMeta.Render(padPlain(truncPlain(base, baseW), baseW)) + styChrome.Render(suffix)
 }
 
 // styNeedsYouIf highlights the project name on attention rows.
@@ -403,23 +430,19 @@ func activityText(r uiRow) string {
 			return "ended"
 		}
 	}
-	hint := ""
+	// Note: the seed-failed suffix is NOT appended here — renderActivityCell
+	// appends and styles it as its own dim segment (see there).
 	switch r.status {
 	case "running":
 		if r.lastTool != "" {
-			hint = "⏺ " + r.lastTool
-		} else {
-			hint = "working"
+			return "⏺ " + r.lastTool
 		}
+		return "working"
 	case "needs_you":
-		hint = "reply ready"
+		return "reply ready"
 	default:
-		hint = "your turn"
+		return "your turn"
 	}
-	if r.row.SeedStatus == "failed" {
-		hint += " · seed failed"
-	}
-	return hint
 }
 
 func ageOf(r uiRow) int64 {

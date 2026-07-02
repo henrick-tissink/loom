@@ -41,6 +41,23 @@ func TestFrameOverlongBodyLineIsHardClipped(t *testing.T) {
 // a keybar wider than the available bottom-edge space must be ellipsized (not
 // overflow the border), and the closing ╯ must still be present at the end
 // of an exactly `width`-cell line.
+// TestFrameWideRuneBodyLineNoPanic is the regression test for the MAJOR
+// finding: truncPlain/padPlain clip by RUNE count, but frame pads by CELLS
+// (lipgloss.Width). A body line of wide runes (CJK/emoji, 2 cells each) can
+// have a rune count <= inner yet a cell width > inner, making the
+// defensive hard-clip a no-op and driving strings.Repeat(" ", inner-w)
+// negative — a panic. Every line must come out exactly `width` cells with
+// no panic.
+func TestFrameWideRuneBodyLineNoPanic(t *testing.T) {
+	long := strings.Repeat("漢", 100)
+	out := frame(40, "T", "", []string{long}, "")
+	for i, line := range strings.Split(out, "\n") {
+		if lw := lipgloss.Width(line); lw != 40 {
+			t.Errorf("wide-rune body line %d: got %d cells, want 40: %q", i, lw, line)
+		}
+	}
+}
+
 func TestFrameLongKeybarIsTruncated(t *testing.T) {
 	keybar := strings.Repeat("k", 60)
 	out := frame(40, "LOOM", "", []string{"body"}, keybar)

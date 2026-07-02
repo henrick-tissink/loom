@@ -26,10 +26,28 @@ func frame(width int, title, right string, body []string, keybar string) string 
 		if w > inner {
 			// Defensive hard clip: builders should pre-fit lines; a styled
 			// overflow is clipped unstyled rather than corrupting the frame.
+			// truncPlain clips by RUNE count, but wide runes (CJK, emoji —
+			// 2 terminal cells each) can leave the result still wider than
+			// `inner` in CELLS: a line whose rune count already equals
+			// `inner` is a truncPlain no-op regardless of its cell width.
+			// Finish the job by dropping trailing runes until it actually
+			// fits by cells too.
 			line = truncPlain(stripAnsi(line), inner)
 			w = lipgloss.Width(line)
+			for w > inner {
+				r := []rune(line)
+				if len(r) == 0 {
+					break
+				}
+				line = string(r[:len(r)-1])
+				w = lipgloss.Width(line)
+			}
 		}
-		b.WriteString(styChrome.Render("│ ") + line + strings.Repeat(" ", inner-w) + styChrome.Render(" │"))
+		pad := inner - w
+		if pad < 0 { // belt-and-suspenders: never hand strings.Repeat a negative count
+			pad = 0
+		}
+		b.WriteString(styChrome.Render("│ ") + line + strings.Repeat(" ", pad) + styChrome.Render(" │"))
 		b.WriteByte('\n')
 	}
 	b.WriteString(frameEdge(width, "╰", "╯", keybar, styHelp, "", styMeta))
