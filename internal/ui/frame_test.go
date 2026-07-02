@@ -36,3 +36,25 @@ func TestFrameOverlongBodyLineIsHardClipped(t *testing.T) {
 		}
 	}
 }
+
+// TestFrameLongKeybarIsTruncated is the reproduction for the Critical finding:
+// a keybar wider than the available bottom-edge space must be ellipsized (not
+// overflow the border), and the closing ╯ must still be present at the end
+// of an exactly `width`-cell line.
+func TestFrameLongKeybarIsTruncated(t *testing.T) {
+	keybar := strings.Repeat("k", 60)
+	out := frame(40, "LOOM", "", []string{"body"}, keybar)
+	lines := strings.Split(out, "\n")
+	bottom := lines[len(lines)-1]
+	if lw := lipgloss.Width(bottom); lw != 40 {
+		t.Fatalf("bottom edge width = %d, want 40: %q", lw, bottom)
+	}
+	if !strings.HasSuffix(stripAnsi(bottom), "╯") {
+		t.Fatalf("bottom edge missing closing ╯: %q", bottom)
+	}
+	for i, line := range lines {
+		if lw := lipgloss.Width(line); lw != 40 {
+			t.Errorf("line %d width = %d, want 40: %q", i, lw, line)
+		}
+	}
+}

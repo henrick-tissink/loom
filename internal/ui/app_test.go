@@ -321,10 +321,39 @@ func TestViewFrameInvariantAllViews(t *testing.T) {
 	}
 }
 
+// TestViewNarrowNoPanic is also the regression test for the Critical finding:
+// at width 40 the real ~53-cell keybar must not push the border past width.
+// Every rendered line — for every view, not just the dashboard — must be
+// exactly a.width cells.
 func TestViewNarrowNoPanic(t *testing.T) {
 	a := fixtureApp()
 	a.width, a.height = 40, 12
-	_ = a.View() // must not panic; invariant checked by frame tests
+
+	assertExactWidth := func(t *testing.T, label string) {
+		t.Helper()
+		out := a.View()
+		for i, line := range strings.Split(out, "\n") {
+			if lw := lipgloss.Width(line); lw != a.width {
+				t.Errorf("%s line %d: got %d cells, want %d: %q", label, i, lw, a.width, line)
+			}
+		}
+	}
+
+	assertExactWidth(t, "viewDash")
+
+	a.view = viewLauncher
+	assertExactWidth(t, "viewLauncher")
+
+	a.view = viewConfirmKill
+	r, ok := a.selected()
+	if !ok {
+		t.Fatal("no row selected for viewConfirmKill fixture")
+	}
+	a.actionTarget = r
+	assertExactWidth(t, "viewConfirmKill")
+
+	a.view = viewTag
+	assertExactWidth(t, "viewTag")
 }
 
 func TestRowShowsAge(t *testing.T) {
