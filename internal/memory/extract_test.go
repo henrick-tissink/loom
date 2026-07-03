@@ -64,21 +64,41 @@ func TestUserIsMetaSkipped(t *testing.T) {
 	}
 }
 
-func TestUserCommandWrapperSkippedForAskAndIndex(t *testing.T) {
-	cases := []string{
-		`{"isSidechain":false,"type":"user","message":{"role":"user","content":"<command-name>/foo</command-name>"},"uuid":"u1","timestamp":"2026-07-02T12:55:36.397Z","cwd":"/w/loom","sessionId":"s1"}`,
-		`{"isSidechain":false,"type":"user","message":{"role":"user","content":"Caveat: the messages below were generated"},"uuid":"u2","timestamp":"2026-07-02T12:55:37.397Z","cwd":"/w/loom","sessionId":"s1"}`,
-		`{"isSidechain":false,"type":"user","message":{"role":"user","content":"[Request interrupted by user]"},"uuid":"u3","timestamp":"2026-07-02T12:55:38.397Z","cwd":"/w/loom","sessionId":"s1"}`,
-		`{"isSidechain":false,"type":"user","message":{"role":"user","content":"<local-command-stdout>ok</local-command-stdout>"},"uuid":"u4","timestamp":"2026-07-02T12:55:39.397Z","cwd":"/w/loom","sessionId":"s1"}`,
+func TestUserCommandWrapperSkippedFromIndexingButUsedAsFallback(t *testing.T) {
+	cases := []struct {
+		jsonLine string
+		wantAsk  string
+	}{
+		{
+			jsonLine: `{"isSidechain":false,"type":"user","message":{"role":"user","content":"<command-name>/foo</command-name>"},"uuid":"u1","timestamp":"2026-07-02T12:55:36.397Z","cwd":"/w/loom","sessionId":"s1"}`,
+			wantAsk:  "<command-name>/foo</command-name>",
+		},
+		{
+			jsonLine: `{"isSidechain":false,"type":"user","message":{"role":"user","content":"Caveat: the messages below were generated"},"uuid":"u2","timestamp":"2026-07-02T12:55:37.397Z","cwd":"/w/loom","sessionId":"s1"}`,
+			wantAsk:  "Caveat: the messages below were generated",
+		},
+		{
+			jsonLine: `{"isSidechain":false,"type":"user","message":{"role":"user","content":"[Request interrupted by user]"},"uuid":"u3","timestamp":"2026-07-02T12:55:38.397Z","cwd":"/w/loom","sessionId":"s1"}`,
+			wantAsk:  "[Request interrupted by user]",
+		},
+		{
+			jsonLine: `{"isSidechain":false,"type":"user","message":{"role":"user","content":"<local-command-stdout>ok</local-command-stdout>"},"uuid":"u4","timestamp":"2026-07-02T12:55:39.397Z","cwd":"/w/loom","sessionId":"s1"}`,
+			wantAsk:  "<local-command-stdout>ok</local-command-stdout>",
+		},
 	}
-	for _, line := range cases {
-		p := writeJSONL(t, line)
+	for _, tc := range cases {
+		p := writeJSONL(t, tc.jsonLine)
 		ex, err := ExtractFile(p, "")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(ex.Docs) != 0 || ex.Ask != "" {
-			t.Fatalf("line %q: expected skipped, got Docs=%+v Ask=%q", line, ex.Docs, ex.Ask)
+		// Excluded-prefix records are NOT indexed
+		if len(ex.Docs) != 0 {
+			t.Fatalf("line: excluded-prefix record must not be indexed, got Docs=%+v", ex.Docs)
+		}
+		// But they DO set Ask via fallback when they're the only user text (spec §2.3)
+		if ex.Ask != tc.wantAsk {
+			t.Fatalf("line: Ask = %q, want %q (fallback)", ex.Ask, tc.wantAsk)
 		}
 	}
 }
@@ -91,6 +111,24 @@ func TestUserListContentWithToolResultNotIndexed(t *testing.T) {
 	}
 	if len(ex.Docs) != 0 || ex.Ask != "" {
 		t.Fatalf("expected skipped, got Docs=%+v Ask=%q", ex.Docs, ex.Ask)
+	}
+}
+
+func TestAskFallbackToFirstUserTextWhenNoFiltersPass(t *testing.T) {
+	// Only user record with excluded prefix: not indexed, but fallback
+	// captures it as Ask (spec §2.3). CleanText is applied to the raw text.
+	p := writeJSONL(t, `{"isSidechain":false,"type":"user","message":{"role":"user","content":"<command-name>foo bar baz</command-name>"},"uuid":"u1","timestamp":"2026-07-02T12:55:36.397Z","cwd":"/w/loom","sessionId":"s1"}`)
+	ex, err := ExtractFile(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ex.Docs) != 0 {
+		t.Fatalf("excluded prefix record must not be indexed, got Docs=%+v", ex.Docs)
+	}
+	// Fallback sets Ask to the first user text (full wrapper), CleanText'd
+	want := "<command-name>foo bar baz</command-name>"
+	if ex.Ask != want {
+		t.Fatalf("Ask = %q, want %q (fallback)", ex.Ask, want)
 	}
 }
 
@@ -309,6 +347,7 @@ func TestRoleOverrideAgentForSubagentFile(t *testing.T) {
 	p := writeJSONL(t,
 		`{"parentUuid":null,"isSidechain":true,"agentId":"agent1","type":"user","message":{"role":"user","content":"do the subagent task"},"uuid":"u1","timestamp":"2026-07-02T12:00:00.000Z","cwd":"/w/loom","sessionId":"s1"}`,
 		`{"isSidechain":true,"agentId":"agent1","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"subagent result text"}]},"uuid":"a1","timestamp":"2026-07-02T12:01:00.000Z","cwd":"/w/loom","sessionId":"s1"}`,
+		`{"type":"ai-title","aiTitle":"Some Title","isSidechain":true,"sessionId":"s1"}`,
 	)
 	ex, err := ExtractFile(p, "agent")
 	if err != nil {
@@ -323,7 +362,8 @@ func TestRoleOverrideAgentForSubagentFile(t *testing.T) {
 		}
 	}
 	// Text still passes the same filters (both docs indexed), but a
-	// subagent file must NEVER set Ask/Outcome/Title.
+	// subagent file must NEVER set Ask/Outcome/Title (even when ai-title
+	// record is present, isMain guard prevents it).
 	if ex.Ask != "" {
 		t.Fatalf("subagent file must never set Ask, got %q", ex.Ask)
 	}

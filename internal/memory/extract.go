@@ -156,13 +156,18 @@ type extractState struct {
 
 	out Extraction
 
-	cwdSeen    map[string]bool
-	fileSeen   map[string]bool
-	sawFirstTS bool
+	cwdSeen       map[string]bool
+	fileSeen      map[string]bool
+	sawFirstTS    bool
+	firstUserText string // fallback for Ask if no normal ask filters pass
 }
 
 func (e *extractState) result() Extraction {
 	e.out.MsgCount = len(e.out.Docs)
+	// Fallback: if no ask filters passed, use raw first user text (CleanText'd)
+	if e.isMain && e.out.Ask == "" && e.firstUserText != "" {
+		e.out.Ask = CleanText(e.firstUserText)
+	}
 	return e.out
 }
 
@@ -253,6 +258,11 @@ func (e *extractState) feedUser(r record, role string, ts int64) {
 	text, ok := extractUserText(r.Message.Content)
 	if !ok {
 		return
+	}
+	// Track first user text for fallback (before checking excluded prefixes,
+	// but skip compact summaries which must never set Ask). Spec §2.3.
+	if e.isMain && e.firstUserText == "" && !r.IsCompactSummary {
+		e.firstUserText = text
 	}
 	if hasExcludedPrefix(text) {
 		return
