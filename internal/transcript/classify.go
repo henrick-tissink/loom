@@ -63,7 +63,7 @@ func (c *Classifier) Feed(line []byte) {
 		return // partial/garbage line: ignore, keep prior state
 	}
 	if r.Type == "ai-title" {
-		if r.AiTitle != "" {
+		if !r.IsSidechain && r.AiTitle != "" {
 			c.title = r.AiTitle
 		}
 		return // sidecar: never a turn boundary

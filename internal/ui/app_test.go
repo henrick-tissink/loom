@@ -472,6 +472,19 @@ func TestPeekNoopOnRecentRow(t *testing.T) {
 	}
 }
 
+func TestPeekShowsError(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key(" ")) // open peek
+	if a.view != viewPeek {
+		t.Fatalf("view = %v, want peek", a.view)
+	}
+	a.errStr = "attach failed: connection refused"
+	out := a.View()
+	if !strings.Contains(out, "attach failed: connection refused") {
+		t.Fatalf("peek view missing error text:\n%s", out)
+	}
+}
+
 func TestSnapMsgWithTransitionsEmitsNotify(t *testing.T) {
 	a := fixtureApp()
 	_, cmd := a.Update(snapMsg(status.Snapshot{NewlyNeedsYou: []string{"tavli · fix race"}}))

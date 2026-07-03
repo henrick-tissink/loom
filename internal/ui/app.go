@@ -383,6 +383,9 @@ func (a *App) View() string {
 			// capture-pane without -e is plain text — no ANSI to worry about.
 			body[i] = truncPlain(line, inner)
 		}
+		if a.errStr != "" {
+			body = append(body, "", styErr.Render(truncPlain("! "+a.errStr, inner)))
+		}
 		return frame(w, "peek · "+a.peekTarget.label, "", body,
 			"space/esc back · ↵ attach · q quit")
 	}
