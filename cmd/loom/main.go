@@ -2,12 +2,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/henricktissink/loom/internal/config"
+	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -46,6 +48,11 @@ func run() error {
 		return fmt.Errorf("discover projects in %s: %w", cfg.WorkspaceRoot, err)
 	}
 
+	ix := memory.NewIndexer(st, cfg.ClaudeConfigDir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ix.Run(ctx, 10*time.Minute)
+
 	deps := ui.Deps{
 		Engine: status.NewEngine(tm, st, cfg.ClaudeConfigDir),
 		Launcher: &session.Launcher{
@@ -57,9 +64,16 @@ func run() error {
 			ReadyTimeout:    60 * time.Second,
 			PollEvery:       500 * time.Millisecond,
 		},
-		Projects:   projects,
-		Tmux:       tm,
-		InsideTmux: config.InsideTmux(),
+		Projects:      projects,
+		Tmux:          tm,
+		InsideTmux:    config.InsideTmux(),
+		Store:         st,
+		IndexerStatus: ix.Status,
+		Summarizer: &memory.Summarizer{
+			Store:   st,
+			Binary:  "claude",
+			WorkDir: cfg.LoomDir,
+		},
 	}
 	p := tea.NewProgram(ui.NewApp(deps), tea.WithAltScreen())
 	_, err = p.Run()
