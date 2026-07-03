@@ -91,6 +91,30 @@ func (s *Store) TranscriptCount() (int64, error) {
 	return n, err
 }
 
+// ListTranscripts returns every session's distillation row. The indexer's
+// file_missing sweep needs this (rather than just the sessions touched in
+// the current pass): a project dir's main file can vanish entirely between
+// sweeps, in which case it won't appear in any directory listing at all, so
+// every KNOWN session must be checked against the filesystem, not just the
+// ones seen this pass.
+func (s *Store) ListTranscripts() ([]Transcript, error) {
+	rows, err := s.db.Query("SELECT " + transcriptCols + " FROM transcripts")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Transcript
+	for rows.Next() {
+		var t Transcript
+		if err := rows.Scan(&t.SessionID, &t.ProjectDir, &t.Cwd, &t.Title, &t.FirstTS, &t.LastTS, &t.MsgCount,
+			&t.Ask, &t.Outcome, &t.Files, &t.FileMissing, &t.LLMSummary, &t.SummaryAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetIndexedFile(path string) (IndexedFile, bool, error) {
 	f := IndexedFile{Path: path}
 	err := s.db.QueryRow("SELECT session_id, size, mtime, first_rowid, last_rowid FROM indexed_files WHERE path=?", path).
