@@ -50,6 +50,46 @@ func launchFake(t *testing.T, tm *tmux.Client, ccd, cwd, id string) string {
 	return name
 }
 
+const fakeTranscriptTitled = `{"type":"user","message":{"role":"user","content":"hi"}}
+{"type":"ai-title","aiTitle":"probe the flux","sessionId":"x"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"yo"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":40000,"output_tokens":90}}}
+`
+
+func TestPollThreadsTitleCtxAndBellsOnce(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	id := "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	tpath := transcript.Path(ccd, cwd, id)
+	os.MkdirAll(filepath.Dir(tpath), 0o755)
+	os.WriteFile(tpath, []byte(fakeTranscriptTitled), 0o644)
+	name := "loom-" + id
+	tm.NewSession(name, cwd, "sleep 60", 80, 24)
+	st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id, ProjectLabel: "parallax",
+		Cwd: cwd, CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "running"})
+
+	e := NewEngine(tm, st, ccd)
+	snap, err := e.Poll(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := snap.Live[0]
+	if r.Title != "probe the flux" || r.CtxTokens != 40100 {
+		t.Fatalf("row = title %q ctx %d", r.Title, r.CtxTokens)
+	}
+	persisted, _, _ := st.Get(name)
+	if persisted.Title != "probe the flux" {
+		t.Fatalf("title not persisted: %+v", persisted)
+	}
+	// bell fires exactly once: running → needs_you
+	if len(snap.NewlyNeedsYou) != 1 || snap.NewlyNeedsYou[0] != "parallax · probe the flux" {
+		t.Fatalf("NewlyNeedsYou = %v", snap.NewlyNeedsYou)
+	}
+	snap2, _ := e.Poll(time.Now().Add(time.Hour))
+	if len(snap2.NewlyNeedsYou) != 0 {
+		t.Fatalf("bell repeated: %v", snap2.NewlyNeedsYou)
+	}
+}
+
 func TestPollLiveNeedsYou(t *testing.T) {
 	tm, st, ccd := testEnv(t)
 	cwd := t.TempDir()

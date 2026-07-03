@@ -59,6 +59,9 @@ func (s *Store) migrate() error {
 		// visible instead of vanishing. '' = no seed or not yet resolved,
 		// 'sent' = delivered, 'failed' = timed out or the tmux send failed.
 		`ALTER TABLE sessions ADD COLUMN seed_status TEXT NOT NULL DEFAULT ''`,
+		// v3: session title, captured from the transcript's ai-title sidecar
+		// record and persisted so it survives restarts (spec: session titles).
+		`ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if _, err := s.db.Exec(migrations[i]); err != nil {
@@ -85,27 +88,36 @@ type SessionRow struct {
 	ExitCode        int64 // -1 = unknown
 	LastStatus      string
 	SeedStatus      string // '', 'sent', 'failed' — see migration v2
+	Title           string // ai-generated session title — see migration v3
 }
 
-const cols = "name, claude_session_id, project_label, cwd, model, mode, seed, tags, created_at, ended_at, exit_code, last_status, seed_status"
+const cols = "name, claude_session_id, project_label, cwd, model, mode, seed, tags, created_at, ended_at, exit_code, last_status, seed_status, title"
 
 func (s *Store) Upsert(r SessionRow) error {
 	_, err := s.db.Exec(`INSERT INTO sessions (`+cols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET
 			claude_session_id=excluded.claude_session_id,
 			project_label=excluded.project_label, cwd=excluded.cwd,
 			model=excluded.model, mode=excluded.mode, seed=excluded.seed,
 			tags=excluded.tags, created_at=excluded.created_at,
 			ended_at=excluded.ended_at, exit_code=excluded.exit_code,
-			last_status=excluded.last_status, seed_status=excluded.seed_status`,
+			last_status=excluded.last_status, seed_status=excluded.seed_status,
+			title=excluded.title`,
 		r.Name, r.ClaudeSessionID, r.ProjectLabel, r.Cwd, r.Model, r.Mode,
-		r.Seed, r.Tags, r.CreatedAt, r.EndedAt, r.ExitCode, r.LastStatus, r.SeedStatus)
+		r.Seed, r.Tags, r.CreatedAt, r.EndedAt, r.ExitCode, r.LastStatus, r.SeedStatus, r.Title)
 	return err
 }
 
 func (s *Store) SetStatus(name, status string) error {
 	_, err := s.db.Exec("UPDATE sessions SET last_status=? WHERE name=?", status, name)
+	return err
+}
+
+// SetTitle persists the AI-generated session title (spec: session titles),
+// captured by the engine from the transcript's ai-title sidecar record.
+func (s *Store) SetTitle(name, title string) error {
+	_, err := s.db.Exec("UPDATE sessions SET title=? WHERE name=?", title, name)
 	return err
 }
 
@@ -190,7 +202,7 @@ func (s *Store) query(q string, args ...any) ([]SessionRow, error) {
 		var r SessionRow
 		if err := rows.Scan(&r.Name, &r.ClaudeSessionID, &r.ProjectLabel, &r.Cwd,
 			&r.Model, &r.Mode, &r.Seed, &r.Tags, &r.CreatedAt, &r.EndedAt,
-			&r.ExitCode, &r.LastStatus, &r.SeedStatus); err != nil {
+			&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -204,6 +216,6 @@ func scanOne(row rowScanner) (SessionRow, error) {
 	var r SessionRow
 	err := row.Scan(&r.Name, &r.ClaudeSessionID, &r.ProjectLabel, &r.Cwd,
 		&r.Model, &r.Mode, &r.Seed, &r.Tags, &r.CreatedAt, &r.EndedAt,
-		&r.ExitCode, &r.LastStatus, &r.SeedStatus)
+		&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title)
 	return r, err
 }

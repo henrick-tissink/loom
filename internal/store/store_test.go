@@ -134,6 +134,41 @@ func TestMarkLiveOrphansEndedRespectsGraceWindow(t *testing.T) {
 	}
 }
 
+func TestMigrationV3TitleOnExistingDB(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "loom.db")
+	s, err := Open(p) // creates at latest version
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := row("loom-t")
+	r.Title = "hedge the vega"
+	if err := s.Upsert(r); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s2, err := Open(p) // reopen: migrations must be no-op idempotent
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	got, ok, _ := s2.Get("loom-t")
+	if !ok || got.Title != "hedge the vega" {
+		t.Fatalf("title roundtrip: %+v %v", got, ok)
+	}
+}
+
+func TestSetTitle(t *testing.T) {
+	s := open(t)
+	s.Upsert(row("loom-a"))
+	if err := s.SetTitle("loom-a", "new title"); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := s.Get("loom-a")
+	if got.Title != "new title" {
+		t.Fatalf("Title = %q", got.Title)
+	}
+}
+
 func TestSetSeedStatus(t *testing.T) {
 	s := open(t)
 	r := row("loom-aaa")

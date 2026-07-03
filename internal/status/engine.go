@@ -22,14 +22,23 @@ const orphanGrace = 5 * time.Second
 
 type Row struct {
 	store.SessionRow
-	Status   Status
-	LastTool string
-	Activity int64 // unix seconds of last tmux session activity; 0 = unknown
+	Status    Status
+	LastTool  string
+	Activity  int64 // unix seconds of last tmux session activity; 0 = unknown
+	Title     string
+	CtxTokens int64
 }
 
 type Snapshot struct {
 	Live   []Row
 	Recent []store.SessionRow
+
+	// NewlyNeedsYou lists "project · title" labels for sessions that flipped
+	// to NeedsYou on THIS poll (last_status != needs_you && new == needs_you).
+	// Computed before SetStatus persists the new status, so the once-only
+	// property holds naturally: the next poll observes LastStatus already
+	// needs_you and doesn't re-fire.
+	NewlyNeedsYou []string
 }
 
 // Engine performs one reconcile pass per Poll. tmux is the source of truth
@@ -146,6 +155,7 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	var live []Row
+	var newly []string
 	for _, r := range liveRows {
 		rd, ok := e.readers[r.Name]
 		if !ok {
@@ -153,20 +163,32 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 			e.readers[r.Name] = rd
 		}
 		rs, _ := rd.Poll() // read errors degrade to prior state: best-effort
+		if rs.Title != "" && rs.Title != r.Title {
+			_ = e.st.SetTitle(r.Name, rs.Title)
+			r.Title = rs.Title
+		}
 		paneActive := now.Unix()-activity[r.Name] <= int64(activeWindow/time.Second)
 		st := Fuse(rs.State, paneActive)
+		if st == NeedsYou && r.LastStatus != string(NeedsYou) {
+			label := r.ProjectLabel
+			if r.Title != "" {
+				label += " · " + r.Title
+			}
+			newly = append(newly, label)
+		}
 		if string(st) != r.LastStatus {
 			_ = e.st.SetStatus(r.Name, string(st))
 			r.LastStatus = string(st)
 		}
-		live = append(live, Row{SessionRow: r, Status: st, LastTool: rs.LastTool, Activity: activity[r.Name]})
+		live = append(live, Row{SessionRow: r, Status: st, LastTool: rs.LastTool,
+			Activity: activity[r.Name], Title: r.Title, CtxTokens: rs.CtxTokens})
 	}
 
 	recent, err := e.st.Recent(10)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{Live: live, Recent: recent}, nil
+	return Snapshot{Live: live, Recent: recent, NewlyNeedsYou: newly}, nil
 }
 
 // GC drops cached readers for names not in the given set. Called once per
