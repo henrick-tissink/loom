@@ -106,9 +106,25 @@ type App struct {
 	searchActive bool  // cached IndexerStatus().Active, ditto
 
 	// detailTarget: the hit captured at the moment viewDetail is opened
-	// (same captured-target discipline as actionTarget/peekTarget). Task 3
-	// fleshes out the rest of the detail view.
-	detailTarget store.SearchHit
+	// (same captured-target discipline as actionTarget/peekTarget).
+	// detailTranscript is fetched once at that same moment (and re-fetched
+	// after a successful summarize) — r/s below act on detailTarget's
+	// SessionID/detailTranscript, never on any live selection.
+	detailTarget     store.SearchHit
+	detailTranscript store.Transcript
+
+	// detailHint: a transient dim message shown in the body (currently only
+	// the resume-collision hint — spec §6 P0). Cleared whenever a fresh
+	// detail view is opened.
+	detailHint string
+
+	// detailConfirmRegen/detailSummarizing: the summarize press-twice-to-
+	// regenerate state machine (spec §5/§6). detailConfirmRegen arms after a
+	// first 's' press when a summary already exists (next 's' actually
+	// regenerates); detailSummarizing is true only while the tea.Cmd calling
+	// Summarizer.Summarize is in flight (further 's' presses no-op).
+	detailConfirmRegen bool
+	detailSummarizing  bool
 }
 
 type (
@@ -139,6 +155,22 @@ type (
 		query string
 		hits  []store.SearchHit
 	}
+
+	// summaryMsg is the result of a Summarizer.Summarize tea.Cmd (spec §5).
+	// Applied only when sessionID still matches the live detailTarget — an
+	// in-flight summarize for a session the user has since navigated away
+	// from (opened a DIFFERENT detail) is discarded, same staleness
+	// discipline as searchResultsMsg/peekMsg above.
+	summaryMsg struct {
+		sessionID string
+		text      string
+		err       error
+	}
+
+	// resumeBlockedMsg reports the resume-collision guard (spec §6 P0) found
+	// a live row for sessionID and — critically — did NOT call
+	// Launcher.Resume. Same sessionID-staleness discipline as summaryMsg.
+	resumeBlockedMsg struct{ sessionID string }
 )
 
 func NewApp(deps Deps) *App {
@@ -285,6 +317,29 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.searchCursor = max(0, len(a.searchHits)-1)
 		}
 		return a, nil
+	case summaryMsg:
+		// stale: the user has since opened a different session's detail.
+		if m.sessionID != a.detailTarget.SessionID {
+			return a, nil
+		}
+		a.detailSummarizing = false
+		if m.err != nil {
+			a.errStr = m.err.Error()
+			return a, nil
+		}
+		// success: re-fetch the transcript so the new llm_summary/summary_at
+		// show immediately (SetLLMSummary already persisted it).
+		if st := a.deps.Store; st != nil {
+			if t, ok, err := st.GetTranscript(m.sessionID); err == nil && ok {
+				a.detailTranscript = t
+			}
+		}
+		return a, nil
+	case resumeBlockedMsg:
+		if m.sessionID == a.detailTarget.SessionID {
+			a.detailHint = "already live — attach from the dashboard"
+		}
+		return a, nil
 	case tea.KeyMsg:
 		return a.updateKeys(m)
 	}
@@ -378,15 +433,7 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.updateSearchKeys(msg)
 
 	case viewDetail:
-		// Task 3 fleshes this out (r resume, s summarize, snippets); Task 2
-		// only wires the navigation so '↵' from search has somewhere to go.
-		switch msg.String() {
-		case "esc":
-			a.view = viewSearch
-		case "q", "ctrl+c":
-			return a, tea.Quit
-		}
-		return a, nil
+		return a.updateDetailKeys(msg)
 	}
 
 	// viewDash
@@ -478,8 +525,7 @@ func (a *App) updateSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case tea.KeyEnter:
 		if a.searchCursor >= 0 && a.searchCursor < len(a.searchHits) {
-			a.detailTarget = a.searchHits[a.searchCursor]
-			a.view = viewDetail
+			a.openDetail(a.searchHits[a.searchCursor])
 		}
 		return a, nil
 	case tea.KeyDown:
@@ -510,6 +556,134 @@ func (a *App) updateSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, cmd
 	}
 	return a, tea.Batch(cmd, debounceCmd(a.searchSeq))
+}
+
+// openDetail captures hit as detailTarget (spec §6 captured-target
+// discipline) and fetches its full Transcript once, at open time — a plain
+// synchronous Store call (same precedent as viewTag's SetTags in
+// updateKeys), not a tea.Cmd round trip: it's a single indexed row lookup,
+// nowhere near the cost that would justify async staleness handling. A nil
+// Store (Deps{} in dashboard-only tests) leaves detailTranscript zeroed,
+// which resumeDisabled() correctly reads as "no cwd, disabled".
+func (a *App) openDetail(hit store.SearchHit) {
+	a.detailTarget = hit
+	a.detailTranscript = store.Transcript{}
+	a.detailHint = ""
+	a.detailConfirmRegen = false
+	a.detailSummarizing = false
+	if st := a.deps.Store; st != nil {
+		if t, ok, err := st.GetTranscript(hit.SessionID); err == nil && ok {
+			a.detailTranscript = t
+		}
+	}
+	a.view = viewDetail
+}
+
+// updateDetailKeys handles keys while viewDetail is open (spec §6): r
+// resume (collision-guarded), s summarize (press-twice-to-regenerate), esc
+// back to search (results/input untouched — viewSearch's own state isn't
+// touched by any of this), q/ctrl+c quit.
+func (a *App) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return a, tea.Quit
+	case "esc":
+		a.view = viewSearch
+		return a, nil
+	case "r":
+		if a.resumeDisabled() {
+			return a, nil
+		}
+		return a, a.resumeCmd()
+	case "s":
+		if a.deps.Summarizer == nil || a.detailSummarizing {
+			return a, nil // no-op: no summarizer configured, or already in flight
+		}
+		if a.detailTranscript.LLMSummary != "" && !a.detailConfirmRegen {
+			// first press with an existing summary: arm the confirm, don't
+			// call Summarize yet (spec §5 press-twice-to-regenerate).
+			a.detailConfirmRegen = true
+			return a, nil
+		}
+		a.detailConfirmRegen = false
+		a.detailSummarizing = true
+		return a, a.summarizeCmd(a.detailTarget.SessionID)
+	}
+	return a, nil
+}
+
+// resumeDisabled: r is disabled (spec §6) when the transcript has no known
+// cwd (can't launch tmux into it) or its source file has vanished.
+func (a *App) resumeDisabled() bool {
+	return a.detailTranscript.Cwd == "" || a.detailTranscript.FileMissing
+}
+
+// resumeCmd implements the resume-collision guard (spec §6, THE P0 for this
+// task): GetLatestByClaudeSessionID is checked FIRST, inside the returned
+// cmd, and a live row short-circuits to resumeBlockedMsg WITHOUT ever
+// calling Launcher.Resume — a terminal row is resumed as-is (preserving its
+// label/model/mode/tags); no row at all synthesizes a minimal SessionRow
+// from the transcript. sessionID/cwd/launcher/w/h are captured by value
+// here (before the cmd runs) — same captured-target discipline as
+// elsewhere, and it means the closure never re-reads a.* fields that could
+// have moved on by the time this cmd executes.
+func (a *App) resumeCmd() tea.Cmd {
+	st := a.deps.Store
+	if st == nil {
+		return nil
+	}
+	sessionID := a.detailTarget.SessionID
+	cwd := a.detailTranscript.Cwd
+	launcher := a.deps.Launcher
+	w, h := a.width, a.height
+	return func() tea.Msg {
+		now := time.Now()
+		row, ok, err := st.GetLatestByClaudeSessionID(sessionID)
+		if err != nil {
+			return errMsg{err}
+		}
+		if ok && isLiveRow(row) {
+			// THE guard: do NOT call Launcher.Resume on a live row.
+			return resumeBlockedMsg{sessionID: sessionID}
+		}
+		if launcher == nil {
+			return nil
+		}
+		target := row
+		if !ok {
+			target = store.SessionRow{
+				ClaudeSessionID: sessionID,
+				Cwd:             cwd,
+				ProjectLabel:    filepath.Base(cwd),
+				CreatedAt:       now.Unix(),
+				EndedAt:         -1,
+				ExitCode:        -1,
+				LastStatus:      "unknown",
+			}
+		}
+		if _, err := launcher.Resume(target, w, h, now); err != nil {
+			return errMsg{err}
+		}
+		return pollNowMsg{}
+	}
+}
+
+// isLiveRow mirrors store.Live()'s definition of "live" (last_status in
+// running/needs_you/idle/unknown) vs. store.Recent()'s terminal set
+// (done/error) — the same distinction the resume-collision guard needs.
+func isLiveRow(r store.SessionRow) bool {
+	return r.LastStatus != "done" && r.LastStatus != "error"
+}
+
+// summarizeCmd runs the (up to 90s) Summarizer.Summarize call in a tea.Cmd —
+// it MUST never run inline in Update, which would freeze the whole UI for
+// the duration of the child process.
+func (a *App) summarizeCmd(sessionID string) tea.Cmd {
+	sm := a.deps.Summarizer
+	return func() tea.Msg {
+		text, err := sm.Summarize(sessionID, time.Now())
+		return summaryMsg{sessionID: sessionID, text: text, err: err}
+	}
 }
 
 // peekCmd captures the target pane's contents. The target is pinned at
@@ -616,10 +790,7 @@ func (a *App) View() string {
 	case viewSearch:
 		return a.viewSearch(w)
 	case viewDetail:
-		// Task 3 fleshes this out; Task 2 only needs somewhere for '↵' to
-		// land (spec §6's detailTarget capture + minimal body).
-		return frame(w, "detail", "", []string{"", "  detail — task 3", ""},
-			"esc back · q quit")
+		return a.renderDetail(w)
 	}
 
 	inner := w - 4
@@ -904,4 +1075,112 @@ func projectLabel(h store.SearchHit) string {
 		return s[i+1:]
 	}
 	return s
+}
+
+// renderDetail renders the session detail frame (spec §6): heading,
+// project · cwd, date range + msg count (+ file_missing hint), Ask/Outcome/
+// Files, the LLM summary (or a hint to generate one, or the summarizing/
+// confirm-regenerate transient states), the resume-collision hint if one is
+// armed, and finally the snippet already carried on detailTarget itself —
+// detailTarget IS the SearchHit the current query produced for this
+// session, so its Snippet field already IS "the current-query snippet" with
+// no second query needed. Every line is memory.CleanText'd (LLMSummary in
+// particular is un-sanitized model output — the only field here NOT already
+// cleaned at index time — and truncated before styling, per the
+// truncate-plain-before-style invariant.
+func (a *App) renderDetail(w int) string {
+	inner := w - 4
+	h := a.detailTarget
+	t := a.detailTranscript
+
+	heading := memory.CleanText(h.Title)
+	if heading == "" {
+		heading = memory.CleanText(h.Ask)
+	}
+	if heading == "" {
+		heading = "(untitled session)"
+	}
+
+	cwd := t.Cwd
+	if cwd == "" {
+		cwd = h.Cwd
+	}
+
+	var body []string
+	body = append(body, truncPlain(heading, inner), "")
+	body = append(body, truncPlain(projectLabel(h)+" · "+cwd, inner))
+
+	var dateRange string
+	if first := humanAge(a.now, t.FirstTS); first != "" {
+		dateRange = first
+		if last := humanAge(a.now, t.LastTS); last != "" && last != first {
+			dateRange += " – " + last
+		}
+	}
+	msgLine := fmt.Sprintf("%d messages", t.MsgCount)
+	if t.FileMissing {
+		msgLine += " · file missing"
+	}
+	if dateRange != "" {
+		msgLine = dateRange + " · " + msgLine
+	}
+	body = append(body, truncPlain(msgLine, inner), "")
+
+	body = append(body, truncPlain("Ask: "+memory.CleanText(t.Ask), inner))
+	body = append(body, truncPlain("Outcome: "+memory.CleanText(t.Outcome), inner))
+	body = append(body, truncPlain("Files: "+filesSummary(t.Files), inner), "")
+
+	switch {
+	case a.detailSummarizing:
+		body = append(body, styHelp.Render(truncPlain("Summary: summarizing…", inner)))
+	case a.detailConfirmRegen:
+		body = append(body, truncPlain("Summary: "+memory.CleanText(t.LLMSummary), inner))
+		body = append(body, styHelp.Render(truncPlain("press s again — uses plan quota", inner)))
+	case t.LLMSummary != "":
+		body = append(body, truncPlain("Summary: "+memory.CleanText(t.LLMSummary), inner))
+	default:
+		body = append(body, styHelp.Render(truncPlain("Summary: press s to summarize (uses plan quota)", inner)))
+	}
+
+	if a.detailHint != "" {
+		body = append(body, "", styHelp.Render(truncPlain(a.detailHint, inner)))
+	}
+
+	if h.Snippet != "" {
+		body = append(body, "", renderSnippet(h.Snippet, inner))
+	}
+
+	keybar := "s summarize · esc back · q quit"
+	if !a.resumeDisabled() {
+		keybar = "r resume · " + keybar
+	}
+	return frame(w, "detail", "", body, keybar)
+}
+
+// filesSummary renders Transcript.Files (a "\n"-joined path list — see
+// indexer.go's joinFiles) as a compact comma list: the first ~8 entries,
+// each memory.CleanText'd for defense-in-depth (paths are ordinary indexer
+// output, not untrusted model text, but a stray control byte here would
+// still break the frame's exact-width invariant), plus a "+N more" tail
+// when there are more. Splitting BEFORE cleaning matters: CleanText
+// collapses "\n" runs to a single space, which would destroy the very
+// separator this function needs to split on.
+func filesSummary(files string) string {
+	if files == "" {
+		return "(none)"
+	}
+	list := strings.Split(files, "\n")
+	shown, more := list, 0
+	if len(list) > 8 {
+		shown, more = list[:8], len(list)-8
+	}
+	cleaned := make([]string, len(shown))
+	for i, f := range shown {
+		cleaned[i] = memory.CleanText(f)
+	}
+	out := strings.Join(cleaned, ", ")
+	if more > 0 {
+		out += fmt.Sprintf(" +%d more", more)
+	}
+	return out
 }

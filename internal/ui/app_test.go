@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -750,5 +751,417 @@ func TestRowShowsAge(t *testing.T) {
 	a.rebuildRows()
 	if !strings.Contains(a.View(), "2m") {
 		t.Fatal("age column missing")
+	}
+}
+
+// --- Task 3: detail view + actions --------------------------------------
+
+// detailFixtureStore opens a throwaway store seeded with one transcript row
+// and returns the SearchHit a real search would have produced for it (used
+// to drive a.openDetail — the same capture path '/' → type → ↵ takes).
+func detailFixtureStore(t *testing.T, tr store.Transcript) (*store.Store, store.SearchHit) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if err := st.UpsertTranscript(tr); err != nil {
+		t.Fatal(err)
+	}
+	hit := store.SearchHit{
+		SessionID: tr.SessionID, Title: tr.Title, Ask: tr.Ask,
+		ProjectDir: tr.ProjectDir, Cwd: tr.Cwd, LastTS: tr.LastTS,
+		Snippet: "the \x01vega\x02 hedge desk",
+	}
+	return st, hit
+}
+
+// newFakeSummarizer wires a memory.Summarizer at a fake `claude` script that
+// always succeeds with a fixed summary — Task 1's fake-script precedent,
+// trimmed to what these UI tests need (argv/env/budget are Task 1's job;
+// here we only need a Summarize call the UI can drive through a tea.Cmd).
+func newFakeSummarizer(t *testing.T, st *store.Store) *memory.Summarizer {
+	t.Helper()
+	script := "#!/bin/sh\necho 'FAKE SUMMARY'\n"
+	path := filepath.Join(t.TempDir(), "fake-claude.sh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &memory.Summarizer{Store: st, Binary: path, WorkDir: t.TempDir()}
+}
+
+// TestDetailRendersTranscriptFieldsAndSummaryHint: opening detail on a
+// session with no llm_summary yet shows every transcript field plus the
+// "press s to summarize" hint, and holds the frame invariant.
+func TestDetailRendersTranscriptFieldsAndSummaryHint(t *testing.T) {
+	tr := store.Transcript{
+		SessionID: "sess-1", ProjectDir: "-w-happypay", Cwd: "/w/happypay",
+		Title: "fix the widget", Ask: "make the widget work", Outcome: "widget fixed",
+		Files: "a.go\nb.go", FirstTS: 1000, LastTS: 2000, MsgCount: 12,
+	}
+	st, hit := detailFixtureStore(t, tr)
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.now = time.Unix(3000, 0)
+	a.openDetail(hit)
+
+	out := a.View()
+	for _, want := range []string{
+		"fix the widget", "happypay", "/w/happypay", "make the widget work",
+		"widget fixed", "a.go", "b.go", "12 messages",
+		"press s to summarize (uses plan quota)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("view missing %q:\n%s", want, out)
+		}
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if lw := lipgloss.Width(line); lw != a.width {
+			t.Fatalf("line %d width %d != %d: %q", i, lw, a.width, line)
+		}
+	}
+}
+
+// TestResumeBlockedOnLiveRowNeverCallsResume is the P0 test: a live row for
+// the session's claude_session_id must short-circuit to a hint WITHOUT ever
+// calling Launcher.Resume. The Launcher here has a nil Tmux client, so if
+// the guard were bypassed and Resume were actually invoked, cmd() would
+// panic dereferencing a nil *tmux.Client — making "Resume was never called"
+// a hard, unmissable assertion rather than a soft one.
+func TestResumeBlockedOnLiveRowNeverCallsResume(t *testing.T) {
+	tr := store.Transcript{SessionID: "sess-1", Cwd: "/w/proj"}
+	st, hit := detailFixtureStore(t, tr)
+	if err := st.Upsert(store.SessionRow{
+		Name: "loom-live", ClaudeSessionID: "sess-1", ProjectLabel: "proj", Cwd: "/w/proj",
+		CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := NewApp(Deps{Store: st, Launcher: &session.Launcher{Store: st}})
+	a.width, a.height = 100, 30
+	a.openDetail(hit)
+
+	_, cmd := a.Update(key("r"))
+	if cmd == nil {
+		t.Fatal("r did not return a command")
+	}
+	msg := cmd() // would panic here if the guard were bypassed
+	rb, ok := msg.(resumeBlockedMsg)
+	if !ok || rb.sessionID != "sess-1" {
+		t.Fatalf("resume on live row = %#v, want resumeBlockedMsg{sess-1}", msg)
+	}
+	a.Update(rb)
+	if a.view != viewDetail {
+		t.Fatalf("view = %v, want viewDetail unchanged", a.view)
+	}
+	if !strings.Contains(a.detailHint, "already live") {
+		t.Fatalf("detailHint = %q, want the already-live hint", a.detailHint)
+	}
+	if !strings.Contains(a.View(), "already live") {
+		t.Fatal("hint not rendered in view")
+	}
+}
+
+// TestResumeTerminalRowUsesThatRowNotSynthesized: a terminal (done/error)
+// row for the session DOES get resumed, and with THAT row's fields
+// (label/model/mode/tags) — not a freshly synthesized one. Uses a real
+// throwaway tmux socket + Launcher (Phase-1 launch_test pattern), the
+// cheapest honest way to observe which row Resume actually acted on.
+func TestResumeTerminalRowUsesThatRowNotSynthesized(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomdetail%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	tr := store.Transcript{SessionID: "sess-1", Cwd: dir}
+	st, hit := detailFixtureStore(t, tr)
+	if err := st.Upsert(store.SessionRow{
+		Name: "loom-old", ClaudeSessionID: "sess-1", ProjectLabel: "myproj", Cwd: dir,
+		Model: "opus", Mode: "plan", Tags: "keep-me",
+		CreatedAt: 1, EndedAt: 5, ExitCode: 0, LastStatus: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	l := &session.Launcher{Tmux: tm, Store: st,
+		ReadyTimeout: 200 * time.Millisecond, PollEvery: 50 * time.Millisecond}
+	a := NewApp(Deps{Store: st, Launcher: l})
+	a.width, a.height = 80, 24
+	a.openDetail(hit)
+
+	_, cmd := a.Update(key("r"))
+	if cmd == nil {
+		t.Fatal("r did not return a command")
+	}
+	msg := cmd()
+	if em, ok := msg.(errMsg); ok {
+		t.Fatalf("resume errored: %v", em.err)
+	}
+	if _, ok := msg.(pollNowMsg); !ok {
+		t.Fatalf("resume result = %T, want pollNowMsg", msg)
+	}
+
+	live, err := st.Live()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 1 {
+		t.Fatalf("live rows = %d, want 1", len(live))
+	}
+	if live[0].ProjectLabel != "myproj" || live[0].Model != "opus" || live[0].Mode != "plan" || live[0].Tags != "keep-me" {
+		t.Fatalf("resumed row = %+v, want fields copied from the terminal row (not synthesized)", live[0])
+	}
+}
+
+// TestResumeSynthesizesRowWhenNoneExists: no sessions row at all for the
+// claude_session_id → a minimal row is synthesized from the transcript
+// (Cwd, label=basename(cwd)) and THAT is resumed.
+func TestResumeSynthesizesRowWhenNoneExists(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomdetail2%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	tr := store.Transcript{SessionID: "sess-orphan", Cwd: dir}
+	st, hit := detailFixtureStore(t, tr)
+	l := &session.Launcher{Tmux: tm, Store: st,
+		ReadyTimeout: 200 * time.Millisecond, PollEvery: 50 * time.Millisecond}
+	a := NewApp(Deps{Store: st, Launcher: l})
+	a.width, a.height = 80, 24
+	a.openDetail(hit)
+
+	_, cmd := a.Update(key("r"))
+	if cmd == nil {
+		t.Fatal("r did not return a command")
+	}
+	msg := cmd()
+	if em, ok := msg.(errMsg); ok {
+		t.Fatalf("resume errored: %v", em.err)
+	}
+	if _, ok := msg.(pollNowMsg); !ok {
+		t.Fatalf("resume result = %T, want pollNowMsg", msg)
+	}
+
+	live, err := st.Live()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 1 {
+		t.Fatalf("live rows = %d, want 1", len(live))
+	}
+	if live[0].ProjectLabel != filepath.Base(dir) {
+		t.Fatalf("synthesized ProjectLabel = %q, want %q", live[0].ProjectLabel, filepath.Base(dir))
+	}
+	if live[0].ClaudeSessionID != "sess-orphan" {
+		t.Fatalf("synthesized ClaudeSessionID = %q, want sess-orphan", live[0].ClaudeSessionID)
+	}
+}
+
+// TestResumeDisabledWhenCwdEmptyOrFileMissing: r is a no-op (and omitted
+// from the keybar) whenever the transcript has no known cwd or its file
+// has vanished.
+func TestResumeDisabledWhenCwdEmptyOrFileMissing(t *testing.T) {
+	cases := []store.Transcript{
+		{SessionID: "s1"}, // no cwd
+		{SessionID: "s2", Cwd: "/w/x", FileMissing: true}, // file missing
+	}
+	for _, tr := range cases {
+		st, hit := detailFixtureStore(t, tr)
+		a := NewApp(Deps{Store: st})
+		a.width, a.height = 100, 30
+		a.openDetail(hit)
+		if strings.Contains(a.View(), "r resume") {
+			t.Fatalf("keybar shows r resume when disabled (cwd=%q missing=%v)", tr.Cwd, tr.FileMissing)
+		}
+		_, cmd := a.Update(key("r"))
+		if cmd != nil {
+			t.Fatalf("r produced a command while disabled (cwd=%q missing=%v)", tr.Cwd, tr.FileMissing)
+		}
+	}
+}
+
+// TestSummarizeConfirmThenRegenerate: press-twice-to-regenerate when a
+// summary already exists (spec §5) — first 's' arms the confirm without
+// calling Summarize; second 's' runs it (in a tea.Cmd) and, on success,
+// re-fetches the transcript so the new summary shows immediately.
+func TestSummarizeConfirmThenRegenerate(t *testing.T) {
+	tr := store.Transcript{SessionID: "sess-1", Cwd: "/w/proj", LLMSummary: "old summary"}
+	st, hit := detailFixtureStore(t, tr)
+	sm := newFakeSummarizer(t, st)
+	a := NewApp(Deps{Store: st, Summarizer: sm})
+	a.width, a.height = 100, 30
+	a.openDetail(hit)
+
+	_, cmd := a.Update(key("s"))
+	if cmd != nil {
+		t.Fatal("first s with an existing summary should arm confirm, not return a command")
+	}
+	if !a.detailConfirmRegen {
+		t.Fatal("detailConfirmRegen not armed")
+	}
+	if !strings.Contains(a.View(), "press s again") {
+		t.Fatal("confirm hint not shown in view")
+	}
+
+	_, cmd = a.Update(key("s"))
+	if cmd == nil {
+		t.Fatal("second s did not return a command")
+	}
+	if !a.detailSummarizing {
+		t.Fatal("detailSummarizing not set on the regenerate press")
+	}
+	if !strings.Contains(a.View(), "summarizing…") {
+		t.Fatal("summarizing state not shown in view")
+	}
+
+	msg := cmd()
+	sMsg, ok := msg.(summaryMsg)
+	if !ok || sMsg.err != nil || sMsg.text != "FAKE SUMMARY" {
+		t.Fatalf("summarize cmd result = %#v", msg)
+	}
+	a.Update(sMsg)
+	if a.detailSummarizing {
+		t.Fatal("detailSummarizing not cleared after success")
+	}
+	if a.detailTranscript.LLMSummary != "FAKE SUMMARY" {
+		t.Fatalf("transcript not re-fetched after success: LLMSummary = %q", a.detailTranscript.LLMSummary)
+	}
+}
+
+// TestSummarizeFirstPressStartsImmediatelyWhenEmpty: no existing summary →
+// the first 's' press starts summarizing right away (no confirm needed).
+func TestSummarizeFirstPressStartsImmediatelyWhenEmpty(t *testing.T) {
+	tr := store.Transcript{SessionID: "sess-1", Cwd: "/w/proj"}
+	st, hit := detailFixtureStore(t, tr)
+	sm := newFakeSummarizer(t, st)
+	a := NewApp(Deps{Store: st, Summarizer: sm})
+	a.width, a.height = 100, 30
+	a.openDetail(hit)
+
+	_, cmd := a.Update(key("s"))
+	if cmd == nil {
+		t.Fatal("s with no existing summary should start summarizing immediately")
+	}
+	if a.detailConfirmRegen {
+		t.Fatal("detailConfirmRegen should not be armed when there was no prior summary")
+	}
+	if !a.detailSummarizing {
+		t.Fatal("detailSummarizing not set")
+	}
+}
+
+// TestSummarizeNoopWhileInFlight: further 's' presses while a Summarize
+// tea.Cmd is in flight no-op (spec §5).
+func TestSummarizeNoopWhileInFlight(t *testing.T) {
+	tr := store.Transcript{SessionID: "sess-1", Cwd: "/w/proj"}
+	st, hit := detailFixtureStore(t, tr)
+	sm := newFakeSummarizer(t, st)
+	a := NewApp(Deps{Store: st, Summarizer: sm})
+	a.width, a.height = 100, 30
+	a.openDetail(hit)
+
+	if _, cmd := a.Update(key("s")); cmd == nil {
+		t.Fatal("s did not start summarizing")
+	}
+	if _, cmd := a.Update(key("s")); cmd != nil {
+		t.Fatal("s while summarizing returned a command (should no-op)")
+	}
+}
+
+// TestSummaryMsgStaleSessionDiscarded: a summaryMsg for a session the user
+// has since navigated away from (opened a DIFFERENT session's detail) is
+// discarded — same staleness discipline as searchResultsMsg/peekMsg.
+func TestSummaryMsgStaleSessionDiscarded(t *testing.T) {
+	trA := store.Transcript{SessionID: "sess-a", Cwd: "/w/a"}
+	trB := store.Transcript{SessionID: "sess-b", Cwd: "/w/b", LLMSummary: "b summary"}
+	st, hitA := detailFixtureStore(t, trA)
+	if err := st.UpsertTranscript(trB); err != nil {
+		t.Fatal(err)
+	}
+	hitB := store.SearchHit{SessionID: "sess-b", Cwd: "/w/b"}
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.openDetail(hitA) // as if sess-a's summarize were in flight
+	a.openDetail(hitB) // user navigated to a different session's detail
+
+	a.Update(summaryMsg{sessionID: "sess-a", text: "STALE"})
+	if a.detailTranscript.SessionID != "sess-b" || a.detailTranscript.LLMSummary != "b summary" {
+		t.Fatalf("stale summaryMsg applied over the current session: %+v", a.detailTranscript)
+	}
+}
+
+// TestDetailEscReturnsToSearchPreservingState: esc goes back to viewSearch
+// with the input/results exactly as they were, not reset.
+func TestDetailEscReturnsToSearchPreservingState(t *testing.T) {
+	tr := store.Transcript{SessionID: "sess-1", Cwd: "/w/proj"}
+	st, hit := detailFixtureStore(t, tr)
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.Update(key("/"))
+	a.searchInput.SetValue("widget")
+	a.searchHits = []store.SearchHit{hit}
+	a.searchCursor = 0
+
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.view != viewDetail {
+		t.Fatal("enter did not open detail")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewSearch {
+		t.Fatalf("esc from detail = %v, want viewSearch", a.view)
+	}
+	if a.searchInput.Value() != "widget" {
+		t.Fatalf("search input lost: %q, want \"widget\"", a.searchInput.Value())
+	}
+	if len(a.searchHits) != 1 {
+		t.Fatalf("search hits lost: %+v", a.searchHits)
+	}
+}
+
+// TestDetailFrameInvariantPopulatedContent: the frame invariant at both 100
+// and 40 cells wide, with EVERY optional body element populated at once
+// (long title/ask/outcome, >8 files, a multi-line LLM summary, the
+// confirm-regenerate hint, the resume-blocked hint, and a snippet with
+// markers straddling a truncation cut) — the B2-review lesson that a
+// placeholder-only frame check can hide breakage that only shows up once
+// the body is actually full.
+func TestDetailFrameInvariantPopulatedContent(t *testing.T) {
+	tr := store.Transcript{
+		SessionID: "sess-1", ProjectDir: "-Users-h-Sauce-HappyPay", Cwd: "/Users/h/Sauce/HappyPay",
+		Title:   "a very long session title that should be truncated cleanly at narrow widths without corrupting the frame",
+		Ask:     "a very long ask line describing exactly what the user wanted done in this particular session",
+		Outcome: "a very long outcome line summarizing everything that happened during this rather long session",
+		Files: strings.Join([]string{
+			"a.go", "b.go", "c.go", "d.go", "e.go", "f.go", "g.go", "h.go", "i.go", "j.go",
+		}, "\n"),
+		LLMSummary:  "Goal: do the thing.\nOutcome: did the thing.\nKey decisions: used the thing.",
+		FirstTS:     1000,
+		LastTS:      500000,
+		MsgCount:    250,
+		FileMissing: true,
+	}
+	st, hit := detailFixtureStore(t, tr)
+	hit.Snippet = "a very long snippet with \x01highlighted\x02 terms straddling the truncation boundary right about here"
+
+	a := NewApp(Deps{Store: st})
+	a.now = time.Unix(600000, 0)
+	a.openDetail(hit)
+	a.detailHint = "already live — attach from the dashboard"
+	a.detailConfirmRegen = true
+
+	for _, width := range []int{100, 40} {
+		a.width, a.height = width, 30
+		out := a.View()
+		for i, line := range strings.Split(out, "\n") {
+			if lw := lipgloss.Width(line); lw != width {
+				t.Fatalf("width %d line %d = %d cells (want %d): %q", width, i, lw, width, line)
+			}
+		}
+		if strings.ContainsAny(out, "\x01\x02") {
+			t.Fatalf("width %d: raw snippet markers leaked into the rendered view", width)
+		}
 	}
 }
