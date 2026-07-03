@@ -249,6 +249,136 @@ func TestAdvanceRunCASSameSnapshotSecondCallerRejected(t *testing.T) {
 	}
 }
 
+// --- FinishRunCAS (spec §2.7 CAS gate) --------------------------------------
+
+func TestFinishRunCASClaimsWhenRunningAndStepMatches(t *testing.T) {
+	s := open(t)
+	id, _ := s.InsertRun("wf", "{}", 1000)
+
+	claimed, err := s.FinishRunCAS(id, 0, 2000)
+	if err != nil || !claimed {
+		t.Fatalf("FinishRunCAS: claimed=%v err=%v", claimed, err)
+	}
+	got, _, _ := s.GetRun(id)
+	if got.Status != "done" || got.UpdatedAt != 2000 {
+		t.Fatalf("got = %+v, want Status=done UpdatedAt=2000", got)
+	}
+}
+
+// TestFinishRunCASRejectedOnStepMismatch is the TOCTOU proof: the caller's
+// pre-read saw step_idx=0, but an advance landed (step_idx=1) between that
+// read and the finish write — the finish must be rejected, not applied to
+// the wrong step, and must leave the row untouched.
+func TestFinishRunCASRejectedOnStepMismatch(t *testing.T) {
+	s := open(t)
+	id, _ := s.InsertRun("wf", "{}", 1000)
+	if _, err := s.AdvanceRunCAS(id, 0, 1, []string{"loom-a", "loom-b"}, "", 1500); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _ := s.GetRun(id)
+
+	claimed, err := s.FinishRunCAS(id, 0, 2000) // stale: acting on the pre-advance snapshot
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("FinishRunCAS on a stale step_idx: claimed=true, want false")
+	}
+	after, _, _ := s.GetRun(id)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("row mutated by a rejected FinishRunCAS: before=%+v after=%+v", before, after)
+	}
+}
+
+// TestFinishRunCASRejectedWhenNotRunning covers the same status='running'
+// gate AdvanceRunCAS enforces: a run that already finished (or was
+// abandoned) must not be re-finished/overwritten.
+func TestFinishRunCASRejectedWhenNotRunning(t *testing.T) {
+	s := open(t)
+	id, _ := s.InsertRun("wf", "{}", 1000)
+	if err := s.SetRunStatus(id, "abandoned", 1500); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := s.FinishRunCAS(id, 0, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("FinishRunCAS on an abandoned run: claimed=true, want false")
+	}
+	got, _, _ := s.GetRun(id)
+	if got.Status != "abandoned" {
+		t.Fatalf("status = %q, want still abandoned (not silently overwritten)", got.Status)
+	}
+}
+
+// --- AbandonRunCAS (spec §2.12 narrowing) -----------------------------------
+
+func TestAbandonRunCASClaimsWhenRunning(t *testing.T) {
+	s := open(t)
+	id, _ := s.InsertRun("wf", "{}", 1000)
+
+	claimed, err := s.AbandonRunCAS(id, 2000)
+	if err != nil || !claimed {
+		t.Fatalf("AbandonRunCAS: claimed=%v err=%v", claimed, err)
+	}
+	got, _, _ := s.GetRun(id)
+	if got.Status != "abandoned" || got.UpdatedAt != 2000 {
+		t.Fatalf("got = %+v, want Status=abandoned UpdatedAt=2000", got)
+	}
+}
+
+// TestAbandonRunCASRejectedWhenAlreadyDone is the narrowing proof: abandoning
+// a run that has already finished must not silently overwrite 'done' back to
+// 'abandoned' — claimed=false, and the row's status/updated_at are left
+// completely untouched.
+func TestAbandonRunCASRejectedWhenAlreadyDone(t *testing.T) {
+	s := open(t)
+	id, _ := s.InsertRun("wf", "{}", 1000)
+	if err := s.SetRunStatus(id, "done", 1500); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _ := s.GetRun(id)
+
+	claimed, err := s.AbandonRunCAS(id, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("AbandonRunCAS on a done run: claimed=true, want false")
+	}
+	after, _, _ := s.GetRun(id)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("row mutated by a rejected AbandonRunCAS: before=%+v after=%+v", before, after)
+	}
+}
+
+// TestAbandonRunCASRejectedWhenAlreadyAbandoned: a second abandon on an
+// already-abandoned run also comes back claimed=false (status is no longer
+// 'running') — the Runner is responsible for treating this specific case as
+// an idempotent no-op rather than an error; the store just reports honestly.
+func TestAbandonRunCASRejectedWhenAlreadyAbandoned(t *testing.T) {
+	s := open(t)
+	id, _ := s.InsertRun("wf", "{}", 1000)
+	claimed1, err := s.AbandonRunCAS(id, 1500)
+	if err != nil || !claimed1 {
+		t.Fatalf("first AbandonRunCAS: claimed=%v err=%v", claimed1, err)
+	}
+
+	claimed2, err := s.AbandonRunCAS(id, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed2 {
+		t.Fatal("second AbandonRunCAS on an already-abandoned run: claimed=true, want false")
+	}
+	got, _, _ := s.GetRun(id)
+	if got.Status != "abandoned" || got.UpdatedAt != 1500 {
+		t.Fatalf("got = %+v, want unchanged since the FIRST abandon (UpdatedAt=1500)", got)
+	}
+}
+
 func TestClearPendingSeed(t *testing.T) {
 	s := open(t)
 	id, _ := s.InsertRun("wf", "{}", 1000)

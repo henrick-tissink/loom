@@ -475,8 +475,50 @@ func (r *Runner) RetryPendingSeed(run store.RunRow) error {
 	return r.sendPendingSeed(run)
 }
 
+// Finish marks run done via the CAS gate (spec §2.7): the UI's finishCmd
+// already re-reads the run fresh before calling this, but that pre-read and
+// the actual write are two separate moments — the write itself must be
+// conditioned on the SAME snapshot (run.StepIdx, status='running'), not
+// applied unconditionally after the fact, or an advance/second-finish
+// landing in between would be silently clobbered. claimed=false surfaces
+// ErrRunAdvancedElsewhere, the same signal a rejected AdvanceRunCAS gives:
+// the caller acted on a stale snapshot and must not retry blindly.
+func (r *Runner) Finish(run store.RunRow, now time.Time) error {
+	claimed, err := r.Store.FinishRunCAS(run.ID, run.StepIdx, now.Unix())
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return ErrRunAdvancedElsewhere
+	}
+	return nil
+}
+
 // Abandon marks run abandoned (spec §2.12: "Abandon ≠ kill" — the step's
 // session is left running untouched; only the run's bookkeeping changes).
+// The write is conditioned on status='running' (AbandonRunCAS) rather than
+// the old unconditional SetRunStatus: abandon-vs-finish is a real race (the
+// confirm was opened against a running snapshot, but the run finished
+// before 'y' landed) and must not silently overwrite 'done' back to
+// 'abandoned'. abandon-vs-ABANDON is harmless — re-abandoning an
+// already-abandoned run stays idempotent (nil error) — so on
+// claimed=false this re-reads the row to tell the two apart: already
+// abandoned is a no-op, already done is a mild error, never a silent
+// overwrite.
 func (r *Runner) Abandon(run store.RunRow, now time.Time) error {
-	return r.Store.SetRunStatus(run.ID, "abandoned", now.Unix())
+	claimed, err := r.Store.AbandonRunCAS(run.ID, now.Unix())
+	if err != nil {
+		return err
+	}
+	if claimed {
+		return nil
+	}
+	fresh, ok, err := r.Store.GetRun(run.ID)
+	if err != nil {
+		return err
+	}
+	if !ok || fresh.Status == "abandoned" {
+		return nil // already abandoned elsewhere — idempotent, not an error
+	}
+	return fmt.Errorf("workflow: run %d: cannot abandon — already %s", run.ID, fresh.Status)
 }

@@ -1577,6 +1577,107 @@ func TestWFAdvanceDoublePressGuardedInFlight(t *testing.T) {
 	}
 }
 
+// TestWFStaleAdvanceResultDoesNotMutateADifferentRunsOpenConfirm is the
+// regression test for the case-wfActionMsg staleness bug: run A's confirm
+// opens and its advance fires ('y'), but the result is still in flight when
+// the user cancels (esc) and opens run B's confirm instead. A's delayed
+// result (ErrContinueDead) then arrives. It must NOT mutate B's now-open
+// confirm — not wfContinueDead, not view, not wfTarget — only clear A's own
+// in-flight guard and surface an A-qualified errStr. A subsequent 'f' press
+// must be a no-op (B's wfContinueDead was never armed), never a forced fork
+// fired against B.
+func TestWFStaleAdvanceResultDoesNotMutateADifferentRunsOpenConfirm(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	runAID, err := st.InsertRun("wfA", `{"name":"wfA","steps":[{"label":"a","project":"/x","relation":"fresh"},{"label":"b","relation":"continue","seed":"go"}]}`, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdvanceRunCAS(runAID, 0, 0, []string{"loom-a"}, "", 100); err != nil {
+		t.Fatal(err)
+	}
+	runA, _, err := st.GetRun(runAID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runBID, err := st.InsertRun("wfB", `{"name":"wfB","steps":[{"label":"a","project":"/x","relation":"fresh"},{"label":"b","relation":"fresh","seed":"go"}]}`, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdvanceRunCAS(runBID, 0, 0, []string{"loom-b"}, "", 100); err != nil {
+		t.Fatal(err)
+	}
+	runB, _, err := st.GetRun(runBID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewApp(Deps{Runner: &workflow.Runner{Store: st}})
+	a.width, a.height = 80, 24
+
+	// A's confirm opens, 'y' fires A's advance (still in flight — the result
+	// hasn't arrived yet).
+	a.view = viewWFConfirm
+	a.wfTarget = runA
+	a.wfPreview = workflow.StepPreview{Label: "b", Relation: "continue", Seed: "go"}
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y press on A did not return a command")
+	}
+	if !a.wfInFlight[runA.ID] {
+		t.Fatal("A's advance should be marked in-flight")
+	}
+
+	// User cancels A's confirm before the result arrives.
+	a.Update(key("esc"))
+	if a.view != viewWorkflows {
+		t.Fatalf("view after esc = %v, want viewWorkflows", a.view)
+	}
+	if !a.wfInFlight[runA.ID] {
+		t.Fatal("esc must not release A's in-flight guard — nothing has resolved yet")
+	}
+
+	// User opens B's confirm (wfPressN's own effects, applied directly).
+	a.wfTarget = runB
+	a.wfPreview = workflow.StepPreview{Label: "b", Relation: "fresh", Seed: "go"}
+	a.wfPreviewLoading = false
+	a.wfPreviewErr = ""
+	a.wfContinueDead = false
+	a.view = viewWFConfirm
+
+	// A's delayed advance result finally arrives: ErrContinueDead for A.
+	stale := wfActionMsg{kind: wfActionAdvance, runID: runA.ID, runName: runA.Name, err: workflow.ErrContinueDead}
+	a.Update(stale)
+
+	if a.wfInFlight[runA.ID] {
+		t.Fatal("stale result must still clear its OWN in-flight guard")
+	}
+	if a.wfContinueDead {
+		t.Fatal("stale result for A must not arm B's fork-demotion recovery")
+	}
+	if a.view != viewWFConfirm {
+		t.Fatalf("view = %v, want still viewWFConfirm (B's confirm must stay open, untouched)", a.view)
+	}
+	if a.wfTarget.ID != runB.ID {
+		t.Fatalf("wfTarget = %+v, want still B (untouched)", a.wfTarget)
+	}
+	if !strings.Contains(a.errStr, "wfA") {
+		t.Fatalf("errStr = %q, want it to name the stale run (A), not silently drop the error", a.errStr)
+	}
+
+	// 'f' must be a no-op: wfContinueDead was never armed for B.
+	_, fCmd := a.Update(key("f"))
+	if fCmd != nil {
+		t.Fatal("f after a stale A result must not fire a forced fork against B (wfContinueDead not armed)")
+	}
+	if a.wfTarget.ID != runB.ID {
+		t.Fatalf("wfTarget after f = %+v, want still B", a.wfTarget)
+	}
+}
+
 // TestWFStartDoublePressGuardedInFlight mirrors the guard above for the
 // def-row start action (keyed by definition path, since a brand-new run has
 // no id yet).

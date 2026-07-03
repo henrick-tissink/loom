@@ -84,6 +84,50 @@ func (s *Store) SetRunStatus(id int64, status string, now int64) error {
 	return err
 }
 
+// FinishRunCAS marks run id 'done' iff its step_idx still matches
+// expectedStepIdx AND status is still 'running' (spec §2.7 CAS gate,
+// closing the same TOCTOU window AdvanceRunCAS closes for advances):
+// finishCmd's fresh pre-read decides "this run is still at the snapshot the
+// confirm showed, done is safe" but that decision and the write are two
+// separate moments — an advance or a second finish can land in between.
+// claimed=false (RowsAffected==0) means the snapshot went stale meanwhile;
+// the row is left completely untouched, same discipline as AdvanceRunCAS.
+func (s *Store) FinishRunCAS(id int64, expectedStepIdx int64, now int64) (claimed bool, err error) {
+	res, err := s.db.Exec(
+		`UPDATE workflow_runs SET status='done', updated_at=? WHERE id=? AND step_idx=? AND status='running'`,
+		now, id, expectedStepIdx)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// AbandonRunCAS marks run id 'abandoned' iff it is still status='running'
+// (spec §2.12 narrowing): closes the abandon-vs-finish TOCTOU window — an
+// abandon confirm opened against a running snapshot must not silently
+// overwrite a run that finished concurrently. claimed=false covers BOTH
+// "already abandoned" and "already done"; the caller (Runner.Abandon)
+// re-reads the row to tell those apart — the former is a harmless
+// idempotent no-op, the latter is the narrowing violation this exists to
+// catch.
+func (s *Store) AbandonRunCAS(id int64, now int64) (claimed bool, err error) {
+	res, err := s.db.Exec(
+		`UPDATE workflow_runs SET status='abandoned', updated_at=? WHERE id=? AND status='running'`,
+		now, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // ClearPendingSeed marks a run's undelivered continue/fork seed as
 // delivered (spec §2.9).
 func (s *Store) ClearPendingSeed(id int64, now int64) error {

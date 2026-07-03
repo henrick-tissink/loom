@@ -315,11 +315,15 @@ type (
 	// wfActionMsg is the shared result type for advance/finish/abandon/
 	// retry (spec §2.6/§2.7/§2.9/§2.12) — all four are CAS-guarded or
 	// otherwise idempotent store writes, all release the per-run-id
-	// in-flight guard the same way.
+	// in-flight guard the same way. runName is the target run's Name,
+	// captured at command-fire time — used only to label a STALE result's
+	// errStr (see the wfActionMsg case), since a stale result must not touch
+	// a.wfTarget to read it back off.
 	wfActionMsg struct {
-		kind  wfActionKind
-		runID int64
-		err   error
+		kind    wfActionKind
+		runID   int64
+		runName string
+		err     error
 	}
 )
 
@@ -524,7 +528,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the new run shows up, rather than hand-splicing a synthetic row.
 		return a, a.wfLoadCmd()
 	case wfActionMsg:
-		a.clearWFInFlight(m.runID)
+		a.clearWFInFlight(m.runID) // own-runID guard release: correct regardless of staleness
+		// Staleness gate (same discipline as wfPreviewMsg above, spec
+		// regression fix): this result belongs to the CURRENTLY open confirm
+		// only if that confirm's view matches the kind AND its captured
+		// wfTarget is still this run. Reachable bug this closes: run A's
+		// advance confirm is cancelled (esc) while its advance is still in
+		// flight, run B's confirm is then opened, and A's delayed result
+		// (e.g. ErrContinueDead) arrives — it must NOT arm B's 'f' recovery
+		// or otherwise touch B's open confirm. A stale result only clears its
+		// own in-flight guard (above) and surfaces a run-name-qualified
+		// errStr; it never mutates a.view/wfContinueDead.
+		fresh := m.runID == a.wfTarget.ID &&
+			((m.kind == wfActionAbandon && a.view == viewWFConfirmAbandon) ||
+				((m.kind == wfActionAdvance || m.kind == wfActionFinish) && a.view == viewWFConfirm))
+		if !fresh {
+			if m.err != nil {
+				a.errStr = fmt.Sprintf("run %s#%d: %s", m.runName, m.runID, m.err.Error())
+			}
+			return a, a.wfLoadCmd()
+		}
 		if m.err == nil {
 			a.view = viewWorkflows
 			return a, a.wfLoadCmd()
@@ -1264,18 +1287,21 @@ func (a *App) advanceCmd(target store.RunRow, forceFork bool, w, h int) tea.Cmd 
 	return func() tea.Msg {
 		fresh, ok, err := runner.Store.GetRun(target.ID)
 		if err != nil {
-			return wfActionMsg{kind: wfActionAdvance, runID: target.ID, err: err}
+			return wfActionMsg{kind: wfActionAdvance, runID: target.ID, runName: target.Name, err: err}
 		}
 		if !ok || fresh.Status != "running" || fresh.StepIdx != target.StepIdx {
-			return wfActionMsg{kind: wfActionAdvance, runID: target.ID, err: workflow.ErrRunAdvancedElsewhere}
+			return wfActionMsg{kind: wfActionAdvance, runID: target.ID, runName: target.Name, err: workflow.ErrRunAdvancedElsewhere}
 		}
 		err = runner.Advance(fresh, forceFork, w, h, time.Now())
-		return wfActionMsg{kind: wfActionAdvance, runID: target.ID, err: err}
+		return wfActionMsg{kind: wfActionAdvance, runID: target.ID, runName: target.Name, err: err}
 	}
 }
 
 // finishCmd marks target done (spec §2.7: terminal-step confirm, no launch,
-// no append) — same fresh-read re-verification as advanceCmd.
+// no append) via Runner.Finish, which itself CAS-conditions the actual write
+// on run.StepIdx/status='running' (FinishRunCAS) — this fresh-read is a
+// re-verification for a prompt error message, not the sole gate; the write
+// is guarded again, independently, at the point it happens.
 func (a *App) finishCmd(target store.RunRow) tea.Cmd {
 	runner := a.deps.Runner
 	if runner == nil {
@@ -1284,13 +1310,13 @@ func (a *App) finishCmd(target store.RunRow) tea.Cmd {
 	return func() tea.Msg {
 		fresh, ok, err := runner.Store.GetRun(target.ID)
 		if err != nil {
-			return wfActionMsg{kind: wfActionFinish, runID: target.ID, err: err}
+			return wfActionMsg{kind: wfActionFinish, runID: target.ID, runName: target.Name, err: err}
 		}
 		if !ok || fresh.Status != "running" || fresh.StepIdx != target.StepIdx {
-			return wfActionMsg{kind: wfActionFinish, runID: target.ID, err: workflow.ErrRunAdvancedElsewhere}
+			return wfActionMsg{kind: wfActionFinish, runID: target.ID, runName: target.Name, err: workflow.ErrRunAdvancedElsewhere}
 		}
-		err = runner.Store.SetRunStatus(target.ID, "done", time.Now().Unix())
-		return wfActionMsg{kind: wfActionFinish, runID: target.ID, err: err}
+		err = runner.Finish(fresh, time.Now())
+		return wfActionMsg{kind: wfActionFinish, runID: target.ID, runName: target.Name, err: err}
 	}
 }
 
@@ -1303,7 +1329,7 @@ func (a *App) abandonCmd(target store.RunRow) tea.Cmd {
 	}
 	return func() tea.Msg {
 		err := runner.Abandon(target, time.Now())
-		return wfActionMsg{kind: wfActionAbandon, runID: target.ID, err: err}
+		return wfActionMsg{kind: wfActionAbandon, runID: target.ID, runName: target.Name, err: err}
 	}
 }
 
@@ -1317,13 +1343,13 @@ func (a *App) retryCmd(target store.RunRow) tea.Cmd {
 	return func() tea.Msg {
 		fresh, ok, err := runner.Store.GetRun(target.ID)
 		if err != nil {
-			return wfActionMsg{kind: wfActionRetry, runID: target.ID, err: err}
+			return wfActionMsg{kind: wfActionRetry, runID: target.ID, runName: target.Name, err: err}
 		}
 		if !ok {
-			return wfActionMsg{kind: wfActionRetry, runID: target.ID, err: errors.New("workflow: run not found")}
+			return wfActionMsg{kind: wfActionRetry, runID: target.ID, runName: target.Name, err: errors.New("workflow: run not found")}
 		}
 		err = runner.RetryPendingSeed(fresh)
-		return wfActionMsg{kind: wfActionRetry, runID: target.ID, err: err}
+		return wfActionMsg{kind: wfActionRetry, runID: target.ID, runName: target.Name, err: err}
 	}
 }
 

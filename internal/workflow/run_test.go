@@ -690,3 +690,79 @@ func TestAbandonSetsStatusAbandoned(t *testing.T) {
 		t.Fatalf("got = %+v, want Status=abandoned UpdatedAt=200", got)
 	}
 }
+
+// TestAbandonOnAlreadyAbandonedRunIsIdempotent: abandon-vs-abandon (e.g. a
+// double-press that got past the UI's in-flight guard, or a second Loom
+// instance) must stay a harmless no-op, not an error.
+func TestAbandonOnAlreadyAbandonedRunIsIdempotent(t *testing.T) {
+	r, _, _ := testRunner(t)
+	runID, _ := r.Store.InsertRun("wf9b", "{}", 100)
+	if err := r.Abandon(store.RunRow{ID: runID}, time.Unix(200, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Abandon(store.RunRow{ID: runID}, time.Unix(300, 0)); err != nil {
+		t.Fatalf("second Abandon on an already-abandoned run returned an error: %v, want nil (idempotent)", err)
+	}
+	got, _, _ := r.Store.GetRun(runID)
+	if got.Status != "abandoned" || got.UpdatedAt != 200 {
+		t.Fatalf("got = %+v, want unchanged since the FIRST abandon (UpdatedAt=200) — the second must be a no-op", got)
+	}
+}
+
+// TestAbandonOnAlreadyFinishedRunSurfacesMildErrorNotOverwrite is the
+// narrowing proof (spec §2.12): a run that finished between the abandon
+// confirm opening and 'y' firing must not be silently clobbered back to
+// 'abandoned' — Abandon must return an error, and the row must stay 'done'.
+func TestAbandonOnAlreadyFinishedRunSurfacesMildErrorNotOverwrite(t *testing.T) {
+	r, _, _ := testRunner(t)
+	runID, _ := r.Store.InsertRun("wf9c", "{}", 100)
+	if err := r.Finish(store.RunRow{ID: runID, StepIdx: 0}, time.Unix(150, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	err := r.Abandon(store.RunRow{ID: runID}, time.Unix(200, 0))
+	if err == nil {
+		t.Fatal("Abandon on an already-done run returned nil, want a mild error")
+	}
+	got, _, _ := r.Store.GetRun(runID)
+	if got.Status != "done" || got.UpdatedAt != 150 {
+		t.Fatalf("got = %+v, want unchanged status=done (not silently overwritten to abandoned)", got)
+	}
+}
+
+// --- Finish (spec §2.7 CAS gate) --------------------------------------------
+
+func TestFinishMarksRunDoneViaCAS(t *testing.T) {
+	r, _, _ := testRunner(t)
+	runID, _ := r.Store.InsertRun("wf10", "{}", 100)
+
+	if err := r.Finish(store.RunRow{ID: runID, StepIdx: 0}, time.Unix(200, 0)); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := r.Store.GetRun(runID)
+	if got.Status != "done" || got.UpdatedAt != 200 {
+		t.Fatalf("got = %+v, want Status=done UpdatedAt=200", got)
+	}
+}
+
+// TestFinishRejectedOnStaleStepIdxReturnsErrRunAdvancedElsewhere: an advance
+// landed between the caller's pre-read and the Finish call (the same TOCTOU
+// window AdvanceRunCAS closes for advances) — Finish's CAS must reject it and
+// report ErrRunAdvancedElsewhere, not silently mark the run done at the wrong
+// step.
+func TestFinishRejectedOnStaleStepIdxReturnsErrRunAdvancedElsewhere(t *testing.T) {
+	r, _, _ := testRunner(t)
+	runID, _ := r.Store.InsertRun("wf11", "{}", 100)
+	if _, err := r.Store.AdvanceRunCAS(runID, 0, 1, []string{"loom-a", "loom-b"}, "", 150); err != nil {
+		t.Fatal(err)
+	}
+
+	err := r.Finish(store.RunRow{ID: runID, StepIdx: 0}, time.Unix(200, 0)) // stale: pre-advance snapshot
+	if !errors.Is(err, ErrRunAdvancedElsewhere) {
+		t.Fatalf("err = %v, want ErrRunAdvancedElsewhere", err)
+	}
+	got, _, _ := r.Store.GetRun(runID)
+	if got.Status != "running" || got.StepIdx != 1 {
+		t.Fatalf("got = %+v, want untouched (status=running step_idx=1)", got)
+	}
+}
