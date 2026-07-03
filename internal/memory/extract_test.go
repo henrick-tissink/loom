@@ -445,3 +445,22 @@ func TestCleanText(t *testing.T) {
 		}
 	}
 }
+
+// TestAskUsable guards the exported seam internal/workflow's substitute()
+// relies on (spec docs/superpowers/specs/2026-07-03-workflows-design.md
+// §2.3, ask-filter rule) instead of duplicating excludedPrefixes.
+func TestAskUsable(t *testing.T) {
+	cases := map[string]bool{
+		"fix the parser bug":                             true,
+		"<command-name>foo</command-name>":               false,
+		"Caveat: the messages below":                     false,
+		"[Request interrupted by user]":                  false,
+		"<local-command-stdout>x</local-command-stdout>": false,
+		"": true,
+	}
+	for in, want := range cases {
+		if got := AskUsable(in); got != want {
+			t.Fatalf("AskUsable(%q) = %v, want %v", in, got, want)
+		}
+	}
+}

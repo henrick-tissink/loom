@@ -116,6 +116,17 @@ func hasExcludedPrefix(s string) bool {
 	return false
 }
 
+// AskUsable reports whether s is safe to surface as an Ask value outside
+// this package — specifically, Phase 3 Workflows' `{{prev.ask}}` template
+// (spec docs/superpowers/specs/2026-07-03-workflows-design.md §2.3).
+// Extraction.Ask is normally populated only from text that already passed
+// hasExcludedPrefix (see feedUser), but the result() fallback path
+// (firstUserText, captured before that check — see feedUser's comment) can
+// leak an excluded-prefix string into Ask when no normal ask candidate was
+// found. Exported so callers outside this package can re-check an Ask
+// value rather than duplicating excludedPrefixes.
+func AskUsable(s string) bool { return !hasExcludedPrefix(s) }
+
 // ExtractFile streams one JSONL transcript file with bufio.Reader.
 // ReadBytes('\n') — never bufio.Scanner, whose default 64KB line buffer
 // silently drops real transcript lines that reach 2.8MB+ — and returns
