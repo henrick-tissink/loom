@@ -1,0 +1,10 @@
+{
+  "name": "plan-execute-review",
+  "steps": [
+    { "label": "plan",    "project": "loom", "model": "opus", "mode": "plan",
+      "seed": "Plan the following work: <describe>. Write the plan to docs/plan.md.", "relation": "fresh" },
+    { "label": "execute", "model": "sonnet", "mode": "acceptEdits", "relation": "fork",
+      "seed": "Execute the plan just written. Prior step concluded: {{prev.outcome}}" },
+    { "label": "review",  "relation": "fresh", "seed": "/code-review" }
+  ]
+}

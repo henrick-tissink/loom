@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,6 +17,7 @@ import (
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
 	"github.com/henricktissink/loom/internal/ui"
+	"github.com/henricktissink/loom/internal/workflow"
 )
 
 func main() {
@@ -53,17 +55,24 @@ func run() error {
 	defer cancel()
 	go ix.Run(ctx, 10*time.Minute)
 
+	launcher := &session.Launcher{
+		Tmux: tm, Store: st,
+		ClaudeConfigDir: cfg.ClaudeConfigDir,
+		ClaudeJSONPath:  cfg.ClaudeJSONPath(),
+		ReadyMarker:     session.DefaultReadyMarker,
+		TrustMarker:     session.DefaultTrustMarker,
+		ReadyTimeout:    60 * time.Second,
+		PollEvery:       500 * time.Millisecond,
+	}
+
+	workflowsDir := filepath.Join(cfg.LoomDir, "workflows")
+	if err := os.MkdirAll(workflowsDir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", workflowsDir, err)
+	}
+
 	deps := ui.Deps{
-		Engine: status.NewEngine(tm, st, cfg.ClaudeConfigDir),
-		Launcher: &session.Launcher{
-			Tmux: tm, Store: st,
-			ClaudeConfigDir: cfg.ClaudeConfigDir,
-			ClaudeJSONPath:  cfg.ClaudeJSONPath(),
-			ReadyMarker:     session.DefaultReadyMarker,
-			TrustMarker:     session.DefaultTrustMarker,
-			ReadyTimeout:    60 * time.Second,
-			PollEvery:       500 * time.Millisecond,
-		},
+		Engine:        status.NewEngine(tm, st, cfg.ClaudeConfigDir),
+		Launcher:      launcher,
 		Projects:      projects,
 		Tmux:          tm,
 		InsideTmux:    config.InsideTmux(),
@@ -74,6 +83,12 @@ func run() error {
 			Binary:  "claude",
 			WorkDir: cfg.LoomDir,
 		},
+		Runner: &workflow.Runner{
+			Store:           st,
+			Launcher:        launcher,
+			ClaudeConfigDir: cfg.ClaudeConfigDir,
+		},
+		WorkflowsDir: workflowsDir,
 	}
 	p := tea.NewProgram(ui.NewApp(deps), tea.WithAltScreen())
 	_, err = p.Run()

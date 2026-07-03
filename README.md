@@ -31,6 +31,59 @@ launch, monitor, and return to real `claude` sessions across a whole workspace.
   quota (a few seconds, one small request), and only runs when you press it.
   Pressing `s` again regenerates and replaces the stored summary.
 
+## Phase 3 — Workflows
+
+- `w` opens the workflows view: a **RUNS** section (active runs, honest
+  store-backed status: `▸ name#id · step 2/3 execute · needs you` plus
+  `· seed pending` / `· seed FAILED` markers) and a **WORKFLOWS** section
+  (definitions loaded from `~/.loom/workflows/*.json`, malformed files listed
+  dim-red with their error).
+- A workflow is a named chain of steps, each a normal `claude` session.
+  Starting one launches step 1; you advance (`n`) when you're ready — nothing
+  auto-advances. Loom launches the next step per its **relation** and offers
+  a confirm preview of exactly what will happen (including the substituted
+  seed) before it fires.
+- **Definition format** (`~/.loom/workflows/<name>.json`, name must match the
+  filename):
+
+  ```json
+  { "name": "plan-execute-review",
+    "steps": [
+      { "label": "plan",    "project": "myproject", "model": "opus", "mode": "plan",
+        "seed": "Plan the following work: <describe>. Write the plan to docs/plan.md.", "relation": "fresh" },
+      { "label": "execute", "model": "sonnet", "mode": "acceptEdits", "relation": "fork",
+        "seed": "Execute the plan just written. Prior step concluded: {{prev.outcome}}" },
+      { "label": "review",  "relation": "fresh", "seed": "/code-review" } ] }
+  ```
+
+  A starter copy lives at `docs/examples/plan-execute-review.json` — copy and
+  edit it:
+
+  ```sh
+  mkdir -p ~/.loom/workflows
+  cp docs/examples/plan-execute-review.json ~/.loom/workflows/
+  # edit the "project" field(s) and seed prompts to match your workspace
+  ```
+
+- **Relations** (ignored for step 1, which is always a fresh session):
+  - `fresh` — new session, seed used as-is.
+  - `fork` — new session, seed with `{{prev.*}}` templates substituted from
+    the previous step.
+  - `continue` — the seed is sent into the *current* step's still-running
+    session (model/mode are ignored — ignoring them is a known v1 limit).
+- **Template variables**: `{{prev.outcome}}`, `{{prev.title}}`,
+  `{{prev.ask}}` — filled in from the previous step's extracted transcript at
+  confirm-open time. Any other `{{...}}` token is rejected at load time (a
+  typo never ships as literal braces). A value that can't be resolved (or an
+  `ask` that fails the same filters memory search uses) renders as
+  `(unavailable)` rather than blocking the advance.
+- **Limits (v1)**: no in-app definition editor (hand-edit the JSON); no
+  branching/conditionals; no auto-advance; no scheduling; no per-step
+  worktree isolation; `continue` can't change model/mode; each substituted
+  value is capped at 8KB and the assembled seed at 15KB (both truncate with a
+  visible `…[truncated]` marker); a dead `continue` target offers `f` to fork
+  from the transcript instead; run rows are never garbage-collected.
+
 ## Requirements
 
 - macOS, `tmux` ≥ 3.x, `claude` CLI, Go ≥ 1.22 (build only)

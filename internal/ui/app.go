@@ -1473,7 +1473,7 @@ func (a *App) View() string {
 	counts := fmt.Sprintf("%d live · %d needs you", live, needs)
 	keybar := "↵ attach · space peek · n new · x kill · t tag · r reopen · q quit"
 	if inner > lipgloss.Width(keybar)+24 {
-		keybar += " · / search · w workflows·soon"
+		keybar += " · / search · w workflows"
 	}
 	return frame(w, "LOOM", counts, body, keybar)
 }
