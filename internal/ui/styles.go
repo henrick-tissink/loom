@@ -24,6 +24,9 @@ var (
 	styMeta     = lipgloss.NewStyle().Foreground(colMeta)
 	styChrome   = lipgloss.NewStyle().Foreground(colChrome)
 	styHelp     = lipgloss.NewStyle().Foreground(colChrome)
+	// styHit highlights the matched-term spans inside a search snippet
+	// (spec §6) — accent, bold, distinct from the dim (styMeta) snippet base.
+	styHit = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 )
 
 func statusIcon(status string) string {

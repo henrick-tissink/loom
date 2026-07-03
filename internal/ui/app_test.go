@@ -493,6 +493,256 @@ func TestSnapMsgWithTransitionsEmitsNotify(t *testing.T) {
 	}
 }
 
+// TestSlashOpensSearch: '/' from the dashboard opens viewSearch with a
+// fresh, focused input and empty results (spec §6), and the frame invariant
+// (every line exactly a.width cells) holds at both a wide and a narrow
+// width.
+func TestSlashOpensSearch(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key("/"))
+	if a.view != viewSearch {
+		t.Fatalf("view = %v, want viewSearch", a.view)
+	}
+	if !a.searchInput.Focused() {
+		t.Fatal("search input not focused")
+	}
+	if len(a.searchHits) != 0 {
+		t.Fatalf("search results not empty on open: %+v", a.searchHits)
+	}
+	for _, width := range []int{100, 40} {
+		a.width = width
+		for i, line := range strings.Split(a.View(), "\n") {
+			if lw := lipgloss.Width(line); lw != width {
+				t.Fatalf("width %d line %d: got %d cells (want %d): %q", width, i, lw, width, line)
+			}
+		}
+	}
+}
+
+// TestDebounceCmdCarriesSeq pins the shape of the debounce tick message
+// itself (the 200ms delay is real but small enough to eat in a unit test).
+func TestDebounceCmdCarriesSeq(t *testing.T) {
+	msg := debounceCmd(42)()
+	dm, ok := msg.(searchDebounceMsg)
+	if !ok || dm.seq != 42 {
+		t.Fatalf("debounceCmd(42)() = %#v, want searchDebounceMsg{seq:42}", msg)
+	}
+}
+
+// TestSearchTypingBumpsSeqAndEmitsCmd: every keystroke that changes the
+// input bumps searchSeq and returns a (debounce) command — checked without
+// actually invoking the 200ms tick, which TestDebounceCmdCarriesSeq covers
+// in isolation.
+func TestSearchTypingBumpsSeqAndEmitsCmd(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key("/"))
+	seqBefore := a.searchSeq
+	_, cmd := a.Update(key("w"))
+	if a.searchSeq == seqBefore {
+		t.Fatal("typing did not bump searchSeq")
+	}
+	if cmd == nil {
+		t.Fatal("typing did not return a command")
+	}
+	if a.searchInput.Value() != "w" {
+		t.Fatalf("input value = %q, want \"w\"", a.searchInput.Value())
+	}
+}
+
+// TestSearchEmptyInputClearsResults: clearing the input back to empty
+// clears results immediately (spec §6: "Empty input → results cleared, no
+// query").
+func TestSearchEmptyInputClearsResults(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key("/"))
+	a.Update(key("w"))
+	a.searchHits = []store.SearchHit{{SessionID: "s1"}}
+	a.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if a.searchInput.Value() != "" {
+		t.Fatalf("input value = %q, want empty after backspace", a.searchInput.Value())
+	}
+	if a.searchHits != nil {
+		t.Fatalf("results not cleared on empty input: %+v", a.searchHits)
+	}
+}
+
+// TestSearchResultsRenderHits: a searchResultsMsg matching the current input
+// renders each hit's project label, title, and snippet.
+func TestSearchResultsRenderHits(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key("/"))
+	a.searchInput.SetValue("widget")
+	hits := []store.SearchHit{
+		{SessionID: "s1", Title: "fix the widget", ProjectDir: "-Users-h-Sauce-HappyPay",
+			Cwd: "/w/happypay", Snippet: "talking about the \x01widget\x02 again", LastTS: time.Now().Unix()},
+	}
+	a.Update(searchResultsMsg{query: "widget", hits: hits})
+	out := a.View()
+	if !strings.Contains(out, "happypay") {
+		t.Fatalf("project label missing:\n%s", out)
+	}
+	if !strings.Contains(out, "fix the widget") {
+		t.Fatalf("title missing:\n%s", out)
+	}
+	if !strings.Contains(out, "widget") {
+		t.Fatalf("snippet missing:\n%s", out)
+	}
+	if strings.ContainsAny(out, "\x01\x02") {
+		t.Fatalf("rendered view leaked raw snippet markers:\n%s", out)
+	}
+}
+
+// TestSearchStaleResultsDiscarded: a searchResultsMsg for a query that no
+// longer matches the live input (the user kept typing) is discarded — same
+// staleness discipline as peekMsg.
+func TestSearchStaleResultsDiscarded(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key("/"))
+	a.searchInput.SetValue("newquery")
+	a.Update(searchResultsMsg{query: "oldquery", hits: []store.SearchHit{{SessionID: "stale", Title: "STALE HIT"}}})
+	if len(a.searchHits) != 0 {
+		t.Fatalf("stale results applied: %+v", a.searchHits)
+	}
+}
+
+// TestSearchEnterOpensDetail: '↵' on a selected result captures it as
+// detailTarget and switches to viewDetail (Task 3 fleshes viewDetail out;
+// Task 2 only needs the capture + a minimal body).
+func TestSearchEnterOpensDetail(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key("/"))
+	a.searchHits = []store.SearchHit{{SessionID: "sess-1", Title: "hello"}}
+	a.searchCursor = 0
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.view != viewDetail {
+		t.Fatalf("view = %v, want viewDetail", a.view)
+	}
+	if a.detailTarget.SessionID != "sess-1" {
+		t.Fatalf("detailTarget = %+v, want sess-1 captured", a.detailTarget)
+	}
+	for _, line := range strings.Split(a.View(), "\n") {
+		if lw := lipgloss.Width(line); lw != a.width {
+			t.Fatalf("viewDetail line width %d != %d", lw, a.width)
+		}
+	}
+}
+
+// TestSearchEscReturnsToDash: 'esc' from search goes back to the dashboard.
+func TestSearchEscReturnsToDash(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key("/"))
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewDash {
+		t.Fatalf("view = %v, want viewDash after esc", a.view)
+	}
+}
+
+// TestCtrlCQuitsFromSearchAndTag guards the red-team finding: ctrl+c must
+// quit even from the free-text input views, checked BEFORE the keystroke is
+// forwarded to the textinput (which would otherwise silently swallow it).
+func TestCtrlCQuitsFromSearchAndTag(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key("/"))
+	if a.view != viewSearch {
+		t.Fatalf("view = %v, want viewSearch", a.view)
+	}
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c in search did not return a command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("ctrl+c in search did not quit")
+	}
+
+	b := fixtureApp()
+	b.Update(key("t"))
+	if b.view != viewTag {
+		t.Fatalf("view = %v, want viewTag", b.view)
+	}
+	_, cmd2 := b.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd2 == nil {
+		t.Fatal("ctrl+c in tag did not return a command")
+	}
+	if _, ok := cmd2().(tea.QuitMsg); !ok {
+		t.Fatal("ctrl+c in tag did not quit")
+	}
+}
+
+// TestTickMsgInSearchViewSchedulesStatusRefresh checks the tickMsg-in-
+// viewSearch WIRING only (ONE tickAfter per tickMsg, plus the extra one-shot
+// status-refresh cmd riding the same batch — finding 1 precedent) without
+// invoking the real 1.5s tickAfter/pollInterval timer, which would make this
+// test slow for no extra coverage (the timer's own shape is tea's, not
+// ours).
+func TestTickMsgInSearchViewSchedulesStatusRefresh(t *testing.T) {
+	a := fixtureApp() // Deps{}: Engine nil → pollCmd() is nil, filtered out of the batch
+	a.Update(key("/"))
+	_, cmd := a.Update(tickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatal("tick in viewSearch returned no command")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("tick in viewSearch cmd = %T, want tea.BatchMsg", cmd())
+	}
+	if len(batch) != 2 {
+		t.Fatalf("batch len = %d, want 2 (tickAfter + searchStatusCmd; pollCmd nil-filtered)", len(batch))
+	}
+}
+
+// TestSearchStatusMsgRefiresQueryOnActiveAndEdge drives the re-query
+// decision directly (active, and the active→inactive edge) against a real
+// store, without going through the slow tickAfter/pollInterval timer.
+func TestSearchStatusMsgRefiresQueryOnActiveAndEdge(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if err := st.UpsertTranscript(store.Transcript{
+		SessionID: "sess-1", ProjectDir: "loom", Cwd: "/w/loom", Title: "widget session",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceFileDocs(store.IndexedFile{Path: "/f1", SessionID: "sess-1", Size: 1, Mtime: 1},
+		[]store.Doc{{Content: "let's fix the widget today", Role: "user", TS: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.Update(key("/"))
+	a.searchInput.SetValue("widget")
+
+	// Active → re-fires the current query.
+	_, cmd := a.Update(searchStatusMsg{active: true, count: 1})
+	if cmd == nil {
+		t.Fatal("active status did not re-fire the query")
+	}
+	msg := cmd()
+	rm, ok := msg.(searchResultsMsg)
+	if !ok || rm.query != "widget" {
+		t.Fatalf("expected searchResultsMsg{query:\"widget\"}, got %#v", msg)
+	}
+	a.Update(rm)
+	if len(a.searchHits) == 0 {
+		t.Fatal("expected hits after the active-status re-fired query")
+	}
+	if a.searchCount != 1 || !a.searchActive {
+		t.Fatalf("cached count/active not updated: count=%d active=%v", a.searchCount, a.searchActive)
+	}
+
+	// active → inactive edge also re-fires once more (self-healing
+	// first-run: catches the final results after a sweep completes).
+	_, cmd2 := a.Update(searchStatusMsg{active: false, count: 1})
+	if cmd2 == nil {
+		t.Fatal("active->inactive edge did not re-fire the query")
+	}
+	if a.searchActive { // sanity: cached flag now reflects inactive
+		t.Fatal("searchActive should now be false")
+	}
+}
+
 func TestRowShowsAge(t *testing.T) {
 	a := fixtureApp()
 	a.now = time.Unix(2000, 0)
