@@ -16,6 +16,7 @@ import (
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/workflow"
 )
 
 func fixtureApp() *App {
@@ -1163,5 +1164,607 @@ func TestDetailFrameInvariantPopulatedContent(t *testing.T) {
 		if strings.ContainsAny(out, "\x01\x02") {
 			t.Fatalf("width %d: raw snippet markers leaked into the rendered view", width)
 		}
+	}
+}
+
+// --- Task 3: workflows view (`w`) ---------------------------------------
+
+// TestWOpensWorkflowsFromDashAndLoads: 'w' from the dashboard opens
+// viewWorkflows and returns wfLoadCmd — with Deps{} (nil Runner, empty
+// WorkflowsDir) that must resolve to an empty, error-free load (nil-safety
+// contract), and the frame invariant holds.
+func TestWOpensWorkflowsFromDashAndLoads(t *testing.T) {
+	a := fixtureApp()
+	_, cmd := a.Update(key("w"))
+	if a.view != viewWorkflows {
+		t.Fatalf("view = %v, want viewWorkflows", a.view)
+	}
+	if cmd == nil {
+		t.Fatal("w did not return a load command")
+	}
+	msg := cmd()
+	lm, ok := msg.(wfLoadedMsg)
+	if !ok {
+		t.Fatalf("cmd() = %T, want wfLoadedMsg", msg)
+	}
+	if lm.err != nil {
+		t.Fatalf("load errored with Deps{} (no Runner): %v", lm.err)
+	}
+	a.Update(lm)
+	if len(a.wfRuns) != 0 || len(a.wfDefs) != 0 {
+		t.Fatalf("expected empty runs/defs with nil Runner and no WorkflowsDir, got %+v / %+v", a.wfRuns, a.wfDefs)
+	}
+	for i, line := range strings.Split(a.View(), "\n") {
+		if lw := lipgloss.Width(line); lw != a.width {
+			t.Fatalf("workflows view line %d width %d != %d", i, lw, a.width)
+		}
+	}
+}
+
+// --- cursor math across sections (incl. one/both empty) -----------------
+
+func TestWFCursorClampsWhenBothSectionsEmpty(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	if _, ok := a.wfSelected(); ok {
+		t.Fatal("wfSelected should be false with both sections empty")
+	}
+	a.Update(key("j"))
+	a.Update(key("k"))
+	if a.wfCursor != 0 {
+		t.Fatalf("cursor = %d, want 0", a.wfCursor)
+	}
+	out := a.View()
+	if !strings.Contains(out, "no active runs") || !strings.Contains(out, "no workflow definitions found") {
+		t.Fatalf("empty-state text missing:\n%s", out)
+	}
+}
+
+func TestWFCursorMovesAcrossRunsAndDefsSections(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfRuns = []wfRunRow{
+		{run: store.RunRow{ID: 1, Name: "r1"}},
+		{run: store.RunRow{ID: 2, Name: "r2"}},
+	}
+	a.wfDefs = []workflow.Definition{{Name: "d1", Steps: []workflow.Step{{Label: "a", Project: "/x"}}}}
+
+	for i := 0; i < 5; i++ {
+		a.Update(key("j"))
+	}
+	if a.wfCursor != 2 {
+		t.Fatalf("cursor = %d, want clamped to 2 (last entry, 3 total)", a.wfCursor)
+	}
+	e, ok := a.wfSelected()
+	if !ok || e.kind != wfEntryDef || e.def.Name != "d1" {
+		t.Fatalf("selected = %+v, want the def row", e)
+	}
+	for i := 0; i < 5; i++ {
+		a.Update(key("k"))
+	}
+	if a.wfCursor != 0 {
+		t.Fatalf("cursor = %d, want floor 0", a.wfCursor)
+	}
+	e2, ok2 := a.wfSelected()
+	if !ok2 || e2.kind != wfEntryRun || e2.run.run.Name != "r1" {
+		t.Fatalf("selected = %+v, want r1", e2)
+	}
+}
+
+func TestWFCursorOneSectionEmpty(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfDefs = []workflow.Definition{{Name: "d1", Steps: []workflow.Step{{Label: "a", Project: "/x"}}}}
+	if e, ok := a.wfSelected(); !ok || e.kind != wfEntryDef {
+		t.Fatalf("selected = %+v, want the only def (runs empty)", e)
+	}
+
+	b := NewApp(Deps{})
+	b.width, b.height = 80, 24
+	b.view = viewWorkflows
+	b.wfRuns = []wfRunRow{{run: store.RunRow{ID: 1, Name: "r1"}}}
+	if e, ok := b.wfSelected(); !ok || e.kind != wfEntryRun {
+		t.Fatalf("selected = %+v, want the only run (defs empty)", e)
+	}
+}
+
+// --- rendering: runs, defs, load errors, markers -------------------------
+
+func TestWFViewRendersRunsDefsAndLoadErrors(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfRuns = []wfRunRow{{
+		run:        store.RunRow{ID: 3, Name: "plan-execute-review"},
+		stepLabel:  "step 2/3 execute",
+		resolvedOK: true,
+		resolved:   store.SessionRow{LastStatus: "running"},
+	}}
+	a.wfDefs = []workflow.Definition{{Name: "plan-execute-review", Steps: []workflow.Step{
+		{Label: "plan", Project: "/w/parallax"}, {Label: "execute"}, {Label: "review"},
+	}}}
+	a.wfLoadErrs = []workflow.LoadError{{Path: "/w/.loom/workflows/bad.json", Err: "invalid JSON"}}
+
+	out := a.View()
+	for _, want := range []string{
+		"plan-execute-review#3", "step 2/3 execute", "running",
+		"3 steps", "parallax", "bad.json", "invalid JSON",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("view missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestWFRunRowShowsPendingSeedAndSeedFailedMarkers(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfRuns = []wfRunRow{
+		{run: store.RunRow{ID: 1, Name: "r1", PendingSeed: "hello"}, resolvedOK: true, resolved: store.SessionRow{LastStatus: "idle"}},
+		{run: store.RunRow{ID: 2, Name: "r2"}, resolvedOK: true, resolved: store.SessionRow{LastStatus: "idle", SeedStatus: "failed"}},
+	}
+	out := a.View()
+	if !strings.Contains(out, "seed pending") {
+		t.Fatalf("missing seed pending marker:\n%s", out)
+	}
+	if !strings.Contains(out, "seed FAILED") {
+		t.Fatalf("missing seed FAILED marker:\n%s", out)
+	}
+}
+
+// TestWFCorruptRunRendersDimRedAndAbandonable guards spec §2.12: a run
+// whose def_json failed to parse renders (dim-red, checked via the
+// corrupt-run message) but is still abandonable via 'x'.
+func TestWFCorruptRunRendersDimRedAndAbandonable(t *testing.T) {
+	a := NewApp(Deps{Runner: &workflow.Runner{}})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfRuns = []wfRunRow{{run: store.RunRow{ID: 9, Name: "corrupt"}, defErr: true}}
+	out := a.View()
+	if !strings.Contains(out, "corrupt run definition") {
+		t.Fatalf("view missing corrupt-run message:\n%s", out)
+	}
+	a.wfCursor = 0
+	a.Update(key("x"))
+	if a.view != viewWFConfirmAbandon {
+		t.Fatalf("x on corrupt run: view = %v, want viewWFConfirmAbandon", a.view)
+	}
+}
+
+// --- dead-attach hint / live attach ---------------------------------------
+
+// TestWFAttachHintOnDeadRun: ↵ on a run whose current step did not resolve
+// live shows the dead-attach hint (spec §2.8) instead of a raw tmux error,
+// and returns no command.
+func TestWFAttachHintOnDeadRun(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfRuns = []wfRunRow{{run: store.RunRow{ID: 1, Name: "wf1"}, resolvedOK: false}}
+	a.wfCursor = 0
+	_, cmd := a.Update(key("enter"))
+	if cmd != nil {
+		t.Fatal("attach on a dead run returned a command, want nil")
+	}
+	if !strings.Contains(a.wfHint, "step session ended") {
+		t.Fatalf("wfHint = %q, want the dead-attach hint", a.wfHint)
+	}
+	if !strings.Contains(a.View(), "step session ended") {
+		t.Fatal("hint not rendered in the workflows view")
+	}
+}
+
+// TestWFAttachOnLiveRunReturnsCommand: ↵ on a resolved-live run attaches
+// (returns a non-nil tea.ExecProcess command) — the live counterpart to the
+// dead-attach hint test above.
+func TestWFAttachOnLiveRunReturnsCommand(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomwfui%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := tm.NewSession("loom-live", dir, "sleep 30", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewApp(Deps{Tmux: tm})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfRuns = []wfRunRow{{
+		run: store.RunRow{ID: 1, Name: "wf1"}, resolvedOK: true, live: true,
+		resolved: store.SessionRow{Name: "loom-live"},
+	}}
+	a.wfCursor = 0
+	_, cmd := a.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("attach on a live-resolved run did not return a command")
+	}
+}
+
+// --- confirm previews (spec §2.11) ---------------------------------------
+
+func TestWFConfirmShowsForkSubstitutedSnippetAndStepNumber(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 24
+	a.view = viewWFConfirm
+	a.wfTarget = store.RunRow{Name: "wf1", StepIdx: 0}
+	a.wfPreview = workflow.StepPreview{Label: "execute", Relation: "fork",
+		Seed: "Execute the plan just written. Prior step concluded: build X."}
+	out := a.View()
+	for _, want := range []string{"fork", "step 2", "Execute the plan"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("confirm missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestWFConfirmContinueWording(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 24
+	a.view = viewWFConfirm
+	a.wfTarget = store.RunRow{Name: "wf1", StepIdx: 1}
+	a.wfPreview = workflow.StepPreview{Label: "review", Relation: "continue", Seed: "go"}
+	out := a.View()
+	if !strings.Contains(out, "sends into current session") {
+		t.Fatalf("confirm missing continue wording:\n%s", out)
+	}
+}
+
+func TestWFConfirmFinishVariant(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 24
+	a.view = viewWFConfirm
+	a.wfTarget = store.RunRow{Name: "wf1"}
+	a.wfPreview = workflow.StepPreview{Finish: true}
+	out := a.View()
+	if !strings.Contains(out, "finish run wf1") {
+		t.Fatalf("confirm missing finish variant:\n%s", out)
+	}
+}
+
+func TestWFConfirmUnavailableWarning(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 24
+	a.view = viewWFConfirm
+	a.wfTarget = store.RunRow{Name: "wf1"}
+	a.wfPreview = workflow.StepPreview{Label: "b", Relation: "fresh", Seed: "go", Unavailable: true}
+	out := a.View()
+	if !strings.Contains(out, "unavailable") {
+		t.Fatalf("confirm missing unavailable warning:\n%s", out)
+	}
+}
+
+func TestWFConfirmLoadingAndPreviewErrorStates(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 24
+	a.view = viewWFConfirm
+	a.wfTarget = store.RunRow{Name: "wf1"}
+	a.wfPreviewLoading = true
+	if !strings.Contains(a.View(), "computing preview") {
+		t.Fatal("missing loading state")
+	}
+	a.wfPreviewLoading = false
+	a.wfPreviewErr = "workflow: corrupt run definition snapshot: bad json"
+	out := a.View()
+	if !strings.Contains(out, "corrupt run definition snapshot") {
+		t.Fatalf("missing preview error:\n%s", out)
+	}
+	if strings.Contains(out, "y confirm") {
+		t.Fatal("y confirm should not be offered when the preview errored")
+	}
+}
+
+func TestWFConfirmDeadOffersFork(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 24
+	a.view = viewWFConfirm
+	a.wfTarget = store.RunRow{Name: "wf1"}
+	a.wfContinueDead = true
+	out := a.View()
+	if !strings.Contains(out, "f fork from transcript instead") {
+		t.Fatalf("missing dead-continue fork offer:\n%s", out)
+	}
+}
+
+// --- errStr in body / frame invariants ------------------------------------
+
+func TestWFErrStrRenderedInBody(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.errStr = "workflow: run advanced elsewhere"
+	if !strings.Contains(a.View(), "workflow: run advanced elsewhere") {
+		t.Fatal("errStr not rendered in the workflows body")
+	}
+}
+
+func TestWFViewFrameInvariantEmptyAndPopulated(t *testing.T) {
+	a := NewApp(Deps{})
+	a.view = viewWorkflows
+	assertWidth := func(t *testing.T, label string, width int) {
+		t.Helper()
+		for i, line := range strings.Split(a.View(), "\n") {
+			if lw := lipgloss.Width(line); lw != width {
+				t.Fatalf("%s width %d line %d = %d cells: %q", label, width, i, lw, line)
+			}
+		}
+	}
+	for _, width := range []int{100, 40} {
+		a.width, a.height = width, 24
+		assertWidth(t, "empty", width)
+	}
+
+	a.wfRuns = []wfRunRow{{
+		run:        store.RunRow{ID: 1, Name: "a-very-long-workflow-run-name-indeed", PendingSeed: "x"},
+		stepLabel:  "step 2/3 a rather long step label describing the step in detail",
+		resolvedOK: true,
+		resolved:   store.SessionRow{LastStatus: "needs_you", SeedStatus: "failed"},
+	}}
+	a.wfDefs = []workflow.Definition{{Name: "another-rather-long-definition-name", Steps: []workflow.Step{
+		{Label: "a", Project: "/very/long/path/to/some/project/dir"}, {Label: "b"}, {Label: "c"}, {Label: "d"},
+	}}}
+	a.wfLoadErrs = []workflow.LoadError{
+		{Path: "/w/.loom/workflows/a-really-long-bad-file-name.json", Err: "a long parse error message describing exactly what went wrong here"},
+	}
+	for _, width := range []int{100, 40} {
+		a.width, a.height = width, 24
+		assertWidth(t, "populated", width)
+	}
+}
+
+func TestWFConfirmAndAbandonFrameInvariant(t *testing.T) {
+	a := NewApp(Deps{})
+	a.wfTarget = store.RunRow{ID: 5, Name: "plan-execute-review"}
+	a.wfPreview = workflow.StepPreview{Label: "execute", Relation: "fork", Seed: strings.Repeat("x", 200), Unavailable: true}
+	for _, width := range []int{100, 40} {
+		a.width, a.height = width, 24
+		a.view = viewWFConfirm
+		for i, line := range strings.Split(a.View(), "\n") {
+			if lw := lipgloss.Width(line); lw != width {
+				t.Fatalf("confirm width %d line %d = %d cells: %q", width, i, lw, line)
+			}
+		}
+		a.view = viewWFConfirmAbandon
+		for i, line := range strings.Split(a.View(), "\n") {
+			if lw := lipgloss.Width(line); lw != width {
+				t.Fatalf("abandon width %d line %d = %d cells: %q", width, i, lw, line)
+			}
+		}
+	}
+}
+
+// --- in-flight guards (spec §2.6) -----------------------------------------
+
+// TestWFAdvanceDoublePressGuardedInFlight: a second 'y' press before the
+// first advance's result has returned is a no-op (nil command), guarding
+// against a double launch/CAS from a double press.
+func TestWFAdvanceDoublePressGuardedInFlight(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	runID, err := st.InsertRun("wf1", `{"name":"wf1","steps":[{"label":"a","project":"/x","relation":"fresh"},{"label":"b","relation":"fresh","seed":"go"}]}`, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdvanceRunCAS(runID, 0, 0, []string{"loom-x"}, "", 100); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := st.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewApp(Deps{Runner: &workflow.Runner{Store: st}})
+	a.width, a.height = 80, 24
+	a.view = viewWFConfirm
+	a.wfTarget = run
+	a.wfPreview = workflow.StepPreview{Label: "b", Relation: "fresh", Seed: "go"}
+
+	_, cmd1 := a.Update(key("y"))
+	if cmd1 == nil {
+		t.Fatal("first y press did not return a command")
+	}
+	_, cmd2 := a.Update(key("y"))
+	if cmd2 != nil {
+		t.Fatal("second y press before the first resolved should be guarded (nil command)")
+	}
+}
+
+// TestWFStartDoublePressGuardedInFlight mirrors the guard above for the
+// def-row start action (keyed by definition path, since a brand-new run has
+// no id yet).
+func TestWFStartDoublePressGuardedInFlight(t *testing.T) {
+	a := NewApp(Deps{Runner: &workflow.Runner{}})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfDefs = []workflow.Definition{{Name: "d1", Path: "/w/.loom/workflows/d1.json",
+		Steps: []workflow.Step{{Label: "a", Project: "/x", Relation: ""}}}}
+	a.wfCursor = 0
+
+	_, cmd1 := a.Update(key("enter"))
+	if cmd1 == nil {
+		t.Fatal("first enter did not return a command")
+	}
+	_, cmd2 := a.Update(key("enter"))
+	if cmd2 != nil {
+		t.Fatal("second enter before the first resolved should be guarded (nil command)")
+	}
+}
+
+// --- abandon flow ----------------------------------------------------------
+
+func TestWFAbandonFlowCallsAbandonAndReloads(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	runID, err := st.InsertRun("wf1", `{"name":"wf1","steps":[{"label":"a","project":"/x","relation":"fresh"}]}`, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdvanceRunCAS(runID, 0, 0, []string{"loom-x"}, "", 100); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := st.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &workflow.Runner{Store: st}
+	a := NewApp(Deps{Runner: runner})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfRuns = []wfRunRow{{run: run}}
+	a.wfCursor = 0
+
+	a.Update(key("x"))
+	if a.view != viewWFConfirmAbandon {
+		t.Fatalf("view = %v, want viewWFConfirmAbandon", a.view)
+	}
+	if a.wfTarget.ID != runID {
+		t.Fatalf("wfTarget not captured: %+v", a.wfTarget)
+	}
+
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y did not return a command")
+	}
+	msg := cmd()
+	am, ok := msg.(wfActionMsg)
+	if !ok || am.err != nil {
+		t.Fatalf("abandon result = %#v", msg)
+	}
+	_, cmd2 := a.Update(am)
+	if cmd2 == nil {
+		t.Fatal("successful abandon did not trigger a reload command")
+	}
+	msg2 := cmd2()
+	lm, ok := msg2.(wfLoadedMsg)
+	if !ok {
+		t.Fatalf("reload cmd() = %T, want wfLoadedMsg", msg2)
+	}
+	a.Update(lm)
+
+	updated, ok, err := st.GetRun(runID)
+	if err != nil || !ok {
+		t.Fatalf("run vanished: ok=%v err=%v", ok, err)
+	}
+	if updated.Status != "abandoned" {
+		t.Fatalf("run status = %q, want abandoned", updated.Status)
+	}
+	if len(a.wfRuns) != 0 {
+		t.Fatalf("abandoned run still shown in RUNS after reload: %+v", a.wfRuns)
+	}
+}
+
+// --- start flow (real backend, spec §2.10/§4) -----------------------------
+
+// wfE2EDeps builds a real Runner (a throwaway tmux socket + a PATH-injected
+// fake `claude` binary standing in for the real one, no seam to substitute
+// it directly — same technique as internal/workflow's testRunner, Task 2)
+// plus a workflows dir holding one valid single-step definition named "demo"
+// whose step 1 project resolves against the registry Projects also
+// returned here.
+func wfE2EDeps(t *testing.T) Deps {
+	t.Helper()
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "claude")
+	content := "#!/bin/sh\necho \"\xe2\x9d\xaf\"\ncat >/dev/null\n" // bare ready marker, then sink stdin
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomwfe2e%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ccd := t.TempDir()
+	l := &session.Launcher{
+		Tmux: tm, Store: st, ClaudeConfigDir: ccd,
+		ClaudeJSONPath: filepath.Join(t.TempDir(), ".claude.json"),
+		ReadyMarker:    session.DefaultReadyMarker,
+		TrustMarker:    session.DefaultTrustMarker,
+		ReadyTimeout:   5 * time.Second,
+		PollEvery:      50 * time.Millisecond,
+	}
+	runner := &workflow.Runner{Store: st, Launcher: l, ClaudeConfigDir: ccd}
+
+	projDir := t.TempDir()
+	wfDir := t.TempDir()
+	defJSON := `{"name":"demo","steps":[{"label":"plan","project":"p","model":"","mode":"","seed":"start here","relation":""}]}`
+	if err := os.WriteFile(filepath.Join(wfDir, "demo.json"), []byte(defJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	return Deps{Runner: runner, WorkflowsDir: wfDir,
+		Projects: []registry.Project{{Label: "p", Path: projDir}}, Tmux: tm}
+}
+
+// TestWFStartFlowRunAppearsAndStaysInView drives the full start flow
+// end-to-end (spec §2.10/§4): open workflows, ↵ on the "demo" definition
+// launches step 1 for real (fake claude via PATH), and the resulting run
+// appears in RUNS on reload — the view never leaves viewWorkflows ("run
+// appears, stay in view").
+func TestWFStartFlowRunAppearsAndStaysInView(t *testing.T) {
+	deps := wfE2EDeps(t)
+	a := NewApp(deps)
+	a.width, a.height = 80, 24
+
+	_, loadCmd := a.Update(key("w"))
+	lm, ok := loadCmd().(wfLoadedMsg)
+	if !ok || lm.err != nil {
+		t.Fatalf("initial load = %#v", lm)
+	}
+	a.Update(lm)
+	if len(a.wfDefs) != 1 || a.wfDefs[0].Name != "demo" {
+		t.Fatalf("wfDefs = %+v, want [demo]", a.wfDefs)
+	}
+	a.wfCursor = 0 // the only entry: the "demo" definition (no runs yet)
+
+	_, startCmd := a.Update(key("enter"))
+	if startCmd == nil {
+		t.Fatal("enter on the definition did not return a start command")
+	}
+	sm, ok := startCmd().(wfStartMsg)
+	if !ok {
+		t.Fatalf("start cmd() = %T, want wfStartMsg", sm)
+	}
+	if sm.err != nil {
+		t.Fatalf("Start failed: %v", sm.err)
+	}
+
+	_, reloadCmd := a.Update(sm)
+	if a.view != viewWorkflows {
+		t.Fatalf("view = %v, want viewWorkflows (stay in view after start)", a.view)
+	}
+	if reloadCmd == nil {
+		t.Fatal("successful start did not trigger a reload command")
+	}
+	lm2, ok := reloadCmd().(wfLoadedMsg)
+	if !ok || lm2.err != nil {
+		t.Fatalf("reload after start = %#v", lm2)
+	}
+	a.Update(lm2)
+
+	if len(a.wfRuns) != 1 {
+		t.Fatalf("wfRuns = %+v, want exactly 1 run to have appeared", a.wfRuns)
+	}
+	if a.wfRuns[0].run.Name != "demo" {
+		t.Fatalf("run name = %q, want demo", a.wfRuns[0].run.Name)
 	}
 }

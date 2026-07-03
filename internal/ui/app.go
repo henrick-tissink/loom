@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/workflow"
 )
 
 const pollInterval = 1500 * time.Millisecond
@@ -33,6 +36,9 @@ const (
 	viewPeek
 	viewSearch
 	viewDetail
+	viewWorkflows
+	viewWFConfirm
+	viewWFConfirmAbandon
 )
 
 type Deps struct {
@@ -49,6 +55,17 @@ type Deps struct {
 	Store         *store.Store
 	IndexerStatus func() memory.Status
 	Summarizer    *memory.Summarizer
+
+	// Runner/WorkflowsDir back the workflows view (Task 3, the `w` view).
+	// Both are nil-safe: a nil Runner means the workflows view still opens
+	// (LoadAll needs only Projects/WorkflowsDir) but shows an empty RUNS
+	// section and no-ops every run action; an empty WorkflowsDir makes
+	// LoadAll's os.ReadDir("") fail with IsNotExist, which LoadAll already
+	// treats as "no definitions" rather than an error. Projects (existing
+	// field above) doubles as the registry LoadAll validates step-1 projects
+	// against — the brief's "Registry" field is this one, reused.
+	Runner       *workflow.Runner
+	WorkflowsDir string
 }
 
 // uiRow is one selectable dashboard line (live or recent).
@@ -125,7 +142,102 @@ type App struct {
 	// Summarizer.Summarize is in flight (further 's' presses no-op).
 	detailConfirmRegen bool
 	detailSummarizing  bool
+
+	// --- Task 3: workflows view (`w`) ---------------------------------
+
+	// wfRuns/wfDefs/wfLoadErrs are the two RUNS/WORKFLOWS sections,
+	// refreshed by wfLoadCmd on every view-open and after every action
+	// (spec §4: "RUNS rows render honestly from store rows"). wfCursor
+	// indexes the concatenation wfRuns++wfDefs (LoadErrors are informational
+	// only, never selectable) — same clamp discipline as the dashboard's
+	// cursor/rows in rebuildRows.
+	wfRuns     []wfRunRow
+	wfDefs     []workflow.Definition
+	wfLoadErrs []workflow.LoadError
+	wfCursor   int
+
+	// wfHint is a transient dim message in the workflows body — currently
+	// only the dead-attach hint (spec §2.8), same captured/transient
+	// discipline as detailHint.
+	wfHint string
+
+	// wfTarget is the run row captured at the moment 'n'/'x' opens
+	// viewWFConfirm/viewWFConfirmAbandon (captured-target discipline, same
+	// as actionTarget/peekTarget/detailTarget elsewhere). wfPreview is the
+	// StepPreview fetched (via a tea.Cmd — Preview reads a transcript file)
+	// at confirm-open time (spec §2.11); wfPreviewLoading/wfPreviewErr cover
+	// the in-flight/failed states before it arrives; wfContinueDead is set
+	// when an advance attempt comes back ErrContinueDead (spec §2.8),
+	// arming the one-shot 'f' fork-demotion recovery key.
+	wfTarget         store.RunRow
+	wfPreview        workflow.StepPreview
+	wfPreviewLoading bool
+	wfPreviewErr     string
+	wfContinueDead   bool
+
+	// wfInFlight (keyed by run id) / wfStartInFlight (keyed by definition
+	// path) are the in-flight guards (spec §2.6/§4, the detailSummarizing
+	// precedent): a second 'n'/'x'/↵ on the same target while its previous
+	// action is still resolving is a no-op rather than firing a second
+	// launch/CAS.
+	wfInFlight      map[int64]bool
+	wfStartInFlight map[string]bool
 }
+
+// wfRunRow is one RUNS-section entry: a store.RunRow plus the display/action
+// facts wfLoadCmd resolves for it up front (parsing def_json, resolving the
+// current step's session BY IDENTITY via Runner.ResolveStepSession — spec
+// §2.5) so rendering and attach/hint decisions never need to touch the
+// Runner or re-parse JSON themselves.
+type wfRunRow struct {
+	run store.RunRow
+
+	// stepLabel is "step N/M label" (1-based) built from the parsed
+	// def_json snapshot; defErr is true when def_json failed to parse
+	// (spec §2.12: "renders dim-red, abandonable, never panics") — in that
+	// case stepLabel is empty and the renderer substitutes a fixed message.
+	stepLabel string
+	defErr    bool
+
+	// resolved/resolvedOK/live are ResolveStepSession's result: ok=false
+	// only when the pinned session name has no store row at all (the
+	// documented Launch-failed-after-CAS accepted failure mode). live
+	// mirrors isLiveRow(resolved) and gates attach (spec §2.8: attach only
+	// when resolved-live, else the dead-attach hint).
+	resolved   store.SessionRow
+	resolvedOK bool
+	live       bool
+}
+
+// wfEntryKind distinguishes a RUNS-section row from a WORKFLOWS-section row
+// in the shared cursor space (spec §4: "↓/↑ across sections").
+type wfEntryKind int
+
+const (
+	wfEntryRun wfEntryKind = iota
+	wfEntryDef
+)
+
+// wfEntry is what a.wfSelected() returns: exactly one of run/def is
+// meaningful, discriminated by kind.
+type wfEntry struct {
+	kind wfEntryKind
+	run  wfRunRow
+	def  workflow.Definition
+}
+
+// wfActionKind discriminates wfActionMsg's four possible sources — needed
+// only so the ErrContinueDead→"offer f" recovery applies to advance and not
+// to finish/abandon/retry (spec §2.8 is specifically about advancing into a
+// dead continue target).
+type wfActionKind int
+
+const (
+	wfActionAdvance wfActionKind = iota
+	wfActionFinish
+	wfActionAbandon
+	wfActionRetry
+)
 
 type (
 	tickMsg     time.Time
@@ -171,6 +283,44 @@ type (
 	// a live row for sessionID and — critically — did NOT call
 	// Launcher.Resume. Same sessionID-staleness discipline as summaryMsg.
 	resumeBlockedMsg struct{ sessionID string }
+
+	// wfLoadedMsg is the result of wfLoadCmd (spec §4: LoadAll + ActiveRuns,
+	// both file/db IO, always run in a tea.Cmd — fired on every workflows-
+	// view open). Applied unconditionally (idempotent background refresh);
+	// harmless even if the user has since navigated away.
+	wfLoadedMsg struct {
+		runs     []wfRunRow
+		defs     []workflow.Definition
+		loadErrs []workflow.LoadError
+		err      error
+	}
+
+	// wfPreviewMsg is Runner.Preview's result for a confirm dialog (spec
+	// §2.11). Stale (view no longer viewWFConfirm, or runID no longer
+	// matches the captured wfTarget) is discarded — same discipline as
+	// peekMsg/summaryMsg.
+	wfPreviewMsg struct {
+		runID   int64
+		preview workflow.StepPreview
+		err     error
+	}
+
+	// wfStartMsg is Runner.Start's result (spec §2.10): path identifies
+	// which definition's in-flight guard to release.
+	wfStartMsg struct {
+		path string
+		err  error
+	}
+
+	// wfActionMsg is the shared result type for advance/finish/abandon/
+	// retry (spec §2.6/§2.7/§2.9/§2.12) — all four are CAS-guarded or
+	// otherwise idempotent store writes, all release the per-run-id
+	// in-flight guard the same way.
+	wfActionMsg struct {
+		kind  wfActionKind
+		runID int64
+		err   error
+	}
 )
 
 func NewApp(deps Deps) *App {
@@ -340,6 +490,54 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.detailHint = "already live — attach from the dashboard"
 		}
 		return a, nil
+	case wfLoadedMsg:
+		if m.err != nil {
+			a.errStr = m.err.Error()
+		}
+		a.wfRuns = m.runs
+		a.wfDefs = m.defs
+		a.wfLoadErrs = m.loadErrs
+		if n := len(a.wfRuns) + len(a.wfDefs); a.wfCursor >= n {
+			a.wfCursor = max(0, n-1)
+		}
+		return a, nil
+	case wfPreviewMsg:
+		// stale: confirm was cancelled, or a different run's confirm has
+		// since been opened (same discipline as peekMsg/summaryMsg).
+		if a.view != viewWFConfirm || m.runID != a.wfTarget.ID {
+			return a, nil
+		}
+		a.wfPreviewLoading = false
+		if m.err != nil {
+			a.wfPreviewErr = m.err.Error()
+			return a, nil
+		}
+		a.wfPreview = m.preview
+		return a, nil
+	case wfStartMsg:
+		delete(a.wfStartInFlight, m.path)
+		if m.err != nil {
+			a.errStr = m.err.Error()
+			return a, nil
+		}
+		// "run appears, stay in view" (spec §4): reload RUNS/WORKFLOWS so
+		// the new run shows up, rather than hand-splicing a synthetic row.
+		return a, a.wfLoadCmd()
+	case wfActionMsg:
+		a.clearWFInFlight(m.runID)
+		if m.err == nil {
+			a.view = viewWorkflows
+			return a, a.wfLoadCmd()
+		}
+		if m.kind == wfActionAdvance && errors.Is(m.err, workflow.ErrContinueDead) {
+			// spec §2.8: stay in the confirm, arm the one-shot 'f' recovery
+			// (demote this advance to fork) instead of surfacing a dead end.
+			a.wfContinueDead = true
+			return a, nil
+		}
+		a.errStr = m.err.Error()
+		a.view = viewWorkflows
+		return a, a.wfLoadCmd()
 	case tea.KeyMsg:
 		return a.updateKeys(m)
 	}
@@ -434,6 +632,15 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case viewDetail:
 		return a.updateDetailKeys(msg)
+
+	case viewWorkflows:
+		return a.updateWorkflowsKeys(msg)
+
+	case viewWFConfirm:
+		return a.updateWFConfirmKeys(msg)
+
+	case viewWFConfirmAbandon:
+		return a.updateWFAbandonKeys(msg)
 	}
 
 	// viewDash
@@ -452,6 +659,8 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.form = newLauncherForm(a.deps.Projects)
 		a.form.setFocus(0)
 		a.view = viewLauncher
+	case "w":
+		return a, a.openWorkflows()
 	case "x":
 		if r, ok := a.selected(); ok {
 			a.actionTarget = r
@@ -743,6 +952,393 @@ func (a *App) searchQueryCmd(query string) tea.Cmd {
 	}
 }
 
+// --- Task 3: workflows view (`w`) ---------------------------------------
+
+// openWorkflows resets the workflows view to a fresh, empty state (spec §4)
+// and kicks off the initial load — same "fresh state + immediate refresh
+// cmd" shape as openSearch.
+func (a *App) openWorkflows() tea.Cmd {
+	a.view = viewWorkflows
+	a.wfCursor = 0
+	a.errStr = ""
+	a.wfHint = ""
+	a.wfRuns = nil
+	a.wfDefs = nil
+	a.wfLoadErrs = nil
+	return a.wfLoadCmd()
+}
+
+// wfLoadCmd loads both workflows-view sections (spec §4/§2.1): WORKFLOWS via
+// workflow.LoadAll(WorkflowsDir, Projects) — the registry Definitions §3
+// validates step-1 projects against — and RUNS via Runner.Store.ActiveRuns,
+// each resolved into a wfRunRow up front (buildWFRunRow). Both deps are
+// nil-safe: a nil Runner (or nil Runner.Store) yields an empty RUNS section
+// rather than panicking, matching Deps' nil-safety contract elsewhere.
+func (a *App) wfLoadCmd() tea.Cmd {
+	dir := a.deps.WorkflowsDir
+	projects := a.deps.Projects
+	runner := a.deps.Runner
+	return func() tea.Msg {
+		defs, loadErrs := workflow.LoadAll(dir, projects)
+		var rows []wfRunRow
+		if runner != nil && runner.Store != nil {
+			runs, err := runner.Store.ActiveRuns()
+			if err != nil {
+				return wfLoadedMsg{defs: defs, loadErrs: loadErrs, err: err}
+			}
+			for _, run := range runs {
+				rows = append(rows, buildWFRunRow(runner, run))
+			}
+		}
+		return wfLoadedMsg{runs: rows, defs: defs, loadErrs: loadErrs}
+	}
+}
+
+// buildWFRunRow resolves the display/action facts for one active run (spec
+// §2.5/§2.12): parses its def_json snapshot (a corrupt snapshot sets defErr
+// rather than panicking — the run still renders, dim-red, abandonable) and
+// resolves its current step's session BY IDENTITY (never the pinned tmux
+// name alone — spec §2.5) via ResolveStepSession, which itself tolerates an
+// empty/dead pin (ok=false — the Launch-failed-after-CAS accepted failure
+// mode).
+func buildWFRunRow(runner *workflow.Runner, run store.RunRow) wfRunRow {
+	w := wfRunRow{run: run}
+	var def workflow.Definition
+	if err := json.Unmarshal([]byte(run.DefJSON), &def); err != nil ||
+		len(def.Steps) == 0 || run.StepIdx < 0 || int(run.StepIdx) >= len(def.Steps) {
+		w.defErr = true
+	} else {
+		w.stepLabel = fmt.Sprintf("step %d/%d %s", run.StepIdx+1, len(def.Steps), def.Steps[run.StepIdx].Label)
+	}
+	if row, ok := runner.ResolveStepSession(run); ok {
+		w.resolved = row
+		w.resolvedOK = true
+		w.live = isLiveRow(row)
+	}
+	return w
+}
+
+// wfSelected returns the entry under wfCursor in the shared RUNS++WORKFLOWS
+// cursor space, or ok=false when nothing is selectable (empty/out of range —
+// same shape as selected() above).
+func (a *App) wfSelected() (wfEntry, bool) {
+	n := len(a.wfRuns) + len(a.wfDefs)
+	if a.wfCursor < 0 || a.wfCursor >= n {
+		return wfEntry{}, false
+	}
+	if a.wfCursor < len(a.wfRuns) {
+		return wfEntry{kind: wfEntryRun, run: a.wfRuns[a.wfCursor]}, true
+	}
+	return wfEntry{kind: wfEntryDef, def: a.wfDefs[a.wfCursor-len(a.wfRuns)]}, true
+}
+
+// markInFlight/clearWFInFlight guard per-run-id actions (spec §2.6 in-flight
+// guard, the detailSummarizing precedent) against a double press firing a
+// second launch/CAS while the first is still resolving.
+func (a *App) markInFlight(id int64) {
+	if a.wfInFlight == nil {
+		a.wfInFlight = map[int64]bool{}
+	}
+	a.wfInFlight[id] = true
+}
+
+func (a *App) clearWFInFlight(id int64) {
+	delete(a.wfInFlight, id)
+}
+
+// updateWorkflowsKeys handles keys while viewWorkflows is open (spec §4):
+// ↓/↑ move across BOTH sections, ↵ starts a definition or attaches a
+// resolved-live run, n opens the advance confirm (or retries a pending
+// seed directly), x opens the abandon confirm, esc back to the dashboard.
+func (a *App) updateWorkflowsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return a, tea.Quit
+	}
+	switch msg.String() {
+	case "q":
+		return a, tea.Quit
+	case "esc":
+		a.view = viewDash
+		return a, nil
+	case "j", "down":
+		if n := len(a.wfRuns) + len(a.wfDefs); a.wfCursor < n-1 {
+			a.wfCursor++
+		}
+		return a, nil
+	case "k", "up":
+		if a.wfCursor > 0 {
+			a.wfCursor--
+		}
+		return a, nil
+	case "enter":
+		return a.wfActivate()
+	case "n":
+		return a.wfPressN()
+	case "x":
+		return a.wfPressX()
+	}
+	return a, nil
+}
+
+// wfActivate handles ↵ (spec §4): a definition row starts a new run (guarded
+// per definition path against a double-launch); a run row attaches ONLY
+// when its current step resolved live — otherwise the dead-attach hint
+// (spec §2.8), never a raw tmux error.
+func (a *App) wfActivate() (tea.Model, tea.Cmd) {
+	e, ok := a.wfSelected()
+	if !ok {
+		return a, nil
+	}
+	switch e.kind {
+	case wfEntryDef:
+		if a.deps.Runner == nil || a.wfStartInFlight[e.def.Path] {
+			return a, nil
+		}
+		if a.wfStartInFlight == nil {
+			a.wfStartInFlight = map[string]bool{}
+		}
+		a.wfStartInFlight[e.def.Path] = true
+		w, h := a.width, a.height
+		return a, a.wfStartCmd(e.def, w, h)
+	case wfEntryRun:
+		if e.run.resolvedOK && e.run.live {
+			if a.deps.Tmux == nil {
+				return a, nil
+			}
+			cmd := a.deps.Tmux.AttachCmd(e.run.resolved.Name)
+			return a, tea.ExecProcess(cmd, func(err error) tea.Msg { return attachedMsg{err} })
+		}
+		a.wfHint = "step session ended — n advance (f fork) · x abandon"
+		return a, nil
+	}
+	return a, nil
+}
+
+// wfPressN handles 'n' on a run row (spec §2.9/§2.11): a run with a
+// pending_seed retries delivery directly (guarded — this fires the action
+// immediately, no confirm step); otherwise it opens the advance confirm and
+// fetches its Preview (a tea.Cmd — Preview reads a transcript file, never
+// inline in Update). Opening the confirm itself is NOT guarded/marked
+// in-flight: fetching a preview launches nothing, and once the confirm is
+// open a second 'n' press routes to updateWFConfirmKeys (which reads 'n' as
+// cancel, not "reopen") — so the double-press race this guards against is
+// entirely at the 'y'/'f' press, handled there.
+func (a *App) wfPressN() (tea.Model, tea.Cmd) {
+	e, ok := a.wfSelected()
+	if !ok || e.kind != wfEntryRun || a.deps.Runner == nil {
+		return a, nil
+	}
+	run := e.run.run
+	if run.PendingSeed != "" {
+		if a.wfInFlight[run.ID] {
+			return a, nil
+		}
+		a.markInFlight(run.ID)
+		return a, a.retryCmd(run)
+	}
+	a.wfTarget = run
+	a.wfPreview = workflow.StepPreview{}
+	a.wfPreviewLoading = true
+	a.wfPreviewErr = ""
+	a.wfContinueDead = false
+	a.view = viewWFConfirm
+	return a, a.previewCmd(run)
+}
+
+// wfPressX opens the abandon confirm for the selected run row (spec §2.12).
+func (a *App) wfPressX() (tea.Model, tea.Cmd) {
+	e, ok := a.wfSelected()
+	if !ok || e.kind != wfEntryRun || a.deps.Runner == nil {
+		return a, nil
+	}
+	run := e.run.run
+	if a.wfInFlight[run.ID] {
+		return a, nil
+	}
+	a.wfTarget = run
+	a.view = viewWFConfirmAbandon
+	return a, nil
+}
+
+// updateWFConfirmKeys handles keys while viewWFConfirm is open (spec §2.6/
+// §2.8/§2.11): 'y' fires the advance/finish (re-verified against a fresh
+// read first — see advanceCmd/finishCmd), guarded per run id against a
+// double press firing two launches before the first result returns; 'f' is
+// the one-shot fork-demotion recovery, only accepted once wfContinueDead is
+// armed, guarded the same way; 'n'/'esc' cancel (nothing is in-flight yet at
+// that point — see wfPressN's doc comment — so there is nothing to
+// release).
+func (a *App) updateWFConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return a, tea.Quit
+	}
+	switch msg.String() {
+	case "q":
+		return a, tea.Quit
+	case "esc", "n":
+		a.view = viewWorkflows
+		return a, nil
+	case "y":
+		if a.wfPreviewLoading || a.wfPreviewErr != "" || a.wfContinueDead || a.deps.Runner == nil {
+			return a, nil // not (yet/anymore) a valid confirm state
+		}
+		target := a.wfTarget
+		if a.wfInFlight[target.ID] {
+			return a, nil // double-press guard: an advance/finish is already in flight
+		}
+		a.markInFlight(target.ID)
+		if a.wfPreview.Finish {
+			return a, a.finishCmd(target)
+		}
+		w, h := a.width, a.height
+		return a, a.advanceCmd(target, false, w, h)
+	case "f":
+		if !a.wfContinueDead || a.deps.Runner == nil {
+			return a, nil
+		}
+		target := a.wfTarget
+		if a.wfInFlight[target.ID] {
+			return a, nil // double-press guard, same as 'y' above
+		}
+		a.wfContinueDead = false
+		a.markInFlight(target.ID)
+		w, h := a.width, a.height
+		return a, a.advanceCmd(target, true, w, h)
+	}
+	return a, nil
+}
+
+// updateWFAbandonKeys handles keys while viewWFConfirmAbandon is open.
+func (a *App) updateWFAbandonKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return a, tea.Quit
+	}
+	switch msg.String() {
+	case "q":
+		return a, tea.Quit
+	case "n", "esc":
+		a.view = viewWorkflows
+		return a, nil
+	case "y":
+		a.view = viewWorkflows
+		if a.deps.Runner == nil {
+			return a, nil
+		}
+		target := a.wfTarget
+		if a.wfInFlight[target.ID] {
+			return a, nil
+		}
+		a.markInFlight(target.ID)
+		return a, a.abandonCmd(target)
+	}
+	return a, nil
+}
+
+// previewCmd fetches Runner.Preview(target) for the advance confirm dialog
+// (spec §2.11: substitution runs at confirm-OPEN time).
+func (a *App) previewCmd(target store.RunRow) tea.Cmd {
+	runner := a.deps.Runner
+	if runner == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		p, err := runner.Preview(target)
+		return wfPreviewMsg{runID: target.ID, preview: p, err: err}
+	}
+}
+
+// advanceCmd fires Runner.Advance for target (spec §2.6/§2.8). Per the
+// spec's "the confirm re-verifies the captured step_idx against a fresh
+// read before firing": it re-reads the run FIRST and refuses to advance at
+// all — surfacing the same ErrRunAdvancedElsewhere the CAS itself would —
+// if the row is no longer 'running' or its step_idx has moved since the
+// confirm opened (the preview the user is looking at would otherwise be
+// stale). Only once that check passes does it call Advance with the FRESH
+// row (which still has its own CAS as the final word against any race in
+// between).
+func (a *App) advanceCmd(target store.RunRow, forceFork bool, w, h int) tea.Cmd {
+	runner := a.deps.Runner
+	if runner == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		fresh, ok, err := runner.Store.GetRun(target.ID)
+		if err != nil {
+			return wfActionMsg{kind: wfActionAdvance, runID: target.ID, err: err}
+		}
+		if !ok || fresh.Status != "running" || fresh.StepIdx != target.StepIdx {
+			return wfActionMsg{kind: wfActionAdvance, runID: target.ID, err: workflow.ErrRunAdvancedElsewhere}
+		}
+		err = runner.Advance(fresh, forceFork, w, h, time.Now())
+		return wfActionMsg{kind: wfActionAdvance, runID: target.ID, err: err}
+	}
+}
+
+// finishCmd marks target done (spec §2.7: terminal-step confirm, no launch,
+// no append) — same fresh-read re-verification as advanceCmd.
+func (a *App) finishCmd(target store.RunRow) tea.Cmd {
+	runner := a.deps.Runner
+	if runner == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		fresh, ok, err := runner.Store.GetRun(target.ID)
+		if err != nil {
+			return wfActionMsg{kind: wfActionFinish, runID: target.ID, err: err}
+		}
+		if !ok || fresh.Status != "running" || fresh.StepIdx != target.StepIdx {
+			return wfActionMsg{kind: wfActionFinish, runID: target.ID, err: workflow.ErrRunAdvancedElsewhere}
+		}
+		err = runner.Store.SetRunStatus(target.ID, "done", time.Now().Unix())
+		return wfActionMsg{kind: wfActionFinish, runID: target.ID, err: err}
+	}
+}
+
+// abandonCmd marks target abandoned (spec §2.12: abandon ≠ kill — the
+// step's session is left running untouched).
+func (a *App) abandonCmd(target store.RunRow) tea.Cmd {
+	runner := a.deps.Runner
+	if runner == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		err := runner.Abandon(target, time.Now())
+		return wfActionMsg{kind: wfActionAbandon, runID: target.ID, err: err}
+	}
+}
+
+// retryCmd re-attempts a run's pending_seed delivery (spec §2.9), re-reading
+// the run first so a slow retry acts on current state.
+func (a *App) retryCmd(target store.RunRow) tea.Cmd {
+	runner := a.deps.Runner
+	if runner == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		fresh, ok, err := runner.Store.GetRun(target.ID)
+		if err != nil {
+			return wfActionMsg{kind: wfActionRetry, runID: target.ID, err: err}
+		}
+		if !ok {
+			return wfActionMsg{kind: wfActionRetry, runID: target.ID, err: errors.New("workflow: run not found")}
+		}
+		err = runner.RetryPendingSeed(fresh)
+		return wfActionMsg{kind: wfActionRetry, runID: target.ID, err: err}
+	}
+}
+
+// wfStartCmd launches a brand-new run of def (spec §2.10).
+func (a *App) wfStartCmd(def workflow.Definition, w, h int) tea.Cmd {
+	runner := a.deps.Runner
+	if runner == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		_, err := runner.Start(def, w, h, time.Now())
+		return wfStartMsg{path: def.Path, err: err}
+	}
+}
+
 func (a *App) selected() (uiRow, bool) {
 	if a.cursor < 0 || a.cursor >= len(a.rows) {
 		return uiRow{}, false
@@ -791,6 +1387,12 @@ func (a *App) View() string {
 		return a.viewSearch(w)
 	case viewDetail:
 		return a.renderDetail(w)
+	case viewWorkflows:
+		return a.renderWorkflows(w)
+	case viewWFConfirm:
+		return a.renderWFConfirm(w)
+	case viewWFConfirmAbandon:
+		return a.renderWFAbandon(w)
 	}
 
 	inner := w - 4
@@ -1183,4 +1785,222 @@ func filesSummary(files string) string {
 		out += fmt.Sprintf(" +%d more", more)
 	}
 	return out
+}
+
+// --- Task 3: workflows view rendering -----------------------------------
+
+// renderWorkflows renders the two-section RUNS/WORKFLOWS frame (spec §4).
+func (a *App) renderWorkflows(w int) string {
+	inner := w - 4
+	var body []string
+	cursorLine := 0
+	body = append(body, "")
+
+	body = append(body, sectionRule("RUNS", inner, false))
+	if len(a.wfRuns) == 0 {
+		body = append(body, styHelp.Render(truncPlain("no active runs", inner)))
+	} else {
+		for i, e := range a.wfRuns {
+			if i == a.wfCursor {
+				cursorLine = len(body)
+			}
+			body = append(body, a.renderWFRunLine(i, e, inner))
+		}
+	}
+
+	body = append(body, "", sectionRule("WORKFLOWS", inner, false))
+	if len(a.wfDefs) == 0 && len(a.wfLoadErrs) == 0 {
+		body = append(body, styHelp.Render(truncPlain("no workflow definitions found", inner)))
+	} else {
+		for j, d := range a.wfDefs {
+			idx := len(a.wfRuns) + j
+			if idx == a.wfCursor {
+				cursorLine = len(body)
+			}
+			body = append(body, a.renderWFDefLine(idx, d, inner))
+		}
+		for _, le := range a.wfLoadErrs {
+			body = append(body, renderWFLoadErr(le, inner))
+		}
+	}
+
+	if a.wfHint != "" {
+		body = append(body, "", styHelp.Render(truncPlain(a.wfHint, inner)))
+	}
+	if a.errStr != "" {
+		body = append(body, "", styErr.Render(truncPlain("! "+a.errStr, inner)))
+	}
+	if a.height > 2 {
+		body = windowBody(body, cursorLine, a.height-2)
+	}
+	return frame(w, "workflows", "", body, "↵ start/attach · n advance · x abandon · esc dash · q quit")
+}
+
+// renderWFRunLine renders one RUNS row (spec §4): "name#id · step N/M label
+// · <glyph> <status word>" plus the pending/failed seed markers. The whole
+// line is composed as PLAIN text and truncated BEFORE any styling is
+// applied (truncate-before-style invariant), then the fully-truncated line
+// gets exactly one style: cursor accent when selected, dim-red when the
+// run's def_json failed to parse (spec §2.12), otherwise unstyled.
+func (a *App) renderWFRunLine(i int, e wfRunRow, inner int) string {
+	cursor := "  "
+	if i == a.wfCursor {
+		cursor = styCursor.Render("▸ ")
+	}
+	label := e.stepLabel
+	if e.defErr {
+		label = "corrupt run definition"
+	}
+	glyph, word := "✗", "dead"
+	if e.resolvedOK {
+		glyph, word = statusGlyphWord(e.resolved.LastStatus)
+	}
+	text := fmt.Sprintf("%s#%d · %s · %s %s", e.run.Name, e.run.ID, label, glyph, word)
+	if e.run.PendingSeed != "" {
+		text += " · seed pending"
+	}
+	if e.resolvedOK && e.resolved.SeedStatus == "failed" {
+		text += " · seed FAILED"
+	}
+	avail := inner - 2
+	if avail < 0 {
+		avail = 0
+	}
+	text = truncPlain(text, avail)
+	switch {
+	case i == a.wfCursor:
+		text = styCursor.Render(text)
+	case e.defErr:
+		text = styNeedsYou.Render(text)
+	}
+	return cursor + text
+}
+
+// renderWFDefLine renders one WORKFLOWS row: "name · N steps · project"
+// (project = filepath.Base(step 1's resolved path) — Step.Project holds a
+// registry-resolved absolute path post-LoadAll, never a bare label).
+func (a *App) renderWFDefLine(idx int, d workflow.Definition, inner int) string {
+	cursor := "  "
+	if idx == a.wfCursor {
+		cursor = styCursor.Render("▸ ")
+	}
+	proj := ""
+	if len(d.Steps) > 0 {
+		proj = filepath.Base(d.Steps[0].Project)
+	}
+	text := fmt.Sprintf("%s · %d step%s · %s", d.Name, len(d.Steps), plural(len(d.Steps)), proj)
+	avail := inner - 2
+	if avail < 0 {
+		avail = 0
+	}
+	text = truncPlain(text, avail)
+	if idx == a.wfCursor {
+		text = styCursor.Render(text)
+	}
+	return cursor + text
+}
+
+// renderWFLoadErr renders one malformed-definition line, dim-red (spec
+// §2.1: "malformed files listed dim-red with their error"), never
+// selectable (no cursor marker — LoadErrors aren't part of the cursor
+// space).
+func renderWFLoadErr(e workflow.LoadError, inner int) string {
+	avail := inner - 2
+	if avail < 0 {
+		avail = 0
+	}
+	text := truncPlain(filepath.Base(e.Path)+": "+e.Err, avail)
+	return "  " + styNeedsYou.Render(text)
+}
+
+// statusGlyphWord maps a store row's last_status to a plain (unstyled)
+// glyph+word pair for renderWFRunLine — the same states statusIcon()
+// recognizes, but returned as bare text so the caller can truncate the
+// composed line before applying any style (truncate-before-style
+// invariant), rather than embedding a pre-styled glyph mid-line.
+func statusGlyphWord(status string) (string, string) {
+	switch status {
+	case "needs_you":
+		return "●", "needs you"
+	case "running":
+		return "◐", "running"
+	case "idle":
+		return "○", "idle"
+	case "done":
+		return "✓", "done"
+	case "error":
+		return "✗", "error"
+	default:
+		return "·", "unknown"
+	}
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// renderWFConfirm renders the advance/finish confirm dialog (spec §2.11):
+// substitution snippet (~60 chars) + relation wording (continue reads
+// "sends into current session"), the finish variant, the unavailable
+// warning, and the dead-continue recovery state (offering 'f').
+func (a *App) renderWFConfirm(w int) string {
+	inner := w - 4
+	name := a.wfTarget.Name
+	var body []string
+	body = append(body, "")
+
+	switch {
+	case a.wfPreviewLoading:
+		body = append(body, truncPlain("computing preview for "+name+"…", inner))
+	case a.wfPreviewErr != "":
+		body = append(body, styErr.Render(truncPlain("! "+a.wfPreviewErr, inner)))
+	case a.wfContinueDead:
+		body = append(body, truncPlain("step session ended — cannot continue", inner))
+		body = append(body, styHelp.Render(truncPlain("f fork from transcript instead · esc cancel", inner)))
+	case a.wfPreview.Finish:
+		body = append(body, truncPlain(fmt.Sprintf("finish run %s?", name), inner))
+	default:
+		p := a.wfPreview
+		nextN := a.wfTarget.StepIdx + 2 // 1-based display of the NEXT step
+		var verb string
+		if p.Relation == "continue" {
+			verb = fmt.Sprintf("advance to step %d %s (continue) — sends into current session", nextN, p.Label)
+		} else {
+			verb = fmt.Sprintf("advance to step %d %s (%s)", nextN, p.Label, p.Relation)
+		}
+		line := verb + fmt.Sprintf(" · seed: %q", truncPlain(p.Seed, 60))
+		body = append(body, truncPlain(line, inner))
+		if p.Unavailable {
+			body = append(body, styHelp.Render(truncPlain("⚠ some template values unavailable", inner)))
+		}
+	}
+	body = append(body, "")
+
+	if a.errStr != "" {
+		body = append(body, styErr.Render(truncPlain("! "+a.errStr, inner)))
+	}
+
+	keybar := "y confirm · n/esc cancel"
+	switch {
+	case a.wfContinueDead:
+		keybar = "f fork instead · esc cancel"
+	case a.wfPreviewErr != "":
+		keybar = "esc cancel"
+	}
+	return frame(w, "advance "+name, "", body, keybar)
+}
+
+// renderWFAbandon renders the abandon confirm dialog (spec §2.12).
+func (a *App) renderWFAbandon(w int) string {
+	inner := w - 4
+	r := a.wfTarget
+	label := styNeedsYou.Render(fmt.Sprintf("%s#%d", r.Name, r.ID))
+	body := []string{"", "  abandon " + label + " ?", ""}
+	if a.errStr != "" {
+		body = append(body, styErr.Render(truncPlain("! "+a.errStr, inner)))
+	}
+	return frame(w, "abandon run", "", body, "y confirm · n/esc cancel")
 }
