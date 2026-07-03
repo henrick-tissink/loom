@@ -178,7 +178,7 @@ func TestSetTitle(t *testing.T) {
 // belt-and-braces with the per-migration transaction.
 func TestMigrationsAreTransactional(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "loom.db")
-	s, err := Open(p) // creates at latest version, including v4 objects
+	s, err := Open(p) // creates at latest version (v5), including v4 objects
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,9 @@ func TestMigrationsAreTransactional(t *testing.T) {
 	}
 
 	// Simulate a pre-fix partial apply: v4 objects exist (created above) but
-	// user_version is rolled back to 3.
+	// user_version is rolled back to 3. Re-opening must re-apply v4 (a
+	// no-op via IF NOT EXISTS) AND continue on through v5, since neither was
+	// recorded as applied.
 	raw, err := sql.Open("sqlite", "file:"+p)
 	if err != nil {
 		t.Fatal(err)
@@ -209,8 +211,8 @@ func TestMigrationsAreTransactional(t *testing.T) {
 	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 4 {
-		t.Fatalf("user_version = %d, want 4", v)
+	if v != 5 {
+		t.Fatalf("user_version = %d, want 5", v)
 	}
 
 	// The re-applied v4 objects must still be usable (IF NOT EXISTS re-run

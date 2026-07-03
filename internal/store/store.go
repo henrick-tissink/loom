@@ -96,6 +96,23 @@ func (s *Store) migrate() error {
 		CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 			content, session_id UNINDEXED, role UNINDEXED, ts UNINDEXED
 		)`,
+		// v5: workflow runs (spec §2.4, docs/superpowers/specs/
+		// 2026-07-03-workflows-design.md) — persisted state for saved
+		// multi-step workflow chains. session_names is a JSON array
+		// (invariant len==step_idx+1, enforced by the runner, not the
+		// store); pending_seed is the undelivered continue/fork seed
+		// (§2.9). IF NOT EXISTS for the same re-entrancy reason as v4.
+		`CREATE TABLE IF NOT EXISTS workflow_runs (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			name          TEXT NOT NULL,
+			def_json      TEXT NOT NULL,
+			step_idx      INTEGER NOT NULL,
+			session_names TEXT NOT NULL,
+			pending_seed  TEXT NOT NULL DEFAULT '',
+			status        TEXT NOT NULL,
+			created_at    INTEGER NOT NULL,
+			updated_at    INTEGER NOT NULL
+		)`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {
