@@ -46,6 +46,8 @@ type SearchHit struct {
 const transcriptCols = "session_id, project_dir, cwd, title, first_ts, last_ts, msg_count, ask, outcome, files, file_missing, llm_summary, summary_at"
 
 // UpsertTranscript inserts or fully replaces a session's distillation row.
+// The llm_summary and summary_at fields are set only via SetLLMSummary;
+// on conflict, we do not overwrite them (SetLLMSummary is the sole writer).
 func (s *Store) UpsertTranscript(t Transcript) error {
 	_, err := s.db.Exec(`INSERT INTO transcripts (`+transcriptCols+`)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -53,8 +55,7 @@ func (s *Store) UpsertTranscript(t Transcript) error {
 			project_dir=excluded.project_dir, cwd=excluded.cwd, title=excluded.title,
 			first_ts=excluded.first_ts, last_ts=excluded.last_ts, msg_count=excluded.msg_count,
 			ask=excluded.ask, outcome=excluded.outcome, files=excluded.files,
-			file_missing=excluded.file_missing, llm_summary=excluded.llm_summary,
-			summary_at=excluded.summary_at`,
+			file_missing=excluded.file_missing`,
 		t.SessionID, t.ProjectDir, t.Cwd, t.Title, t.FirstTS, t.LastTS, t.MsgCount,
 		t.Ask, t.Outcome, t.Files, t.FileMissing, t.LLMSummary, t.SummaryAt)
 	return err
@@ -197,44 +198,61 @@ func (s *Store) DeleteFileDocs(path string) (err error) {
 }
 
 // SessionDocs returns all indexed docs for a session (Plan B summarizer
-// input), joining through indexed_files' rowid ranges rather than filtering
-// on the UNINDEXED session_id column directly — the latter would force a
-// full FTS table scan.
-//
-// The join target is messages_fts_content — fts5's own shadow table that
-// backs messages_fts's stored column data — NOT the messages_fts virtual
-// table itself. Empirically verified (this driver, modernc.org/sqlite
-// v1.53.0): `... JOIN messages_fts f ON f.rowid BETWEEN i.first_rowid AND
-// i.last_rowid` gives an EXPLAIN QUERY PLAN that LOOKS bounded ("SCAN f
-// VIRTUAL TABLE INDEX N:><") but is not — timed at ~102ms whether the
-// target range sits at the end of a 300k-row table or the query is
-// rewritten every way the join can be phrased, i.e. it's a full scan
-// regardless of the "><" annotation. messages_fts_content, by contrast, is
-// an ordinary rowid-keyed table (columns id, c0, c1, ... one per declared
-// fts5 column in order — here c0=content, c1=session_id, c2=role, c3=ts),
-// so `rowid BETWEEN` against it is a genuine `SEARCH ... USING INTEGER
-// PRIMARY KEY` — measured at ~20-30µs for the same query. Reads only;
-// writes still go through messages_fts (the virtual table) so the FTS
-// index itself stays consistent — DELETE FROM messages_fts WHERE rowid
-// BETWEEN ... IS efficient (measured ~1.5ms for a 3-row delete out of
-// 300k+3), unlike the read path.
+// input), using a two-step public API approach that avoids touching fts5's
+// undocumented internal shadow table. The first query reads rowid ranges
+// per file via indexed_files (an ordinary table), then the second queries
+// the ranges from messages_fts (public FTS5 virtual table API). This two-step
+// approach avoids the multi-range join full-scan problem (~997ms → ~355µs
+// measured) that occurs when joining directly against messages_fts's range
+// conditions.
 func (s *Store) SessionDocs(sessionID string) ([]Doc, error) {
-	rows, err := s.db.Query(`SELECT c.c0, c.c2, c.c3 FROM indexed_files i, messages_fts_content c
-		WHERE i.session_id = ? AND c.rowid >= i.first_rowid AND c.rowid <= i.last_rowid
-		ORDER BY c.rowid`, sessionID)
+	// Step 1: Get rowid ranges for all files in this session
+	rows, err := s.db.Query(`SELECT first_rowid, last_rowid FROM indexed_files
+		WHERE session_id = ? ORDER BY first_rowid`, sessionID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Doc
+
+	type rowidRange struct {
+		first, last int64
+	}
+	var ranges []rowidRange
 	for rows.Next() {
-		var d Doc
-		if err := rows.Scan(&d.Content, &d.Role, &d.TS); err != nil {
+		var r rowidRange
+		if err := rows.Scan(&r.first, &r.last); err != nil {
 			return nil, err
 		}
-		out = append(out, d)
+		// Skip ranges where first_rowid==0 (file has no docs)
+		if r.first > 0 {
+			ranges = append(ranges, r)
+		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Step 2: For each range, fetch docs in rowid order
+	var out []Doc
+	for _, r := range ranges {
+		docs, err := s.db.Query(`SELECT content, role, ts FROM messages_fts
+			WHERE rowid BETWEEN ? AND ? ORDER BY rowid`, r.first, r.last)
+		if err != nil {
+			return nil, err
+		}
+		defer docs.Close()
+		for docs.Next() {
+			var d Doc
+			if err := docs.Scan(&d.Content, &d.Role, &d.TS); err != nil {
+				return nil, err
+			}
+			out = append(out, d)
+		}
+		if err := docs.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // searchSQL is the red-team-verified shape (spec §4). The naive

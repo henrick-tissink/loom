@@ -230,3 +230,165 @@ func TestTranscriptUpsertGetSummaryMissing(t *testing.T) {
 		t.Fatalf("TranscriptCount = %d, err=%v; want 1", n, err)
 	}
 }
+
+func TestSessionDocsMultiRange(t *testing.T) {
+	s := open(t)
+
+	// Insert one session across 3 files (3 ranges)
+	fA := IndexedFile{Path: "/proj/a.jsonl", SessionID: "sess1", Size: 100, Mtime: 111}
+	docsA := []Doc{
+		{Content: "alpha one", Role: "user", TS: 1},
+		{Content: "alpha two", Role: "assistant", TS: 2},
+	}
+	if err := s.ReplaceFileDocs(fA, docsA); err != nil {
+		t.Fatal(err)
+	}
+
+	fB := IndexedFile{Path: "/proj/b.jsonl", SessionID: "sess1", Size: 200, Mtime: 222}
+	docsB := []Doc{
+		{Content: "beta one", Role: "user", TS: 3},
+	}
+	if err := s.ReplaceFileDocs(fB, docsB); err != nil {
+		t.Fatal(err)
+	}
+
+	fC := IndexedFile{Path: "/proj/c.jsonl", SessionID: "sess1", Size: 300, Mtime: 333}
+	docsC := []Doc{
+		{Content: "gamma one", Role: "assistant", TS: 4},
+		{Content: "gamma two", Role: "user", TS: 5},
+	}
+	if err := s.ReplaceFileDocs(fC, docsC); err != nil {
+		t.Fatal(err)
+	}
+
+	// SessionDocs should return all 5 docs in rowid order
+	docs, err := s.SessionDocs("sess1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 5 {
+		t.Fatalf("SessionDocs = %d docs, want 5: %+v", len(docs), docs)
+	}
+
+	// Verify the order (by content)
+	expectedContents := []string{"alpha one", "alpha two", "beta one", "gamma one", "gamma two"}
+	for i, d := range docs {
+		if d.Content != expectedContents[i] {
+			t.Errorf("docs[%d].Content = %q, want %q", i, d.Content, expectedContents[i])
+		}
+	}
+}
+
+func TestUpsertPreservesLLMSummary(t *testing.T) {
+	s := open(t)
+
+	// Insert initial transcript with empty summary
+	tr := Transcript{
+		SessionID: "sess1", ProjectDir: "loom", Cwd: "/w/loom", Title: "title1",
+		Ask: "initial ask", Outcome: "outcome", Files: "a.go", LLMSummary: "",
+		FirstTS: 10, LastTS: 20, MsgCount: 5, SummaryAt: 0, FileMissing: false,
+	}
+	if err := s.UpsertTranscript(tr); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set LLM summary
+	if err := s.SetLLMSummary("sess1", "paid summary", 999); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify summary was set
+	got, _, _ := s.GetTranscript("sess1")
+	if got.LLMSummary != "paid summary" || got.SummaryAt != 999 {
+		t.Fatalf("SetLLMSummary failed: got %+v", got)
+	}
+
+	// Upsert the same session with different ask (should NOT overwrite summary)
+	tr2 := Transcript{
+		SessionID: "sess1", ProjectDir: "loom", Cwd: "/w/loom", Title: "title1",
+		Ask: "different ask", Outcome: "outcome", Files: "a.go", LLMSummary: "",
+		FirstTS: 10, LastTS: 20, MsgCount: 5, SummaryAt: 0, FileMissing: false,
+	}
+	if err := s.UpsertTranscript(tr2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify ask was updated but summary was preserved
+	got, _, _ = s.GetTranscript("sess1")
+	if got.Ask != "different ask" {
+		t.Errorf("Ask not updated: got %q want 'different ask'", got.Ask)
+	}
+	if got.LLMSummary != "paid summary" {
+		t.Errorf("LLMSummary was overwritten: got %q want 'paid summary'", got.LLMSummary)
+	}
+	if got.SummaryAt != 999 {
+		t.Errorf("SummaryAt was overwritten: got %d want 999", got.SummaryAt)
+	}
+}
+
+func TestDeleteFileDocs(t *testing.T) {
+	s := open(t)
+
+	// Insert docs for two files in the same session
+	fA := IndexedFile{Path: "/proj/a.jsonl", SessionID: "sess1", Size: 100, Mtime: 111}
+	docsA := []Doc{
+		{Content: "alpha one", Role: "user", TS: 1},
+		{Content: "alpha two", Role: "assistant", TS: 2},
+	}
+	if err := s.ReplaceFileDocs(fA, docsA); err != nil {
+		t.Fatal(err)
+	}
+
+	fB := IndexedFile{Path: "/proj/b.jsonl", SessionID: "sess1", Size: 200, Mtime: 222}
+	docsB := []Doc{
+		{Content: "beta one", Role: "user", TS: 3},
+	}
+	if err := s.ReplaceFileDocs(fB, docsB); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify both files are indexed
+	_, ok, _ := s.GetIndexedFile("/proj/a.jsonl")
+	if !ok {
+		t.Fatal("file A should be indexed")
+	}
+	gotB, ok, _ := s.GetIndexedFile("/proj/b.jsonl")
+	if !ok {
+		t.Fatal("file B should be indexed")
+	}
+
+	// Verify all 3 docs are in the session
+	docs, err := s.SessionDocs("sess1")
+	if err != nil || len(docs) != 3 {
+		t.Fatalf("SessionDocs = %d docs, want 3", len(docs))
+	}
+
+	// Delete file A's docs
+	if err := s.DeleteFileDocs("/proj/a.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify file A is no longer indexed
+	_, ok, _ = s.GetIndexedFile("/proj/a.jsonl")
+	if ok {
+		t.Fatal("file A should no longer be indexed after DeleteFileDocs")
+	}
+
+	// Verify file B is still indexed
+	gotB2, ok, _ := s.GetIndexedFile("/proj/b.jsonl")
+	if !ok {
+		t.Fatal("file B should still be indexed")
+	}
+	if gotB2 != gotB {
+		t.Fatalf("file B was modified: before=%+v after=%+v", gotB, gotB2)
+	}
+
+	// Verify only file B's docs remain
+	docs, err = s.SessionDocs("sess1")
+	if err != nil || len(docs) != 1 {
+		t.Fatalf("SessionDocs = %d docs, want 1 (only B)", len(docs))
+	}
+	if docs[0].Content != "beta one" {
+		t.Errorf("remaining doc is %q, want 'beta one'", docs[0].Content)
+	}
+}
