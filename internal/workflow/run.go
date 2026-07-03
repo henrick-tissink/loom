@@ -458,6 +458,21 @@ func (r *Runner) sendPendingSeed(run store.RunRow) error {
 	if !r.waitForContinueGate(curRow) {
 		return fmt.Errorf("workflow: run %d: session not yet idle/needs-you — seed still pending", run.ID)
 	}
+	// Re-read fresh: waitForContinueGate can block up to ReadyTimeout
+	// (60s default), during which a concurrent deliverer — an async
+	// Advance goroutine's best-effort send racing a user-triggered
+	// RetryPendingSeed — may have already delivered and cleared
+	// PendingSeed. Sending unconditionally here on the snapshot this call
+	// started with would double-send. No-op if there's nothing left
+	// pending, or if what IS pending is no longer the seed this call set
+	// out to deliver (a newer continue/fork already replaced it).
+	fresh, ok, err := r.Store.GetRun(run.ID)
+	if err != nil {
+		return err
+	}
+	if !ok || fresh.PendingSeed == "" || fresh.PendingSeed != run.PendingSeed {
+		return nil
+	}
 	if err := r.Launcher.Tmux.SendLiteral(curRow.Name, run.PendingSeed); err != nil {
 		return err
 	}

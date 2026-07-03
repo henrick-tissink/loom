@@ -161,6 +161,27 @@ func TestLoadAllTemplateWhitelistedTokensAccepted(t *testing.T) {
 	}
 }
 
+// TestLoadAllMultilineSeedNormalizedToSingleLine guards the debt-sweep fix:
+// a literal \n/\r/\t authored in a step's seed JSON (e.g. copy-pasted
+// multi-line prompt text) must be collapsed to single spaces at LOAD time,
+// before it ever reaches SendLiteral on a continue delivery (run.go's
+// sendPendingSeed) — an un-normalized \n there acts as a premature Enter,
+// submitting the prompt early.
+func TestLoadAllMultilineSeedNormalizedToSingleLine(t *testing.T) {
+	dir := t.TempDir()
+	writeDef(t, dir, "multiline", `{"name":"multiline","steps":[
+		{"label":"a","project":"loom","relation":"fresh","seed":"line one\nline two\r\nline three\t\tend"}
+	]}`)
+	defs, errs := LoadAll(dir, testProjects())
+	if len(errs) != 0 || len(defs) != 1 {
+		t.Fatalf("defs=%+v errs=%+v, want 1 def 0 errs", defs, errs)
+	}
+	want := "line one line two line three end"
+	if got := defs[0].Steps[0].Seed; got != want {
+		t.Fatalf("Seed = %q, want %q (newlines/tabs collapsed to single spaces)", got, want)
+	}
+}
+
 func TestLoadAllMalformedJSONRejectedNotPanicked(t *testing.T) {
 	dir := t.TempDir()
 	writeDef(t, dir, "broken", `{not valid json`)

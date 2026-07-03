@@ -677,6 +677,101 @@ func TestRetryPendingSeedOnDeadSessionReturnsErrContinueDead(t *testing.T) {
 	}
 }
 
+// runningTailLines is a transcript whose tail classifies as StateRunning (an
+// assistant tool_use block pending, no matching tool_result/text yet) — used
+// to hold sendPendingSeed's waitForContinueGate open while a test drives a
+// concurrent delivery in behind it.
+func runningTailLines(cwd string) []string {
+	return []string{
+		fmt.Sprintf(`{"type":"user","message":{"role":"user","content":"do the plan"},"cwd":%q,"timestamp":"2026-07-03T00:00:00Z"}`, cwd),
+		fmt.Sprintf(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]},"cwd":%q,"timestamp":"2026-07-03T00:00:05Z"}`, cwd),
+	}
+}
+
+// appendNeedsYouTail appends lines to path flipping the classifier's tail
+// state to StateNeedsYou (a tool_result consuming the pending tool_use,
+// then a final text-only assistant reply).
+func appendNeedsYouTail(t *testing.T, path, cwd string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	lines := []string{
+		fmt.Sprintf(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","name":"Bash"}]},"cwd":%q,"timestamp":"2026-07-03T00:00:10Z"}`, cwd),
+		fmt.Sprintf(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"cwd":%q,"timestamp":"2026-07-03T00:00:15Z"}`, cwd),
+	}
+	if _, err := f.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSendPendingSeedNoOpsIfPendingSeedClearedWhileWaitingAtGate guards the
+// debt-sweep fix (spec §2.9): sendPendingSeed must re-read PendingSeed AFTER
+// waitForContinueGate, not send blind on the snapshot it started with.
+// Without the fix, an async Advance goroutine's best-effort delivery and a
+// user's 'n' RetryPendingSeed can both pass the gate and double-send — here
+// we simulate the "already delivered by someone else" half of that race:
+// the transcript starts StateRunning (gate blocked), pending_seed is
+// cleared out from under the caller while it waits, and the transcript THEN
+// flips to NeedsYou (gate opens) — the fixed code must see the cleared seed
+// and no-op, so the tmux sink receives ZERO bytes.
+func TestSendPendingSeedNoOpsIfPendingSeedClearedWhileWaitingAtGate(t *testing.T) {
+	r, ccd, _ := testRunner(t)
+	cwd := t.TempDir()
+	claudeID := "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	transcriptPath := writeTranscript(t, ccd, cwd, claudeID, runningTailLines(cwd)...) // tail = StateRunning: gate blocked
+
+	name := "loom-racegate1"
+	scriptPath := filepath.Join(t.TempDir(), "sink-cat.sh")
+	if err := os.WriteFile(scriptPath, []byte(sinkCatScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sink := filepath.Join(t.TempDir(), "sink.txt")
+	if err := r.Launcher.Tmux.NewSession(name, cwd, "'"+scriptPath+"' '"+sink+"'", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Store.Upsert(store.SessionRow{Name: name, ClaudeSessionID: claudeID, ProjectLabel: "p", Cwd: cwd,
+		CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "idle"}); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, _ := r.Store.InsertRun("wfrace", `{"name":"wfrace","steps":[]}`, 100)
+	if claimed, err := r.Store.AdvanceRunCAS(runID, 0, 0, []string{name}, "duplicate me", 100); err != nil || !claimed {
+		t.Fatalf("seed CAS: claimed=%v err=%v", claimed, err)
+	}
+	run, _, _ := r.Store.GetRun(runID)
+
+	done := make(chan error, 1)
+	go func() { done <- r.sendPendingSeed(run) }()
+
+	// Give sendPendingSeed a moment to reach and block on
+	// waitForContinueGate (StateRunning), then simulate the other
+	// deliverer having already won the race and cleared pending_seed,
+	// THEN let the gate open.
+	time.Sleep(150 * time.Millisecond)
+	if err := r.Store.ClearPendingSeed(runID, 200); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	appendNeedsYouTail(t, transcriptPath, cwd)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("sendPendingSeed = %v, want nil (no-op, seed already cleared)", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("sendPendingSeed never returned")
+	}
+
+	b, err := os.ReadFile(sink)
+	if err == nil && len(b) != 0 {
+		t.Fatalf("sink = %q, want ZERO sends (duplicate delivery must be suppressed)", b)
+	}
+}
+
 // --- Abandon (spec §2.12) -----------------------------------------------
 
 func TestAbandonSetsStatusAbandoned(t *testing.T) {

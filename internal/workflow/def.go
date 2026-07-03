@@ -74,6 +74,14 @@ var (
 // (spec §2.3: "typos surface at load, never ship literal braces").
 var templateTokenRe = regexp.MustCompile(`\{\{[^{}]*\}\}`)
 
+// seedNewlineRe matches runs of newlines/carriage-returns/tabs authored
+// (deliberately or via copy-paste) inside a step's seed JSON string. A
+// literal \n surviving into SendLiteral on a continue delivery (run.go's
+// sendPendingSeed) acts as a premature Enter mid-seed, submitting the
+// prompt early — collapsing at LOAD time, once, is cheaper and safer than
+// trying to catch it at every send site.
+var seedNewlineRe = regexp.MustCompile(`[\r\n\t]+`)
+
 var templateWhitelist = map[string]bool{
 	"{{prev.outcome}}": true,
 	"{{prev.title}}":   true,
@@ -176,6 +184,7 @@ func loadOne(path string, known map[string]registry.Project) (Definition, error)
 			}
 			s.Project = proj.Path // bake the resolved absolute path in place (see Step's doc comment)
 		}
+		s.Seed = seedNewlineRe.ReplaceAllString(s.Seed, " ") // normalize BEFORE template-token validation, see seedNewlineRe
 		for _, tok := range templateTokenRe.FindAllString(s.Seed, -1) {
 			if !templateWhitelist[tok] {
 				return Definition{}, fmt.Errorf("step %d: unknown template token %q", i+1, tok)

@@ -1766,6 +1766,79 @@ func TestWFAbandonFlowCallsAbandonAndReloads(t *testing.T) {
 	}
 }
 
+// TestWFAbandonYStaysOnConfirmUntilResultAndFreshBranchHandlesError guards
+// the debt-sweep dead-branch fix: previously 'y' switched a.view to
+// viewWorkflows BEFORE abandonCmd's result landed, which made the
+// wfActionMsg staleness gate's `m.kind == wfActionAbandon && a.view ==
+// viewWFConfirmAbandon` branch permanently unreachable — every abandon
+// result, success or failure, took the "stale" path instead (same end
+// state on success, but a run-name-qualified error string on failure
+// instead of the fresh path's plain one). This asserts both halves of the
+// fix: (1) the confirm view is still open immediately after 'y' — the fix
+// no longer flips it early — and (2) a failing abandon result is handled
+// via the FRESH branch (plain err.Error(), no "run name#id:" prefix).
+func TestWFAbandonYStaysOnConfirmUntilResultAndFreshBranchHandlesError(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	runID, err := st.InsertRun("wf1", `{"name":"wf1","steps":[{"label":"a","project":"/x","relation":"fresh"}]}`, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdvanceRunCAS(runID, 0, 0, []string{"loom-x"}, "", 100); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := st.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &workflow.Runner{Store: st}
+	a := NewApp(Deps{Runner: runner})
+	a.width, a.height = 80, 24
+	a.view = viewWorkflows
+	a.wfRuns = []wfRunRow{{run: run}}
+	a.wfCursor = 0
+
+	a.Update(key("x"))
+	if a.view != viewWFConfirmAbandon {
+		t.Fatalf("view = %v, want viewWFConfirmAbandon", a.view)
+	}
+
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y did not return a command")
+	}
+	if a.view != viewWFConfirmAbandon {
+		t.Fatalf("view = %v immediately after 'y', want still viewWFConfirmAbandon until the result lands", a.view)
+	}
+
+	// Simulate a concurrent finish landing while the abandon is in flight:
+	// AbandonRunCAS will now be rejected (status no longer 'running').
+	if err := st.SetRunStatus(runID, "done", 150); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := cmd()
+	am, ok := msg.(wfActionMsg)
+	if !ok || am.err == nil {
+		t.Fatalf("abandon result = %#v, want a non-nil error (status raced to done)", msg)
+	}
+
+	_, cmd2 := a.Update(am)
+	if a.view != viewWorkflows {
+		t.Fatalf("view = %v after failed abandon result, want viewWorkflows", a.view)
+	}
+	if a.errStr != am.err.Error() {
+		t.Fatalf("errStr = %q, want plain %q (fresh branch, no run-name prefix)", a.errStr, am.err.Error())
+	}
+	if cmd2 == nil {
+		t.Fatal("failed abandon did not trigger a reload command")
+	}
+}
+
 // --- start flow (real backend, spec §2.10/§4) -----------------------------
 
 // wfE2EDeps builds a real Runner (a throwaway tmux socket + a PATH-injected

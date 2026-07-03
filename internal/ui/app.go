@@ -1243,7 +1243,15 @@ func (a *App) updateWFAbandonKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.view = viewWorkflows
 		return a, nil
 	case "y":
-		a.view = viewWorkflows
+		// Stays on viewWFConfirmAbandon until the wfActionMsg result lands
+		// (same discipline as updateWFConfirmKeys' advance/finish 'y'
+		// above) rather than switching to viewWorkflows here: the Update
+		// staleness gate (spec regression fix) requires a.view still be
+		// viewWFConfirmAbandon AND m.kind==wfActionAbandon for the result
+		// to be treated as "fresh" — flipping the view early made that
+		// branch unreachable and every abandon result take the stale path
+		// instead (still correct end state, but via the wrong branch and
+		// with an unintended run-name-qualified error string).
 		if a.deps.Runner == nil {
 			return a, nil
 		}
