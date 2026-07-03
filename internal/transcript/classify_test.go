@@ -13,6 +13,8 @@ const (
 	lineSnapshot     = `{"type":"file-history-snapshot","messageId":"m1","snapshot":{},"isSnapshotUpdate":false}`
 	lineSystem       = `{"type":"system","subtype":"hook","content":"x"}`
 	lineSidechainAst = `{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","id":"s1","name":"Bash","input":{}}]}}`
+	lineAiTitle      = `{"type":"ai-title","aiTitle":"add vega hedge to strategy","sessionId":"x"}`
+	lineAsstUsage    = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn","usage":{"input_tokens":12,"cache_creation_input_tokens":100,"cache_read_input_tokens":80000,"output_tokens":500}}}`
 )
 
 func feed(t *testing.T, lines ...string) *Classifier {
@@ -75,5 +77,33 @@ func TestSidechainRecordsIgnored(t *testing.T) {
 func TestGarbageLineIgnored(t *testing.T) {
 	if s := feed(t, lineUserPrompt, lineAsstEndTurn, `{"type":`).State(); s != StateNeedsYou {
 		t.Fatalf("state = %v, want NeedsYou (partial line ignored)", s)
+	}
+}
+
+func TestTitleCaptured(t *testing.T) {
+	c := feed(t, lineUserPrompt, lineAiTitle, lineAsstEndTurn)
+	if c.Title() != "add vega hedge to strategy" {
+		t.Fatalf("Title = %q", c.Title())
+	}
+	// ai-title is a sidecar: it must not change turn state
+	if c.State() != StateNeedsYou {
+		t.Fatalf("state = %v, want NeedsYou", c.State())
+	}
+}
+
+func TestCtxTokensFromLastUsage(t *testing.T) {
+	c := feed(t, lineUserPrompt, lineAsstUsage)
+	if c.CtxTokens() != 80612 { // 12+100+80000+500
+		t.Fatalf("CtxTokens = %d, want 80612", c.CtxTokens())
+	}
+	if c.State() != StateNeedsYou {
+		t.Fatalf("state = %v", c.State())
+	}
+}
+
+func TestUsageAbsentLeavesCtx(t *testing.T) {
+	c := feed(t, lineUserPrompt, lineAsstUsage, lineToolResult, lineAsstToolUse)
+	if c.CtxTokens() != 80612 { // later assistant WITHOUT usage keeps prior value
+		t.Fatalf("CtxTokens = %d", c.CtxTokens())
 	}
 }

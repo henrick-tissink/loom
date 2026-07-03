@@ -152,14 +152,14 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 			rd = transcript.NewReader(transcript.Path(e.ccd, r.Cwd, r.ClaudeSessionID))
 			e.readers[r.Name] = rd
 		}
-		ts, tool, _ := rd.Poll() // read errors degrade to prior state: best-effort
+		rs, _ := rd.Poll() // read errors degrade to prior state: best-effort
 		paneActive := now.Unix()-activity[r.Name] <= int64(activeWindow/time.Second)
-		st := Fuse(ts, paneActive)
+		st := Fuse(rs.State, paneActive)
 		if string(st) != r.LastStatus {
 			_ = e.st.SetStatus(r.Name, string(st))
 			r.LastStatus = string(st)
 		}
-		live = append(live, Row{SessionRow: r, Status: st, LastTool: tool, Activity: activity[r.Name]})
+		live = append(live, Row{SessionRow: r, Status: st, LastTool: rs.LastTool, Activity: activity[r.Name]})
 	}
 
 	recent, err := e.st.Recent(10)

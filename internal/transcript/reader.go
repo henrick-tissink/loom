@@ -18,19 +18,34 @@ type Reader struct {
 
 func NewReader(path string) *Reader { return &Reader{path: path} }
 
-func (r *Reader) Poll() (State, string, error) {
+// ReaderSnapshot is the classifier state after consuming all complete lines.
+type ReaderSnapshot struct {
+	State     State
+	LastTool  string
+	Title     string
+	CtxTokens int64
+}
+
+func (r *Reader) snap() ReaderSnapshot {
+	return ReaderSnapshot{
+		State: r.cls.State(), LastTool: r.cls.LastTool(),
+		Title: r.cls.Title(), CtxTokens: r.cls.CtxTokens(),
+	}
+}
+
+func (r *Reader) Poll() (ReaderSnapshot, error) {
 	f, err := os.Open(r.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return StateUnknown, "", nil // not written yet: fine
+			return ReaderSnapshot{State: StateUnknown}, nil // not written yet: fine
 		}
-		return r.cls.State(), r.cls.LastTool(), err
+		return r.snap(), err
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		return r.cls.State(), r.cls.LastTool(), err
+		return r.snap(), err
 	}
 	if info.Size() < r.offset {
 		// truncated/replaced: start over
@@ -39,11 +54,11 @@ func (r *Reader) Poll() (State, string, error) {
 		r.cls = Classifier{}
 	}
 	if _, err := f.Seek(r.offset, io.SeekStart); err != nil {
-		return r.cls.State(), r.cls.LastTool(), err
+		return r.snap(), err
 	}
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return r.cls.State(), r.cls.LastTool(), err
+		return r.snap(), err
 	}
 	r.offset += int64(len(data))
 
@@ -60,5 +75,5 @@ func (r *Reader) Poll() (State, string, error) {
 		}
 	}
 	r.partial = buf
-	return r.cls.State(), r.cls.LastTool(), nil
+	return r.snap(), nil
 }

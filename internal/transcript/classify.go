@@ -27,9 +27,18 @@ func (s State) String() string {
 type record struct {
 	Type        string `json:"type"`
 	IsSidechain bool   `json:"isSidechain"`
+	AiTitle     string `json:"aiTitle"`
 	Message     *struct {
 		Content json.RawMessage `json:"content"`
+		Usage   *usage          `json:"usage"`
 	} `json:"message"`
+}
+
+type usage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
 }
 
 type block struct {
@@ -42,8 +51,10 @@ type block struct {
 // ai-title, file-history-snapshot, attachment, queue-operation, system) — real
 // transcripts flush those after the final turn (spec §4.3, P0).
 type Classifier struct {
-	state    State
-	lastTool string
+	state     State
+	lastTool  string
+	title     string
+	ctxTokens int64
 }
 
 func (c *Classifier) Feed(line []byte) {
@@ -51,12 +62,22 @@ func (c *Classifier) Feed(line []byte) {
 	if err := json.Unmarshal(line, &r); err != nil {
 		return // partial/garbage line: ignore, keep prior state
 	}
+	if r.Type == "ai-title" {
+		if r.AiTitle != "" {
+			c.title = r.AiTitle
+		}
+		return // sidecar: never a turn boundary
+	}
 	if r.IsSidechain || (r.Type != "assistant" && r.Type != "user") {
 		return // sidecar or subagent record: not a turn boundary
 	}
 	blocks := parseBlocks(r)
 	switch r.Type {
 	case "assistant":
+		if r.Message != nil && r.Message.Usage != nil {
+			u := r.Message.Usage
+			c.ctxTokens = u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens + u.OutputTokens
+		}
 		if name, ok := findBlock(blocks, "tool_use"); ok {
 			c.lastTool = name
 			c.state = StateRunning // tool pending: its result would be a LATER user record
@@ -95,3 +116,5 @@ func findBlock(bs []block, typ string) (name string, ok bool) {
 
 func (c *Classifier) State() State     { return c.state }
 func (c *Classifier) LastTool() string { return c.lastTool }
+func (c *Classifier) Title() string    { return c.title }
+func (c *Classifier) CtxTokens() int64 { return c.ctxTokens }

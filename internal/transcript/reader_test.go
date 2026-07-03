@@ -8,9 +8,9 @@ import (
 
 func TestReaderMissingFile(t *testing.T) {
 	r := NewReader(filepath.Join(t.TempDir(), "nope.jsonl"))
-	s, _, err := r.Poll()
-	if err != nil || s != StateUnknown {
-		t.Fatalf("Poll = %v, %v (want Unknown, nil)", s, err)
+	rs, err := r.Poll()
+	if err != nil || rs.State != StateUnknown {
+		t.Fatalf("Poll = %v, %v (want Unknown, nil)", rs.State, err)
 	}
 }
 
@@ -24,24 +24,24 @@ func TestReaderIncremental(t *testing.T) {
 	r := NewReader(p)
 
 	f.WriteString(lineUserPrompt + "\n")
-	if s, _, _ := r.Poll(); s != StateIdle {
-		t.Fatalf("after prompt: %v, want Idle", s)
+	if rs, _ := r.Poll(); rs.State != StateIdle {
+		t.Fatalf("after prompt: %v, want Idle", rs.State)
 	}
 
 	f.WriteString(lineAsstToolUse + "\n")
-	if s, tool, _ := r.Poll(); s != StateRunning || tool != "Edit" {
-		t.Fatalf("after tool_use: %v/%q, want Running/Edit", s, tool)
+	if rs, _ := r.Poll(); rs.State != StateRunning || rs.LastTool != "Edit" {
+		t.Fatalf("after tool_use: %v/%q, want Running/Edit", rs.State, rs.LastTool)
 	}
 
 	// partial line: state must hold until the newline arrives
 	half := lineAsstEndTurn[:20]
 	f.WriteString(half)
-	if s, _, _ := r.Poll(); s != StateRunning {
-		t.Fatalf("after partial: %v, want Running (unchanged)", s)
+	if rs, _ := r.Poll(); rs.State != StateRunning {
+		t.Fatalf("after partial: %v, want Running (unchanged)", rs.State)
 	}
 	f.WriteString(lineAsstEndTurn[20:] + "\n")
-	if s, _, _ := r.Poll(); s != StateNeedsYou {
-		t.Fatalf("after completion: %v, want NeedsYou", s)
+	if rs, _ := r.Poll(); rs.State != StateNeedsYou {
+		t.Fatalf("after completion: %v, want NeedsYou", rs.State)
 	}
 }
 
@@ -49,12 +49,24 @@ func TestReaderTruncationResets(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	os.WriteFile(p, []byte(lineUserPrompt+"\n"+lineAsstEndTurn+"\n"), 0o644)
 	r := NewReader(p)
-	if s, _, _ := r.Poll(); s != StateNeedsYou {
-		t.Fatalf("initial: %v", s)
+	if rs, _ := r.Poll(); rs.State != StateNeedsYou {
+		t.Fatalf("initial: %v", rs.State)
 	}
 	// replace with a shorter file
 	os.WriteFile(p, []byte(lineUserPrompt+"\n"), 0o644)
-	if s, _, _ := r.Poll(); s != StateIdle {
-		t.Fatalf("after truncate: %v, want Idle (reset+reread)", s)
+	if rs, _ := r.Poll(); rs.State != StateIdle {
+		t.Fatalf("after truncate: %v, want Idle (reset+reread)", rs.State)
+	}
+}
+
+func TestReaderSnapshotCarriesTitleAndCtx(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	os.WriteFile(p, []byte(lineUserPrompt+"\n"+lineAiTitle+"\n"+lineAsstUsage+"\n"), 0o644)
+	rs, err := NewReader(p).Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs.Title != "add vega hedge to strategy" || rs.CtxTokens != 80612 || rs.State != StateNeedsYou {
+		t.Fatalf("snapshot = %+v", rs)
 	}
 }
