@@ -211,9 +211,12 @@ func TestSweepReindexesOnlyChangedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 2 main (original) + 1 main (new) + 2 subagent = 5, no duplicates.
-	if len(docs) != 5 {
-		t.Fatalf("SessionDocs(s1) = %d docs, want 5 (no duplicates): %+v", len(docs), docs)
+	// 2 main (original) + 1 main (new) + 2 subagent + 1 meta (title/files
+	// synthetic doc, written once during the first sweep and left untouched
+	// here since neither title nor files changed on re-index) = 6, no
+	// duplicates.
+	if len(docs) != 6 {
+		t.Fatalf("SessionDocs(s1) = %d docs, want 6 (no duplicates): %+v", len(docs), docs)
 	}
 }
 
@@ -254,6 +257,80 @@ func TestSweepFileMissingKeepsRow(t *testing.T) {
 	}
 	if len(docs) == 0 {
 		t.Error("docs must be KEPT after source file deletion, got 0")
+	}
+}
+
+// buildMetaSearchArchive lays out a single main-file session whose only
+// mention of "reader" is inside a tool_use file_path (never inside any
+// indexed text doc) and whose ai-title contains a word ("Untangle") that
+// likewise never appears in any indexed text doc. Both must only be
+// findable via the synthetic per-session meta doc (spec §2.2 coverage
+// gap: titles and the Files list are otherwise never FTS-indexed).
+func buildMetaSearchArchive(t *testing.T) (ccd string) {
+	t.Helper()
+	root := t.TempDir()
+	projDir := filepath.Join(root, "projects", "-w-loom3")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mainPath := filepath.Join(projDir, "s3.jsonl")
+	lines := []string{
+		`{"isSidechain":false,"type":"user","message":{"role":"user","content":"please tidy up the module"},"uuid":"u1","timestamp":"2026-07-02T14:00:00.000Z","cwd":"/w/loom3","sessionId":"s3"}`,
+		`{"isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"internal/reader.go","old_string":"x","new_string":"y"}}]},"uuid":"a1","timestamp":"2026-07-02T14:01:00.000Z","cwd":"/w/loom3","sessionId":"s3"}`,
+		`{"type":"ai-title","aiTitle":"Untangle the parser knot","isSidechain":false,"sessionId":"s3"}`,
+	}
+	if err := os.WriteFile(mainPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestSweepIndexesTitleAndFilesForSearch(t *testing.T) {
+	st := openStore(t)
+	ccd := buildMetaSearchArchive(t)
+	ix := NewIndexer(st, ccd)
+
+	if err := ix.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+
+	// "reader.go" is touched only via a tool_use file_path — never present
+	// in any indexed user/assistant doc — so it's findable ONLY through the
+	// meta doc. FTS tokenizes on punctuation, so search the bare word.
+	hits, err := st.SearchSessions("reader", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].SessionID != "s3" {
+		t.Fatalf("SearchSessions(reader) = %+v, want 1 hit for s3", hits)
+	}
+
+	// Title word, likewise absent from every indexed text doc.
+	hits, err = st.SearchSessions("untangle", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].SessionID != "s3" {
+		t.Fatalf("SearchSessions(untangle) = %+v, want 1 hit for s3", hits)
+	}
+
+	docsBefore, err := st.SessionDocs("s3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-sweep with nothing changed: every file's fingerprint holds, so
+	// mergeTranscript (and thus the meta-doc write) is never re-invoked —
+	// the meta doc must not be duplicated.
+	if err := ix.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	docsAfter, err := st.SessionDocs("s3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docsAfter) != len(docsBefore) {
+		t.Fatalf("SessionDocs(s3) count changed on unchanged re-sweep: before=%d after=%d", len(docsBefore), len(docsAfter))
 	}
 }
 

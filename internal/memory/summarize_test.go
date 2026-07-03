@@ -132,6 +132,9 @@ func TestSummarizeArgvPromptEnvAndCwd(t *testing.T) {
 	if !strings.Contains(argv[1], "UNTRUSTED") {
 		t.Fatalf("prompt = %q, missing UNTRUSTED framing", argv[1])
 	}
+	if !strings.Contains(argv[1], "Write plain text only — no markdown formatting.") {
+		t.Fatalf("prompt = %q, missing plain-text instruction", argv[1])
+	}
 	wantRest := []string{
 		"--model", "haiku",
 		"--no-session-persistence",

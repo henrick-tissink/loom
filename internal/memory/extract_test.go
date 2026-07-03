@@ -320,6 +320,22 @@ func TestAiTitleSetsTitle(t *testing.T) {
 	}
 }
 
+func TestAiTitleIsCleanTextd(t *testing.T) {
+	// aiTitle carries a literal \n: CleanText must collapse it to a single
+	// space just like every other indexed/distilled field (spec §2.2).
+	p := writeJSONL(t,
+		`{"isSidechain":false,"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1","timestamp":"2026-07-02T12:00:00.000Z","cwd":"/w/loom","sessionId":"s1"}`,
+		`{"type":"ai-title","aiTitle":"Respond with\npong message","isSidechain":false,"sessionId":"s1"}`,
+	)
+	ex, err := ExtractFile(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Title != "Respond with pong message" {
+		t.Fatalf("Title = %q, want CleanText'd (newline collapsed to space)", ex.Title)
+	}
+}
+
 func TestControlCharsStrippedFromIndexedContent(t *testing.T) {
 	// \x01 must never survive into indexed content (it's the FTS snippet
 	// highlight-start marker; letting transcript content contain a raw

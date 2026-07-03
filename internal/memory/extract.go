@@ -181,7 +181,7 @@ func (e *extractState) feed(line []byte) {
 		// Sidecar: never a turn boundary. Title only from main files, and
 		// only when not itself a sidechain record (mirrors classify.go).
 		if e.isMain && !r.IsSidechain && r.AiTitle != "" {
-			e.out.Title = r.AiTitle
+			e.out.Title = CleanText(r.AiTitle)
 		}
 		return
 	}

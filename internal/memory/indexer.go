@@ -259,6 +259,7 @@ func (ix *Indexer) mergeTranscript(sessionID, projectDir string, ex Extraction, 
 		// an empty ask (spec §2.1 discovery note).
 		cur = store.Transcript{SessionID: sessionID, ProjectDir: projectDir}
 	}
+	prevTitle, prevFiles := cur.Title, cur.Files
 
 	curFiles := splitFiles(cur.Files)
 
@@ -287,7 +288,50 @@ func (ix *Indexer) mergeTranscript(sessionID, projectDir string, ex Extraction, 
 	}
 	cur.Files = joinFiles(curFiles)
 
-	return ix.st.UpsertTranscript(cur)
+	if err := ix.st.UpsertTranscript(cur); err != nil {
+		return err
+	}
+
+	if cur.Title != prevTitle || cur.Files != prevFiles {
+		return ix.indexMetaDoc(sessionID, cur.Title, cur.Files, cur.LastTS)
+	}
+	return nil
+}
+
+// indexMetaDoc keeps a synthetic per-session FTS doc in sync with the
+// transcript's title and touched-files list (spec §2.2 coverage gap):
+// titles and the touched-files list are never emitted as their own doc by
+// ExtractFile (Title/Files are distillation fields, not indexed Docs), so
+// without this, filename/title searches would never match a session. One
+// doc — role "meta" — is written per session under the pseudo-file path
+// "loom://meta/<session_id>", replaced via store.ReplaceFileDocs (the same
+// delete-by-fingerprint-then-reinsert path real files use) whenever the
+// merged title or files differ from what was last indexed; skipped
+// entirely when both are empty. Size/Mtime are synthesized (len(content),
+// 0) since there's no real file to fingerprint — callers never fingerprint
+// this path against a stat call.
+//
+// This path is NEVER treated as a real file by Sweep's file_missing pass:
+// that pass iterates ListTranscripts (not indexed_files) and stats a path
+// derived from project_dir+session_id+".jsonl" — it never reads or stats
+// any indexed_files.Path, so "loom://meta/..." rows can never be flagged
+// file_missing or otherwise confused with a real transcript file.
+func (ix *Indexer) indexMetaDoc(sessionID, title, files string, lastTS int64) error {
+	if title == "" && files == "" {
+		return nil
+	}
+	content := CleanText(title + "\n" + files)
+	path := "loom://meta/" + sessionID
+
+	idxFile := store.IndexedFile{Path: path, SessionID: sessionID, Size: int64(len(content)), Mtime: 0}
+	if existing, ok, err := ix.st.GetIndexedFile(path); err != nil {
+		return err
+	} else if ok {
+		idxFile.FirstRowid = existing.FirstRowid
+		idxFile.LastRowid = existing.LastRowid
+	}
+
+	return ix.st.ReplaceFileDocs(idxFile, []store.Doc{{Content: content, Role: "meta", TS: lastTS}})
 }
 
 // selectCwd implements spec §2.7: prefer the cwd whose loom path-encoding
