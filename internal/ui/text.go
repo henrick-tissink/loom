@@ -50,3 +50,25 @@ func padPlain(s string, w int) string {
 	}
 	return s
 }
+
+// humanTokens renders a compact token count ("640","82k","1.2M"); blank ≤0.
+func humanTokens(n int64) string {
+	switch {
+	case n <= 0:
+		return ""
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%dk", n/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	}
+}
+
+// padLeft left-pads plain text to w runes; never truncates.
+func padLeft(s string, w int) string {
+	if n := w - len([]rune(s)); n > 0 {
+		return strings.Repeat(" ", n) + s
+	}
+	return s
+}

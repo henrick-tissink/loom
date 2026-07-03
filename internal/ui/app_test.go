@@ -383,6 +383,103 @@ func TestViewNarrowNoPanic(t *testing.T) {
 	assertExactWidth(t, "viewTag")
 }
 
+func TestWindowBody(t *testing.T) {
+	body := make([]string, 30)
+	for i := range body {
+		body[i] = fmt.Sprintf("line%d", i)
+	}
+	// fits: unchanged
+	if out := windowBody(body[:5], 2, 10); len(out) != 5 {
+		t.Fatalf("no-window len = %d", len(out))
+	}
+	for _, cursor := range []int{0, 1, 15, 28, 29} {
+		out := windowBody(body, cursor, 10)
+		if len(out) != 10 {
+			t.Fatalf("cursor %d: len = %d", cursor, len(out))
+		}
+		found := false
+		for _, l := range out {
+			if l == fmt.Sprintf("line%d", cursor) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("cursor %d line not visible: %v", cursor, out)
+		}
+	}
+	mid := windowBody(body, 15, 10)
+	if !strings.Contains(mid[0], "more ↑") || !strings.Contains(mid[9], "more ↓") {
+		t.Fatalf("markers missing: first=%q last=%q", mid[0], mid[9])
+	}
+}
+
+func TestTitleShownInActivity(t *testing.T) {
+	a := fixtureApp()
+	a.snap.Live[0].Title = "fix booking race"
+	a.rebuildRows()
+	if !strings.Contains(a.View(), "fix booking race") {
+		t.Fatal("title missing from view")
+	}
+}
+
+func TestCtxColumnShown(t *testing.T) {
+	a := fixtureApp()
+	a.snap.Live[1].CtxTokens = 80612
+	a.rebuildRows()
+	if !strings.Contains(a.View(), "80k") {
+		t.Fatal("ctx column missing")
+	}
+}
+
+func TestPeekFlow(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key(" ")) // cursor on live row 0
+	if a.view != viewPeek {
+		t.Fatalf("view = %v, want peek", a.view)
+	}
+	if a.peekTarget.name != "loom-b" {
+		t.Fatalf("peekTarget = %q (must be captured at open)", a.peekTarget.name)
+	}
+	a.Update(peekMsg{name: "loom-b", content: "hello from the pane\nline two"})
+	if !strings.Contains(a.View(), "hello from the pane") {
+		t.Fatal("peek content missing")
+	}
+	// stale peekMsg for another session is discarded
+	a.Update(peekMsg{name: "loom-zzz", content: "WRONG"})
+	if strings.Contains(a.View(), "WRONG") {
+		t.Fatal("stale peek content applied")
+	}
+	// frame invariant holds in peek
+	for _, line := range strings.Split(a.View(), "\n") {
+		if lw := lipgloss.Width(line); lw != a.width {
+			t.Fatalf("peek line width %d != %d", lw, a.width)
+		}
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewDash {
+		t.Fatal("esc did not close peek")
+	}
+}
+
+func TestPeekNoopOnRecentRow(t *testing.T) {
+	a := fixtureApp()
+	for i := 0; i < 10; i++ {
+		a.Update(key("j")) // land on the recent row (clamped)
+	}
+	a.Update(key(" "))
+	if a.view != viewDash {
+		t.Fatal("peek opened on recent row")
+	}
+}
+
+func TestSnapMsgWithTransitionsEmitsNotify(t *testing.T) {
+	a := fixtureApp()
+	_, cmd := a.Update(snapMsg(status.Snapshot{NewlyNeedsYou: []string{"tavli · fix race"}}))
+	if cmd == nil {
+		t.Fatal("expected a notify command for transitions")
+	}
+}
+
 func TestRowShowsAge(t *testing.T) {
 	a := fixtureApp()
 	a.now = time.Unix(2000, 0)

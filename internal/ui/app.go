@@ -24,6 +24,7 @@ const (
 	viewLauncher
 	viewConfirmKill
 	viewTag
+	viewPeek
 )
 
 type Deps struct {
@@ -45,6 +46,8 @@ type uiRow struct {
 	activity int64
 	recent   bool
 	row      store.SessionRow
+	title    string
+	ctx      int64
 }
 
 type App struct {
@@ -65,6 +68,14 @@ type App struct {
 	// change, so the kill/tag-save handlers must act on this captured target
 	// rather than re-reading selected() at confirm/save time (finding 5).
 	actionTarget uiRow
+
+	// peekTarget/peekContent: peek acts on a target captured at open time,
+	// same captured-target discipline as actionTarget above.
+	peekTarget struct {
+		name  string
+		label string
+	}
+	peekContent string
 }
 
 type (
@@ -73,6 +84,7 @@ type (
 	snapMsg     status.Snapshot
 	errMsg      struct{ err error }
 	attachedMsg struct{ err error }
+	peekMsg     struct{ name, content string }
 )
 
 func NewApp(deps Deps) *App {
@@ -107,7 +119,8 @@ func (a *App) rebuildRows() {
 	var needs, running, idle, recent []uiRow
 	for _, r := range a.snap.Live {
 		u := uiRow{name: r.Name, label: r.ProjectLabel, status: string(r.Status),
-			lastTool: r.LastTool, model: r.Model, mode: r.Mode, activity: r.Activity, row: r.SessionRow}
+			lastTool: r.LastTool, model: r.Model, mode: r.Mode, activity: r.Activity, row: r.SessionRow,
+			title: r.Title, ctx: r.CtxTokens}
 		switch r.Status {
 		case status.NeedsYou:
 			needs = append(needs, u)
@@ -119,7 +132,7 @@ func (a *App) rebuildRows() {
 	}
 	for _, r := range a.snap.Recent {
 		recent = append(recent, uiRow{name: r.Name, label: r.ProjectLabel,
-			status: r.LastStatus, model: r.Model, mode: r.Mode, recent: true, row: r})
+			status: r.LastStatus, model: r.Model, mode: r.Mode, recent: true, row: r, title: r.Title})
 	}
 	a.rows = append(append(append(needs, running...), idle...), recent...)
 	if a.cursor >= len(a.rows) {
@@ -140,6 +153,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width, a.height = m.Width, m.Height
 		return a, nil
 	case tickMsg:
+		if a.view == viewPeek {
+			// live refresh: same tick chain, plus a one-shot peek re-capture.
+			return a, tea.Batch(a.pollCmd(), tickAfter(), a.peekCmd())
+		}
 		return a, tea.Batch(a.pollCmd(), tickAfter())
 	case pollNowMsg:
 		// one-shot refresh after launch/kill/resume — NOT a new tick chain.
@@ -152,6 +169,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.errStr = ""
 		a.now = time.Now()
 		a.rebuildRows()
+		if len(m.NewlyNeedsYou) > 0 {
+			return a, notifyCmd(m.NewlyNeedsYou)
+		}
 		return a, nil
 	case errMsg:
 		a.errStr = m.err.Error()
@@ -161,6 +181,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.errStr = "attach failed: " + m.err.Error()
 		}
 		return a, a.pollCmd()
+	case peekMsg:
+		if a.view == viewPeek && m.name == a.peekTarget.name {
+			a.peekContent = m.content
+		}
+		return a, nil
 	case tea.KeyMsg:
 		return a.updateKeys(m)
 	}
@@ -227,6 +252,22 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.tag, cmd = a.tag.Update(msg)
 		return a, cmd
+
+	case viewPeek:
+		switch msg.String() {
+		case "esc", " ":
+			a.view = viewDash
+			return a, nil
+		case "enter":
+			if a.deps.Tmux != nil {
+				cmd := a.deps.Tmux.AttachCmd(a.peekTarget.name)
+				return a, tea.ExecProcess(cmd, func(err error) tea.Msg { return attachedMsg{err} })
+			}
+			return a, nil
+		case "q", "ctrl+c":
+			return a, tea.Quit
+		}
+		return a, nil
 	}
 
 	// viewDash
@@ -274,8 +315,33 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmd := a.deps.Tmux.AttachCmd(r.name)
 			return a, tea.ExecProcess(cmd, func(err error) tea.Msg { return attachedMsg{err} })
 		}
+	case " ":
+		if r, ok := a.selected(); ok && !r.recent {
+			a.peekTarget.name = r.name
+			a.peekTarget.label = r.label
+			a.peekContent = ""
+			a.view = viewPeek
+			return a, a.peekCmd()
+		}
 	}
 	return a, nil
+}
+
+// peekCmd captures the target pane's contents. The target is pinned at
+// peek-open time (a.peekTarget), never the live cursor — same captured-target
+// discipline as kill/tag (finding 5).
+func (a *App) peekCmd() tea.Cmd {
+	if a.deps.Tmux == nil {
+		return nil
+	}
+	tm, name := a.deps.Tmux, a.peekTarget.name
+	return func() tea.Msg {
+		out, err := tm.CapturePane(name)
+		if err != nil {
+			return peekMsg{name: name, content: "(pane unavailable)"}
+		}
+		return peekMsg{name: name, content: out}
+	}
 }
 
 func (a *App) selected() (uiRow, bool) {
@@ -302,6 +368,23 @@ func (a *App) View() string {
 	case viewTag:
 		return frame(w, "tags", "", []string{"", "  " + a.tag.View(), ""},
 			"↵ save · esc cancel")
+	case viewPeek:
+		inner := w - 4
+		h := a.height - 2
+		if h < 1 {
+			h = 1
+		}
+		lines := strings.Split(strings.TrimRight(a.peekContent, "\n"), "\n")
+		if len(lines) > h {
+			lines = lines[len(lines)-h:]
+		}
+		body := make([]string, len(lines))
+		for i, line := range lines {
+			// capture-pane without -e is plain text — no ANSI to worry about.
+			body[i] = truncPlain(line, inner)
+		}
+		return frame(w, "peek · "+a.peekTarget.label, "", body,
+			"space/esc back · ↵ attach · q quit")
 	}
 
 	inner := w - 4
@@ -316,6 +399,7 @@ func (a *App) View() string {
 	var body []string
 	body = append(body, "")
 	section := ""
+	cursorLine := 0
 	for i, r := range a.rows {
 		if sec := sectionFor(r); sec != section {
 			if section != "" {
@@ -323,6 +407,9 @@ func (a *App) View() string {
 			}
 			section = sec
 			body = append(body, sectionRule(sec, inner, sec == "NEEDS YOU"))
+		}
+		if i == a.cursor {
+			cursorLine = len(body)
 		}
 		body = append(body, a.renderRow(i, r, inner))
 	}
@@ -345,13 +432,40 @@ func (a *App) View() string {
 		}
 		body = append(body, styHelp.Render(truncPlain("(inside tmux — attach nests; F12 detaches)", inner)))
 	}
+	if a.height > 2 {
+		body = windowBody(body, cursorLine, a.height-2)
+	}
 
 	counts := fmt.Sprintf("%d live · %d needs you", live, needs)
-	keybar := "↵ attach · n new · x kill · t tag · r reopen · q quit"
+	keybar := "↵ attach · space peek · n new · x kill · t tag · r reopen · q quit"
 	if inner > lipgloss.Width(keybar)+24 {
 		keybar += " · / search·soon · w workflows·soon"
 	}
 	return frame(w, "LOOM", counts, body, keybar)
+}
+
+// windowBody keeps at most maxH body lines with cursorLine visible,
+// replacing clipped edges with dim "… N more" markers.
+func windowBody(body []string, cursorLine, maxH int) []string {
+	if maxH <= 2 || len(body) <= maxH {
+		return body
+	}
+	off := cursorLine - maxH/2
+	if off < 0 {
+		off = 0
+	}
+	if off > len(body)-maxH {
+		off = len(body) - maxH
+	}
+	out := make([]string, maxH)
+	copy(out, body[off:off+maxH])
+	if off > 0 {
+		out[0] = styChrome.Render(fmt.Sprintf("… %d more ↑", off))
+	}
+	if rest := len(body) - off - maxH; rest > 0 {
+		out[maxH-1] = styChrome.Render(fmt.Sprintf("… %d more ↓", rest))
+	}
+	return out
 }
 
 func sectionRule(label string, inner int, alert bool) string {
@@ -370,21 +484,22 @@ func sectionRule(label string, inner int, alert bool) string {
 // when a session's seed prompt failed to deliver — see renderRow.
 const seedFailedSuffix = " · seed failed"
 
-// renderRow: cursor(2) icon(1)+1 project(12)+1 activity(flex)+1 model·mode(13)+1 age(4)
+// renderRow: cursor(2) icon(1)+1 project(12)+1 activity(flex)+1 ctx(4)+1 model·mode(13)+1 age(4)
 func (a *App) renderRow(i int, r uiRow, inner int) string {
-	actW := inner - 36
+	actW := inner - 41
 	cursor := "  "
 	if i == a.cursor {
 		cursor = styCursor.Render("▸ ")
 	}
 	proj := padPlain(truncPlain(r.label, 12), 12)
+	ctx := styMeta.Render(padLeft(truncPlain(humanTokens(r.ctx), 4), 4))
 	meta := padPlain(truncPlain(metaText(r.model, r.mode), 13), 13)
 	age := padPlain(humanAge(a.now, ageOf(r)), 4)
 	if actW <= 0 { // ultra-narrow: drop the activity column entirely
 		return cursor + statusIcon(r.status) + " " + styNeedsYouIf(r, proj)
 	}
 	return cursor + statusIcon(r.status) + " " + styNeedsYouIf(r, proj) + " " +
-		a.renderActivityCell(r, actW) + " " + styMeta.Render(meta) + " " + styMeta.Render(age)
+		a.renderActivityCell(r, actW) + " " + ctx + " " + styMeta.Render(meta) + " " + styMeta.Render(age)
 }
 
 // renderActivityCell renders the activity column, exactly actW cells.
@@ -419,30 +534,41 @@ func styNeedsYouIf(r uiRow, s string) string {
 	return s
 }
 
+// activityText composes the base state text and, when known, the session
+// title: "reply ready · add vega hedge to strategy" (state first, title
+// after — truncated as one plain string before styling, see
+// renderActivityCell). Blank title leaves the text unchanged. The
+// seed-failed suffix is NOT appended here — renderActivityCell appends and
+// styles it as its own dim segment (see there).
 func activityText(r uiRow) string {
+	var text string
 	if r.recent {
 		switch {
 		case r.status == "error":
-			return fmt.Sprintf("error · exit %d", r.row.ExitCode)
+			text = fmt.Sprintf("error · exit %d", r.row.ExitCode)
 		case r.row.ExitCode == 0:
-			return "done"
+			text = "done"
 		default:
-			return "ended"
+			text = "ended"
+		}
+	} else {
+		switch r.status {
+		case "running":
+			if r.lastTool != "" {
+				text = "⏺ " + r.lastTool
+			} else {
+				text = "working"
+			}
+		case "needs_you":
+			text = "reply ready"
+		default:
+			text = "your turn"
 		}
 	}
-	// Note: the seed-failed suffix is NOT appended here — renderActivityCell
-	// appends and styles it as its own dim segment (see there).
-	switch r.status {
-	case "running":
-		if r.lastTool != "" {
-			return "⏺ " + r.lastTool
-		}
-		return "working"
-	case "needs_you":
-		return "reply ready"
-	default:
-		return "your turn"
+	if r.title != "" {
+		text += " · " + r.title
 	}
+	return text
 }
 
 func ageOf(r uiRow) int64 {
