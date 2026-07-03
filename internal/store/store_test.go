@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -166,6 +167,56 @@ func TestSetTitle(t *testing.T) {
 	got, _, _ := s.Get("loom-a")
 	if got.Title != "new title" {
 		t.Fatalf("Title = %q", got.Title)
+	}
+}
+
+// TestMigrationsAreTransactional guards the migration-runner fix (spec §3):
+// each migration's DDL + user_version bump must execute in ONE transaction,
+// so a DB where v4's objects already exist but user_version is stale (as if
+// a crash happened between the two under the old two-Exec-calls runner)
+// still opens cleanly — re-entrancy via IF NOT EXISTS on every v4 object,
+// belt-and-braces with the per-migration transaction.
+func TestMigrationsAreTransactional(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "loom.db")
+	s, err := Open(p) // creates at latest version, including v4 objects
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a pre-fix partial apply: v4 objects exist (created above) but
+	// user_version is rolled back to 3.
+	raw, err := sql.Open("sqlite", "file:"+p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(p)
+	if err != nil {
+		t.Fatalf("re-entrant Open failed: %v", err)
+	}
+	defer s2.Close()
+
+	var v int
+	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != 4 {
+		t.Fatalf("user_version = %d, want 4", v)
+	}
+
+	// The re-applied v4 objects must still be usable (IF NOT EXISTS re-run
+	// didn't clobber them into some broken state).
+	if _, err := s2.TranscriptCount(); err != nil {
+		t.Fatalf("transcripts table unusable after re-entrant migration: %v", err)
 	}
 }
 

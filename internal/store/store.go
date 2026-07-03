@@ -62,16 +62,71 @@ func (s *Store) migrate() error {
 		// v3: session title, captured from the transcript's ai-title sidecar
 		// record and persisted so it survives restarts (spec: session titles).
 		`ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+		// v4: memory store (spec §3) — searchable archive of every claude
+		// transcript (main + subagent), incrementally indexed per source file.
+		// IF NOT EXISTS on every object is belt-and-braces re-entrancy: it
+		// combines with the per-migration transaction below so a DB where
+		// these objects exist but user_version is stale (a pre-fix partial
+		// apply) still opens cleanly instead of bricking (see
+		// TestMigrationsAreTransactional).
+		`CREATE TABLE IF NOT EXISTS transcripts (
+			session_id  TEXT PRIMARY KEY,
+			project_dir TEXT NOT NULL,
+			cwd         TEXT NOT NULL DEFAULT '',
+			title       TEXT NOT NULL DEFAULT '',
+			first_ts    INTEGER NOT NULL DEFAULT 0,
+			last_ts     INTEGER NOT NULL DEFAULT 0,
+			msg_count   INTEGER NOT NULL DEFAULT 0,
+			ask         TEXT NOT NULL DEFAULT '',
+			outcome     TEXT NOT NULL DEFAULT '',
+			files       TEXT NOT NULL DEFAULT '',
+			file_missing INTEGER NOT NULL DEFAULT 0,
+			llm_summary TEXT NOT NULL DEFAULT '',
+			summary_at  INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE IF NOT EXISTS indexed_files (
+			path        TEXT PRIMARY KEY,
+			session_id  TEXT NOT NULL,
+			size        INTEGER NOT NULL,
+			mtime       INTEGER NOT NULL,
+			first_rowid INTEGER NOT NULL DEFAULT 0,
+			last_rowid  INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_indexed_files_session ON indexed_files(session_id);
+		CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+			content, session_id UNINDEXED, role UNINDEXED, ts UNINDEXED
+		)`,
 	}
 	for i := v; i < len(migrations); i++ {
-		if _, err := s.db.Exec(migrations[i]); err != nil {
-			return fmt.Errorf("migration %d: %w", i+1, err)
-		}
-		if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+		if err := s.applyMigration(i+1, migrations[i]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// applyMigration runs one migration's DDL and its user_version bump inside a
+// single transaction (runner fix, spec §3): a crash or error between the two
+// under the old two-Exec-calls approach could leave objects created but the
+// version un-bumped, bricking the next Open(). Verified: virtual-table
+// creation and PRAGMA user_version both work fine inside a modernc sqlite tx.
+func (s *Store) applyMigration(version int, ddl string) (err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+	if _, err = tx.Exec(ddl); err != nil {
+		return fmt.Errorf("migration %d: %w", version, err)
+	}
+	if _, err = tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
+		return fmt.Errorf("migration %d: pragma user_version: %w", version, err)
+	}
+	return tx.Commit()
 }
 
 type SessionRow struct {
