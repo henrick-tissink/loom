@@ -3498,21 +3498,29 @@ func TestWallColumnWidthsExtraToRightColumn(t *testing.T) {
 }
 
 // TestWallTailHClampTinyTerminal guards spec §3.2 M2: tailH = clamp(6,1,
-// bodyH-2) never goes below 1 or panics at a tiny terminal height, and
-// perPage never collapses to 0.
+// netBodyH-2) never goes below 1 or panics at a tiny terminal height. Unlike
+// the shipped version of this test, perPage is NOT expected to stay >= 2
+// here: at this height no row's cellH fits in netBodyH, so perPage
+// correctly collapses to 0 and renderWall falls back to its degenerate
+// single-line body — the fix for the frame overflowing a.height (a forced
+// perPage>=2 at this height used to render one line taller than a.height).
 func TestWallTailHClampTinyTerminal(t *testing.T) {
 	a := wallFixtureApp()
-	a.height = 4 // bodyH=2, bodyH-2=0 -> tailH clamps to its floor, 1
+	a.height = 4 // bodyH=2, netBodyH=1 -> tailH clamps to its floor, 1; no row fits.
 	perPage, tailH := a.wallPageSize()
 	if tailH != 1 {
 		t.Fatalf("tailH = %d, want 1 (clamped) at a tiny terminal", tailH)
 	}
-	if perPage < 2 {
-		t.Fatalf("perPage = %d, want >= 2 even at a tiny terminal", perPage)
+	if perPage != 0 {
+		t.Fatalf("perPage = %d, want 0 (no row fits) at this tiny terminal height", perPage)
 	}
 	a.view = viewWall
 	out := a.View() // must not panic
-	for i, line := range strings.Split(out, "\n") {
+	lines := strings.Split(out, "\n")
+	if len(lines) > a.height {
+		t.Fatalf("tiny-terminal wall rendered %d lines, want <= a.height (%d):\n%s", len(lines), a.height, out)
+	}
+	for i, line := range lines {
 		if lw := lipgloss.Width(line); lw != a.width {
 			t.Fatalf("tiny-terminal wall line %d = %d cells, want %d: %q", i, lw, a.width, line)
 		}
@@ -3526,7 +3534,7 @@ func TestWallTailHClampTinyTerminal(t *testing.T) {
 // labels.
 func TestWallPaginationIndicatorFollowsSelection(t *testing.T) {
 	a := wallFixtureApp()
-	a.height = 5 // bodyH=3 -> tailH clamps to 1, cellH=3, rowsThatFit=1, perPage=2
+	a.height = 6 // netBodyH=3 -> tailH clamps to 1, cellH=3, rowsThatFit=1, perPage=2
 	perPage, _ := a.wallPageSize()
 	if perPage != 2 {
 		t.Fatalf("perPage = %d, want 2 for this fixture height", perPage)
@@ -3549,7 +3557,7 @@ func TestWallPaginationIndicatorFollowsSelection(t *testing.T) {
 // crosses onto page 2, updating both the indicator and the selection.
 func TestWallCursorMovesAcrossPageBoundary(t *testing.T) {
 	a := wallFixtureApp()
-	a.height = 5 // perPage=2, same fixture as above
+	a.height = 6 // perPage=2, same fixture as above
 	a.wallSelected = "loom-b"
 	a.view = viewWall
 	a.Update(key("j"))
@@ -3777,7 +3785,12 @@ func TestWallKeybarWEntryElisionTier(t *testing.T) {
 
 // TestWallViewFrameInvariantEmptyAndPopulated guards the exact-width
 // invariant (TestViewFrameInvariantAllViews/TestViewNarrowNoPanic precedent)
-// for both the empty-wall and populated-wall states, across widths.
+// for both the empty-wall and populated-wall states, across widths — AND,
+// for the populated case, sweeps a.height from 3 to 30 asserting the frame
+// never renders MORE lines than a.height. A prior bug forced a full row to
+// render even when it couldn't fit (rows floored to 1) and failed to count
+// the leading blank body line against the height budget, so the wall
+// overflowed a.height at every height in this sweep from 3 through 11.
 func TestWallViewFrameInvariantEmptyAndPopulated(t *testing.T) {
 	for _, w := range []int{40, 80, 100} {
 		a := NewApp(Deps{})
@@ -3790,11 +3803,19 @@ func TestWallViewFrameInvariantEmptyAndPopulated(t *testing.T) {
 		}
 
 		b := wallFixtureApp()
-		b.width, b.height = w, 24
+		b.width = w
 		b.view = viewWall
-		for i, line := range strings.Split(b.View(), "\n") {
-			if lw := lipgloss.Width(line); lw != w {
-				t.Fatalf("populated wall, width %d line %d = %d cells (want %d): %q", w, i, lw, w, line)
+		for h := 3; h <= 30; h++ {
+			b.height = h
+			out := b.View()
+			lines := strings.Split(out, "\n")
+			if len(lines) > h {
+				t.Fatalf("populated wall, width %d height %d rendered %d lines, want <= %d:\n%s", w, h, len(lines), h, out)
+			}
+			for i, line := range lines {
+				if lw := lipgloss.Width(line); lw != w {
+					t.Fatalf("populated wall, width %d height %d line %d = %d cells (want %d): %q", w, h, i, lw, w, line)
+				}
 			}
 		}
 	}

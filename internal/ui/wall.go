@@ -170,21 +170,27 @@ func clampInt(v, lo, hi int) int {
 }
 
 // wallPageSize computes tailH and perPage (rows-that-fit × 2, spec §3.2) from
-// the wall's available body height. tailH = clamp(6, 1, bodyH−2) (spec's
-// tiny-terminal degrade — the M2 finding): a very short terminal still gets
-// at least 1 tail line and at least one row-that-fits, never a divide-by-zero
-// or an empty page.
+// the wall's available body height, NET of the one fixed leading blank body
+// line renderWall always emits (a prior bug counted bodyH as if that line
+// were free, which alone was enough to overflow a.height by one line).
+// tailH = clamp(6, 1, netBodyH−2) (spec's tiny-terminal degrade — the M2
+// finding): a very short terminal still gets at least 1 tail line WHEN a row
+// fits at all. rows is deliberately NOT floored to 1 anymore — a prior bug
+// forced one row to render even when its cellH didn't fit in netBodyH,
+// which overflowed a.height. When no row fits, perPage is 0 and renderWall
+// falls back to a single-line degenerate body instead of overflowing.
 func (a *App) wallPageSize() (perPage, tailH int) {
 	bodyH := a.height - 2
-	if bodyH < 1 {
-		bodyH = 1
+	if bodyH < 0 {
+		bodyH = 0
 	}
-	tailH = clampInt(6, 1, bodyH-2)
+	netBodyH := bodyH - 1 // the leading blank body line always costs 1.
+	if netBodyH < 0 {
+		netBodyH = 0
+	}
+	tailH = clampInt(6, 1, netBodyH-2)
 	cellH := tailH + 2 // 1 header + tailH + 1 separator
-	rows := bodyH / cellH
-	if rows < 1 {
-		rows = 1
-	}
+	rows := netBodyH / cellH
 	return rows * 2, tailH
 }
 
@@ -354,6 +360,10 @@ func (a *App) updateWallKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // annotation. Every composed line is built to EXACTLY `inner` cells before
 // being handed to frame() (frame() itself pads/clips defensively, but these
 // lines are exact by construction, per the grid-composition discipline).
+// Total rendered lines (frame top + body + frame bottom) never exceed
+// a.height: when wallPageSize finds no row fits (perPage==0), the body
+// degrades to a single centered line rather than forcing a row that would
+// overflow.
 func (a *App) renderWall(w int) string {
 	inner := w - 4
 	total := len(a.wallOrder)
@@ -361,31 +371,40 @@ func (a *App) renderWall(w int) string {
 	start, end := a.wallPageBounds(perPage)
 	colL, colR := wallColumnWidths(inner)
 
-	var body []string
-	body = append(body, "")
-	for i := start; i < end; i += 2 {
-		left := a.wallCellRows(i, colL, tailH)
-		var right []string
-		if i+1 < end {
-			right = a.wallCellRows(i+1, colR, tailH)
-		} else {
-			right = blankCell(colR, tailH)
-		}
-		for ln := range left {
-			body = append(body, left[ln]+" "+right[ln])
-		}
-	}
-	if total == 0 {
-		msg := "no live sessions"
+	centered := func(msg string) string {
 		pad := (inner - len([]rune(msg))) / 2
 		if pad < 0 {
 			pad = 0
 		}
-		body = append(body, "", strings.Repeat(" ", pad)+styHelp.Render(msg), "")
+		return strings.Repeat(" ", pad) + styHelp.Render(msg)
+	}
+
+	var body []string
+	switch {
+	case total == 0:
+		body = append(body, "", centered("no live sessions"), "")
+	case start >= end:
+		// No row fits within a.height (netBodyH < one cell's height) — a
+		// degenerate, single-line body rather than overflowing.
+		body = append(body, centered("terminal too small to show sessions"))
+	default:
+		body = append(body, "")
+		for i := start; i < end; i += 2 {
+			left := a.wallCellRows(i, colL, tailH)
+			var right []string
+			if i+1 < end {
+				right = a.wallCellRows(i+1, colR, tailH)
+			} else {
+				right = blankCell(colR, tailH)
+			}
+			for ln := range left {
+				body = append(body, left[ln]+" "+right[ln])
+			}
+		}
 	}
 
 	right := ""
-	if total > 0 {
+	if total > 0 && end > start {
 		right = fmt.Sprintf("%d–%d of %d", start+1, end, total)
 	}
 	return frame(w, "wall", right, body, "↓/↑ select · ↵ attach · esc dashboard · q quit")

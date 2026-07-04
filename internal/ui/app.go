@@ -264,6 +264,13 @@ type App struct {
 	// longer in wallOrder on every applyWallOrder pass. A name absent from
 	// this map simply renders as a blank (not-yet-captured) cell, never an
 	// error.
+	//
+	// Deliberately NOT cleared on close (esc just flips a.view back to
+	// viewDash) — it persists across reopen, so a cell can render
+	// immediately from cache rather than blank. The tradeoff: openWall's
+	// immediate recapture cmd is async, so the window between reopening and
+	// that result landing shows STALE content (the last capture from before
+	// the wall was closed), not a blank cell.
 	wallCaptures map[string]wallCapture
 
 	// wallSeq is the wall capture command's generation counter (spec §3.3
