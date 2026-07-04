@@ -808,6 +808,9 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s == "n" || msg.Type == tea.KeyEsc {
 			a.view = viewDash
 		}
+		if s == "ctrl+c" {
+			return a, tea.Quit
+		}
 		return a, nil
 
 	case viewTag:
@@ -2146,8 +2149,9 @@ func (a *App) View() string {
 
 	counts := fmt.Sprintf("%d live · %d needs you", live, needs)
 	keybar := "↵ attach · space peek · n new · x kill · t tag · r reopen · q quit"
-	if inner > lipgloss.Width(keybar)+24 {
-		keybar += " · / search · w workflows · N fan-out · W wall"
+	suffix := " · / search · w workflows · N fan-out · W wall"
+	if inner > lipgloss.Width(keybar)+lipgloss.Width(suffix)+2 {
+		keybar += suffix
 	}
 	return frame(w, "LOOM", counts, body, keybar)
 }
