@@ -84,6 +84,45 @@ launch, monitor, and return to real `claude` sessions across a whole workspace.
   visible `…[truncated]` marker); a dead `continue` target offers `f` to fork
   from the transcript instead; run rows are never garbage-collected.
 
+## Phase 2.5 — Recall
+
+- The launcher (`n`) gains a **RELATED** panel below the form: pick a project
+  and it immediately shows that project's most recent sessions; type a seed
+  prompt and it live re-ranks into an actual full-text recall query —
+  same-project hits first, then cross-project hits, both blended above
+  unrelated noise (a 2+ matched-term relevance gate keeps stray keyword
+  overlap from surfacing as a false match). This is a *manual* pull, never an
+  automatic injection.
+- `↓` from the seed field moves focus into the panel (`↑` moves back out);
+  `↵` on a hovered entry opens its detail view to read the full session
+  before deciding; `space` toggles it **included** — included entries pin to
+  the top of the panel (up to 3 at once) and stay included through further
+  typing or re-ranking. `esc` from anywhere in the launcher returns to the
+  dashboard; opening a detail from the launcher and pressing `esc` restores
+  the launcher exactly as it was (`r` resume is hidden in that detail — 
+  launching another session mid-launcher-flow is a footgun).
+- **At launch**, each included entry is appended to your seed as visible,
+  literal context — nothing is silently injected:
+
+  ```
+  <your seed> ── Related prior work [project·title]: outcome
+  ```
+
+  A seed starting with `/` never gets blocks appended (the panel shows a
+  warning instead) — a slash command's argument line isn't the place to glue
+  outcome text onto.
+- **The marker**: pulled-in context is recognizable by its
+  ` ── Related prior work [` prefix. Loom's own indexer strips everything
+  from that marker onward before computing a session's indexed text or ask,
+  so context pulled into a new session is never re-indexed as that session's
+  *own* words — recall can't echo or compound across generations.
+- **Limits**: lexical (full-text) relevance only, no embeddings yet (same
+  interface, upgradeable later); the panel can go briefly stale during an
+  active background index sweep and self-heals on your next keystroke or
+  project change rather than live-updating; max 3 includes per launch; in a
+  small archive, same-project recency dominates simply because there isn't
+  yet enough cross-project history for the query to rank against.
+
 ## Requirements
 
 - macOS, `tmux` ≥ 3.x, `claude` CLI, Go ≥ 1.22 (build only)
