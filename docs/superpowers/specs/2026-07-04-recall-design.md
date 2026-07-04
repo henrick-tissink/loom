@@ -13,7 +13,7 @@ The launcher (`n`) gains a **RELATED** panel: pick a project → recent sessions
 `internal/memory/recall.go` builds its OWN FTS query (NOT `sanitizeFTSQuery`, whose implicit-AND + trailing-`*` returns ZERO sessions for natural-sentence seeds — verified on the real index):
 - tokenize seed → drop tokens <4 chars and a small stopword list (the/this/that/with/for/from/into/have/will/what/when/where…);
 - quote-escape each surviving term, join with `OR`, NO trailing `*`;
-- rank = distinct-content-terms-matched DESC, then bm25, then recency; **require ≥2 matched content terms** for an FTS hit to show at all (kills the confident-noise failure: OR + stopwords surfacing unrelated sessions);
+- rank = same-project DESC, then distinct-content-terms-matched DESC, then bm25, then recency; **require ≥2 matched content terms** for an FTS hit to show at all (kills the confident-noise failure: OR + stopwords surfacing unrelated sessions);
 - fetch ~15 (display 5) so the same-project boost can promote hits ranked lower by raw bm25;
 - <2 surviving tokens or zero qualifying hits → recency fallback (same-project `RecentTranscriptsByProjectDir`).
 Blend: same-project above cross-project at equal match tier; cross-project hits shown (often the gold) with a project label per §6-M3.

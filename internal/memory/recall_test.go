@@ -154,6 +154,68 @@ func TestRelatedRecencyFallbackOnEmptyExpr(t *testing.T) {
 	}
 }
 
+// TestRelatedAskBlobCoincidenceDoesNotQualify is the real-DB Critical
+// finding, reproduced as a fixture: a session's `ask` is a multi-KB pasted
+// blob in which generic engineering vocabulary ("implement", "settings",
+// "page") appears scattered far apart, purely by coincidence, while the
+// session's actual indexed content (and hence its FTS snippet) only ever
+// co-locates a single seed term ("mode"). Before the fix, countMatchedTerms
+// scanned snippet+title+ask and the scattered ask terms alone cleared the
+// ≥2-term gate, surfacing a confidently-irrelevant session. The fix counts
+// snippet+title only, so this session must be filtered as noise — while a
+// genuinely topical session (seed terms co-occurring in one FTS window)
+// must still be found.
+func TestRelatedAskBlobCoincidenceDoesNotQualify(t *testing.T) {
+	s := openStore(t)
+
+	// Genuine hit: several seed terms co-occur within one indexed doc, so
+	// the FTS snippet window captures them together.
+	seedRecallSession(t, s, "real", "loom", "added a dark mode toggle to the settings page today", 200)
+
+	// Noise: the indexed doc (and thus the FTS snippet) only ever mentions
+	// "mode" in isolation, but `ask` is a ~3KB generic engineering blob that
+	// happens to contain "implement", "settings", and "page" scattered far
+	// apart from each other and from any real topical connection to the
+	// seed — the exact real-DB failure mode this fix closes.
+	var blob strings.Builder
+	blob.WriteString("We need to implement a new caching layer for the backend service. ")
+	for i := 0; i < 150; i++ {
+		blob.WriteString("Filler engineering discussion about deployment pipelines and code review notes. ")
+	}
+	blob.WriteString("Please check the settings for the retry policy timeout value. ")
+	for i := 0; i < 150; i++ {
+		blob.WriteString("More unrelated filler text about logging and metrics collection. ")
+	}
+	blob.WriteString("Finally render the results on the page for the end user.")
+	if blob.Len() < 3000 {
+		t.Fatalf("fixture blob too small to be realistic: %d bytes", blob.Len())
+	}
+
+	if err := s.UpsertTranscript(store.Transcript{
+		SessionID: "noise", ProjectDir: "loom", Cwd: "/w/loom",
+		Title: "session noise", Ask: blob.String(), LastTS: 300,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceFileDocs(store.IndexedFile{Path: "/f-noise", SessionID: "noise", Size: 1, Mtime: 1},
+		[]store.Doc{{Content: "the deployment mode was switched last week", Role: "user", TS: 300}}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Related(s, "loom", "implement dark mode toggle for the settings page", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range got {
+		if h.T.SessionID == "noise" {
+			t.Fatalf("ask-blob coincidence session must not qualify: %+v", got)
+		}
+	}
+	if len(got) != 1 || got[0].T.SessionID != "real" {
+		t.Fatalf("got %+v, want only 'real' (genuine snippet co-occurrence)", got)
+	}
+}
+
 func TestRelatedRecencyFallbackOnZeroQualifyingHits(t *testing.T) {
 	s := openStore(t)
 	// Only 1 of the 2 query terms present in any session -> qualifying==0.

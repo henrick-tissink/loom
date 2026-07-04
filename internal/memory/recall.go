@@ -84,10 +84,22 @@ func buildRecallQuery(seed string) (expr string, terms []string) {
 
 // countMatchedTerms is recall's client-side approximation (documented, not
 // exact — bm25/rank don't expose a per-term match count at the SQL level)
-// of how many distinct query terms are recognizably present in what the
-// user would actually see for a hit: the snippet, the session title, and
-// the session's ask, joined and searched case-insensitively via substring
-// containment. terms are already lowercase (from buildRecallQuery).
+// of how many distinct query terms co-occur in what actually earned the FTS
+// hit: the snippet and the session title, joined and searched
+// case-insensitively via substring containment. terms are already lowercase
+// (from buildRecallQuery).
+//
+// Deliberately EXCLUDES the session's ask (verified on the real DB, Critical
+// finding): ask fields are often multi-KB pasted blobs, and generic
+// engineering vocabulary ("implement", "settings", "mode", "page") is common
+// enough to scatter across such a blob by sheer coincidence — clearing the
+// ≥2-term gate for sessions with no genuine relation to the seed (e.g. the
+// probe "implement dark mode toggle for the settings page" matched 5
+// confidently-irrelevant sessions this way). The FTS snippet, by contrast,
+// is a ~12-token window centered on an actual match, so ≥2 distinct terms
+// found there reflects real co-occurrence near the matched content, not
+// coincidental scatter across a large blob. Title is small and curated
+// enough to carry the same guarantee.
 func countMatchedTerms(terms []string, fields ...string) int {
 	haystack := strings.ToLower(strings.Join(fields, "\x00"))
 	n := 0
@@ -136,7 +148,7 @@ func Related(st *store.Store, projectDir, seed string, limit int) ([]RelatedHit,
 	}
 	var qualifying []ranked
 	for i, h := range hits {
-		matched := countMatchedTerms(terms, h.Snippet, h.Title, h.Ask)
+		matched := countMatchedTerms(terms, h.Snippet, h.Title)
 		if matched < 2 {
 			continue
 		}
