@@ -17,6 +17,7 @@ import (
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/transcript"
 	"github.com/henricktissink/loom/internal/workflow"
 )
 
@@ -129,6 +130,43 @@ type App struct {
 	// SessionID/detailTranscript, never on any live selection.
 	detailTarget     store.SearchHit
 	detailTranscript store.Transcript
+
+	// detailReturn is the view esc returns to from viewDetail (spec §5):
+	// viewSearch (existing search-origin flow) or viewLauncher (new,
+	// Task 2). Launcher-origin details hide the 'r' resume action (spec
+	// §5: spawning sessions mid-launcher-flow is a footgun) — see
+	// updateDetailKeys/renderDetail.
+	detailReturn view
+
+	// --- Task 2: launcher RELATED panel (spec §3-§6) ---------------------
+
+	// panelHits is the launcher's current recall query result (display-
+	// limited — spec §6). panelFocused/panelCursor are the panel half of
+	// the launcher's focus model (spec §3): panelCursor indexes the
+	// COMBINED display list panelRows() builds (pinned includes first,
+	// then non-included panelHits — spec §4).
+	panelHits    []memory.RelatedHit
+	panelFocused bool
+	panelCursor  int
+
+	// includes/includeOrder: the SessionID-keyed pull-in set (spec §4) —
+	// map, never positional, so a re-rank never silently drops a toggled-in
+	// entry; includeOrder is insertion (toggle) order, both for rendering
+	// pinned rows in a stable order and for the marker-append order at
+	// launch (buildSeedWithRecall consumes includeSnapshot()).
+	includes     map[string]store.Transcript
+	includeOrder []string
+
+	// panelWarn is the live slash-seed-with-includes warning (spec §4),
+	// recomputed on every seed keystroke and include toggle.
+	panelWarn string
+
+	// panelSeq is the panel query's debounce generation counter (spec §6,
+	// same discipline as searchSeq): bumped on every seed keystroke and
+	// project-field change; a panelDebounceMsg/panelResultsMsg carrying a
+	// stale generation (or a (seed,projectDir) pair that no longer matches
+	// the live launcher state — spec §6 I6) is discarded.
+	panelSeq int64
 
 	// detailHint: a transient dim message shown in the body (currently only
 	// the resume-collision hint — spec §6 P0). Cleared whenever a fresh
@@ -277,6 +315,22 @@ type (
 		sessionID string
 		text      string
 		err       error
+	}
+
+	// panelDebounceMsg fires searchDebounce after a launcher seed keystroke
+	// (spec §6, same debounce pattern as searchDebounceMsg); seq pins it to
+	// the keystroke generation that scheduled it.
+	panelDebounceMsg struct{ seq int64 }
+
+	// panelResultsMsg is a launcher RELATED-panel recall query's result
+	// (spec §6). Applied only when BOTH seed and projectDir still match the
+	// launcher's LIVE state (spec §6 I6: the staleness key is
+	// (seed,projectDir), not seed alone — a fast project switch must not
+	// apply the old project's panel to the new one).
+	panelResultsMsg struct {
+		seed       string
+		projectDir string
+		hits       []memory.RelatedHit
 	}
 
 	// resumeBlockedMsg reports the resume-collision guard (spec §6 P0) found
@@ -471,6 +525,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.searchCursor = max(0, len(a.searchHits)-1)
 		}
 		return a, nil
+	case panelDebounceMsg:
+		// stale (a newer keystroke has since bumped panelSeq) → discarded.
+		if m.seq != a.panelSeq {
+			return a, nil
+		}
+		return a, a.panelQueryCmd(a.form.seed.Value(), a.currentProjectDir())
+	case panelResultsMsg:
+		// stale: staleness key is (seed,projectDir) — spec §6 I6 — not seed
+		// alone, so a fast project switch discards the OLD project's result
+		// even if the seed text happens to still match.
+		if m.seed != a.form.seed.Value() || m.projectDir != a.currentProjectDir() {
+			return a, nil
+		}
+		a.panelHits = m.hits
+		a.clampPanelCursor()
+		return a, nil
 	case summaryMsg:
 		// stale: the user has since opened a different session's detail.
 		if m.sessionID != a.detailTarget.SessionID {
@@ -570,26 +640,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch a.view {
 	case viewLauncher:
-		switch msg.Type {
-		case tea.KeyEsc:
-			a.view = viewDash
-			return a, nil
-		case tea.KeyEnter:
-			r, ok := a.form.Recipe()
-			a.view = viewDash
-			if !ok || a.deps.Launcher == nil {
-				return a, nil
-			}
-			l := a.deps.Launcher
-			w, h := a.width, a.height
-			return a, func() tea.Msg {
-				if _, err := l.Launch(r, w, h, time.Now()); err != nil {
-					return errMsg{err}
-				}
-				return pollNowMsg{}
-			}
-		}
-		return a, a.form.update(msg)
+		return a.updateLauncherKeys(msg)
 
 	case viewConfirmKill:
 		s := msg.String()
@@ -679,9 +730,7 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.cursor--
 		}
 	case "n":
-		a.form = newLauncherForm(a.deps.Projects)
-		a.form.setFocus(0)
-		a.view = viewLauncher
+		return a, a.openLauncher()
 	case "w":
 		return a, a.openWorkflows()
 	case "x":
@@ -757,7 +806,7 @@ func (a *App) updateSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case tea.KeyEnter:
 		if a.searchCursor >= 0 && a.searchCursor < len(a.searchHits) {
-			a.openDetail(a.searchHits[a.searchCursor])
+			a.openDetail(a.searchHits[a.searchCursor], viewSearch)
 		}
 		return a, nil
 	case tea.KeyDown:
@@ -790,6 +839,236 @@ func (a *App) updateSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmd, debounceCmd(a.searchSeq))
 }
 
+// --- Task 2: launcher RELATED panel (spec §3-§6) ------------------------
+
+// openLauncher resets the launcher to a fresh state (spec §3/§4: form at
+// field 0, panel unfocused, no includes/warning) and kicks off an immediate
+// (non-debounced — this is a view-open, not a keystroke burst) panel query
+// for the default-selected project's recent sessions, same "fresh state +
+// immediate refresh cmd" shape as openSearch/openWorkflows.
+func (a *App) openLauncher() tea.Cmd {
+	a.form = newLauncherForm(a.deps.Projects)
+	a.form.setFocus(0)
+	a.view = viewLauncher
+	a.panelFocused = false
+	a.panelCursor = 0
+	a.panelHits = nil
+	a.includes = nil
+	a.includeOrder = nil
+	a.panelWarn = ""
+	a.panelSeq++
+	return a.panelQueryCmd("", a.currentProjectDir())
+}
+
+// currentProjectDir returns the store's project_dir encoding (spec §6:
+// transcript.ProjectDirName) for the launcher form's currently-selected
+// project, or "" when there are no projects (panelQueryCmd treats "" as
+// "nothing to query" — matches Deps' nil-safety contract).
+func (a *App) currentProjectDir() string {
+	if len(a.form.projects) == 0 {
+		return ""
+	}
+	return transcript.ProjectDirName(a.form.projects[a.form.projIdx].Path)
+}
+
+// panelQueryCmd runs internal/memory.Related in a tea.Cmd for the launcher
+// RELATED panel (spec §6). seed/projectDir are captured by value (captured-
+// target discipline) so the result carries the EXACT staleness key it was
+// fired for — Update's panelResultsMsg handler compares both against the
+// LIVE launcher state, not against anything stashed here. nil Store or no
+// project selected → nil cmd (Deps nil-safety contract, same as
+// searchQueryCmd).
+func (a *App) panelQueryCmd(seed, projectDir string) tea.Cmd {
+	st := a.deps.Store
+	if st == nil || projectDir == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		hits, err := memory.Related(st, projectDir, seed, panelDisplayLimit)
+		if err != nil {
+			hits = nil
+		}
+		return panelResultsMsg{seed: seed, projectDir: projectDir, hits: hits}
+	}
+}
+
+// launcherDebounceCmd schedules a panelDebounceMsg carrying seq,
+// searchDebounce after the seed keystroke that scheduled it (spec §6, same
+// debounce delay/pattern as debounceCmd above).
+func launcherDebounceCmd(seq int64) tea.Cmd {
+	return tea.Tick(searchDebounce, func(time.Time) tea.Msg { return panelDebounceMsg{seq: seq} })
+}
+
+// launcherDown/launcherUp implement the ↓/↑ half of the launcher focus
+// model (spec §3, VERBATIM): within the form, ↓/↑ behave like tab/shift-tab
+// but WITHOUT wrapping — ↓ from seed(3) instead enters panel[0] (a no-op
+// when the panel is empty: nothing to focus), and ↑ from project(0) is a
+// no-op (does not wrap to seed). Within the panel, ↓/↑ move the cursor; ↓ at
+// the bottom is a no-op (no wrap); ↑ at panel[0] returns focus to seed(3).
+func (a *App) launcherDown() {
+	if a.panelFocused {
+		if n := a.panelLen(); a.panelCursor < n-1 {
+			a.panelCursor++
+		}
+		return
+	}
+	if a.form.focus < 3 {
+		a.form.setFocus(a.form.focus + 1)
+		return
+	}
+	if a.panelLen() == 0 {
+		return
+	}
+	a.panelFocused = true
+	a.panelCursor = 0
+	a.form.seed.Blur()
+}
+
+func (a *App) launcherUp() {
+	if a.panelFocused {
+		if a.panelCursor > 0 {
+			a.panelCursor--
+			return
+		}
+		a.panelFocused = false
+		a.form.setFocus(3)
+		return
+	}
+	if a.form.focus == 0 {
+		return
+	}
+	a.form.setFocus(a.form.focus - 1)
+}
+
+// changeProjectField handles ←/→ while the project field (form.focus==0) is
+// focused: delegates the actual index cycling to form.update, then — spec
+// §4 "project-field change CLEARS includes" (different context, disclosed
+// decision) — clears includes and refires the panel query immediately
+// (not debounced: this is a discrete field change, not a keystroke burst)
+// whenever the selected project actually changed.
+func (a *App) changeProjectField(msg tea.KeyMsg) tea.Cmd {
+	old := a.currentProjectDir()
+	a.form.update(msg)
+	pd := a.currentProjectDir()
+	if pd == old {
+		return nil
+	}
+	a.includes = nil
+	a.includeOrder = nil
+	a.panelCursor = 0
+	a.panelFocused = false
+	a.panelSeq++
+	a.recomputeWarn()
+	return a.panelQueryCmd(a.form.seed.Value(), pd)
+}
+
+// updateLauncherKeys is the launcher's focus-zone dispatch (spec §3,
+// VERBATIM, every transition): tab/shift-tab always cycle the 4 FORM
+// fields only, wrapping, and never enter the panel; ↓/↑ are the dual
+// form<->panel navigation (launcherDown/launcherUp); enter launches when
+// form-focused or opens detail on the hovered row when panel-focused; space
+// toggles an include when panel-focused, or is typed into the seed
+// textinput when seed-focused (space-in-seed-types-a-space); esc always
+// returns to the dashboard, from anywhere in the launcher.
+func (a *App) updateLauncherKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return a, tea.Quit
+	}
+	switch msg.Type {
+	case tea.KeyEsc:
+		a.view = viewDash
+		return a, nil
+	case tea.KeyEnter:
+		if a.panelFocused {
+			if row, ok := a.panelSelected(); ok {
+				a.openDetailFromLauncher(row)
+			}
+			return a, nil
+		}
+		return a.launch()
+	case tea.KeyTab, tea.KeyShiftTab:
+		d := 1
+		if msg.Type == tea.KeyShiftTab {
+			d = -1
+		}
+		a.panelFocused = false
+		a.form.setFocus(cycle(a.form.focus, d, 4))
+		return a, nil
+	case tea.KeyDown:
+		a.launcherDown()
+		return a, nil
+	case tea.KeyUp:
+		a.launcherUp()
+		return a, nil
+	}
+	if msg.String() == " " && a.panelFocused {
+		a.togglePanelInclude()
+		return a, nil
+	}
+	if a.panelFocused {
+		// panel-focused: no other key reaches the form (spec §3 — a stray
+		// keystroke here must not leak into the seed textinput).
+		return a, nil
+	}
+	if a.form.focus == 0 && (msg.Type == tea.KeyLeft || msg.Type == tea.KeyRight) {
+		return a, a.changeProjectField(msg)
+	}
+
+	oldSeed := a.form.seed.Value()
+	cmd := a.form.update(msg)
+	if a.form.focus == 3 && a.form.seed.Value() != oldSeed {
+		a.panelSeq++
+		a.recomputeWarn()
+		return a, tea.Batch(cmd, launcherDebounceCmd(a.panelSeq))
+	}
+	return a, cmd
+}
+
+// launch fires the actual session launch (spec §3 enter-on-form-focused):
+// same recipe-and-Launcher-call shape as before this task, except the seed
+// is now buildSeedWithRecall'd against the current includes first (spec
+// §4) — a plain seed with zero includes passes through unchanged.
+func (a *App) launch() (tea.Model, tea.Cmd) {
+	r, ok := a.form.Recipe()
+	a.view = viewDash
+	if !ok || a.deps.Launcher == nil {
+		return a, nil
+	}
+	seed, _ := buildSeedWithRecall(r.Seed, a.includeSnapshot(), a.deps.Projects)
+	r.Seed = seed
+	l := a.deps.Launcher
+	w, h := a.width, a.height
+	return a, func() tea.Msg {
+		if _, err := l.Launch(r, w, h, time.Now()); err != nil {
+			return errMsg{err}
+		}
+		return pollNowMsg{}
+	}
+}
+
+// openDetailFromLauncher opens the detail view for a hovered RELATED-panel
+// row (spec §3 enter-on-panel-focused, §5 round-trip): builds a
+// store.SearchHit-shaped view from the row's Transcript — Snippet carries
+// the row's own snippet (empty for a pinned include or a recency-fallback
+// hit, M4 — renderDetail already handles an empty Snippet) — and reuses
+// openDetail's existing captured-target + origin machinery. Launcher state
+// (form fields, panel entries/cursor, includes) lives entirely on App and
+// is untouched by this call — esc later returns to an intact launcher (spec
+// §5).
+func (a *App) openDetailFromLauncher(row panelRow) {
+	t := row.t
+	hit := store.SearchHit{
+		SessionID:  t.SessionID,
+		Snippet:    row.snippet,
+		Title:      t.Title,
+		ProjectDir: t.ProjectDir,
+		Cwd:        t.Cwd,
+		Ask:        t.Ask,
+		LastTS:     t.LastTS,
+	}
+	a.openDetail(hit, viewLauncher)
+}
+
 // openDetail captures hit as detailTarget (spec §6 captured-target
 // discipline) and fetches its full Transcript once, at open time — a plain
 // synchronous Store call (same precedent as viewTag's SetTags in
@@ -797,12 +1076,19 @@ func (a *App) updateSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // nowhere near the cost that would justify async staleness handling. A nil
 // Store (Deps{} in dashboard-only tests) leaves detailTranscript zeroed,
 // which resumeDisabled() correctly reads as "no cwd, disabled".
-func (a *App) openDetail(hit store.SearchHit) {
+//
+// origin (spec §5) is where esc returns to: viewSearch (the existing flow)
+// or viewLauncher (Task 2, RELATED panel's ↵-on-panel-focused). Launcher
+// state (form fields, panel entries/cursor, includes) lives entirely on App
+// and is untouched by opening/closing a detail — round-tripping back to
+// viewLauncher finds it exactly as it was (spec §5).
+func (a *App) openDetail(hit store.SearchHit, origin view) {
 	a.detailTarget = hit
 	a.detailTranscript = store.Transcript{}
 	a.detailHint = ""
 	a.detailConfirmRegen = false
 	a.detailSummarizing = false
+	a.detailReturn = origin
 	if st := a.deps.Store; st != nil {
 		if t, ok, err := st.GetTranscript(hit.SessionID); err == nil && ok {
 			a.detailTranscript = t
@@ -812,18 +1098,20 @@ func (a *App) openDetail(hit store.SearchHit) {
 }
 
 // updateDetailKeys handles keys while viewDetail is open (spec §6): r
-// resume (collision-guarded), s summarize (press-twice-to-regenerate), esc
-// back to search (results/input untouched — viewSearch's own state isn't
-// touched by any of this), q/ctrl+c quit.
+// resume (collision-guarded, HIDDEN entirely for a launcher-origin detail —
+// spec §5: spawning sessions mid-launcher-flow is a footgun), s summarize
+// (press-twice-to-regenerate), esc back to the origin view (search or
+// launcher — that view's own state isn't touched by any of this), q/ctrl+c
+// quit.
 func (a *App) updateDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return a, tea.Quit
 	case "esc":
-		a.view = viewSearch
+		a.view = a.detailReturn
 		return a, nil
 	case "r":
-		if a.resumeDisabled() {
+		if a.detailReturn == viewLauncher || a.resumeDisabled() {
 			return a, nil
 		}
 		return a, a.resumeCmd()
@@ -1392,8 +1680,7 @@ func (a *App) View() string {
 	}
 	switch a.view {
 	case viewLauncher:
-		return frame(w, "new session", "", strings.Split(a.form.view(), "\n"),
-			"tab/↑↓ field · ←/→ value · ↵ launch · esc cancel")
+		return a.viewLauncher(w)
 	case viewConfirmKill:
 		r := a.actionTarget
 		return frame(w, "kill session", "",
@@ -1649,6 +1936,78 @@ func sectionFor(r uiRow) string {
 	}
 }
 
+// viewLauncher renders the launcher frame (spec §3/§4/§6): the 4-field form
+// (dimmed of its own cursor marker when focus has moved into the panel —
+// see launcherForm.view), a RELATED section of panel rows (pinned includes
+// first, spec §4), the live slash-seed warning and include count, and a
+// keybar that's contextual per focus zone (spec §3).
+func (a *App) viewLauncher(w int) string {
+	inner := w - 4
+	body := strings.Split(a.form.view(!a.panelFocused), "\n")
+	body = append(body, "", sectionRule("RELATED", inner, false))
+
+	rows := a.panelRows()
+	if len(rows) == 0 {
+		body = append(body, styHelp.Render(truncPlain("no related sessions", inner)))
+	} else {
+		for i, row := range rows {
+			body = append(body, a.renderPanelRow(i, row, inner)...)
+		}
+	}
+
+	if a.panelWarn != "" {
+		body = append(body, "", styHelp.Render(truncPlain("⚠ "+a.panelWarn, inner)))
+	} else if len(a.includes) > 0 {
+		body = append(body, "", styHelp.Render(fmt.Sprintf("%d/%d included", len(a.includes), includeCap)))
+	}
+
+	keybar := "tab/↑↓ field · ←/→ value · ↵ launch · esc cancel"
+	if a.panelFocused {
+		keybar = "↵ detail · space include · ↑ back to form · esc cancel"
+	}
+	return frame(w, "new session", "", body, keybar)
+}
+
+// renderPanelRow renders one RELATED-panel row (spec §4/§6/M3/M4): a header
+// line (include checkbox, M3 project label, title-or-ask, age — cursor-
+// highlighted when hovered while panel-focused) and a dim preview line: the
+// FTS snippet when this row came from an actual query match (renderSnippet,
+// with its accent-highlighted spans), or — M4 — an outcome preview when it
+// didn't (a pinned include or a recency-fallback hit both have no snippet).
+// Per the truncate-plain-before-style invariant, line1's plain text is
+// assembled and truncated BEFORE any styling is applied.
+func (a *App) renderPanelRow(i int, row panelRow, inner int) []string {
+	t := row.t
+	box := "[ ]"
+	if row.included {
+		box = "[x]"
+	}
+	text := t.Title
+	if text == "" {
+		text = t.Ask
+	}
+	line1 := box + " " + relatedLabel(a.deps.Projects, t) + " · " + text
+	if age := humanAge(a.now, t.LastTS); age != "" {
+		line1 += " " + age
+	}
+	line1 = truncPlain(line1, inner)
+	if a.panelFocused && i == a.panelCursor {
+		line1 = styCursor.Render(line1)
+	}
+
+	previewMax := inner - 4 // "    " indent before the preview
+	if previewMax < 0 {
+		previewMax = 0
+	}
+	var line2 string
+	if row.snippet != "" {
+		line2 = "    " + renderSnippet(row.snippet, previewMax)
+	} else {
+		line2 = "    " + styMeta.Render(truncPlain(memory.CleanText(t.Outcome), previewMax))
+	}
+	return []string{line1, line2}
+}
+
 // viewSearch renders the search frame (spec §6): input line, blank, then two
 // lines per hit. Right annotation is the cached count/active pair refreshed
 // on open and every tick (searchStatusCmd) — never a fresh query per frame.
@@ -1792,7 +2151,7 @@ func (a *App) renderDetail(w int) string {
 	}
 
 	keybar := "s summarize · esc back · q quit"
-	if !a.resumeDisabled() {
+	if a.detailReturn != viewLauncher && !a.resumeDisabled() {
 		keybar = "r resume · " + keybar
 	}
 	return frame(w, "detail", "", body, keybar)

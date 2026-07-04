@@ -55,12 +55,18 @@ func (f *launcherForm) Recipe() (session.Recipe, bool) {
 
 func cycle(idx, delta, n int) int { return ((idx+delta)%n + n) % n }
 
+// update handles a form-focused key (spec §3): tab/shift-tab cycle the 4
+// form fields (0..3, wrapping); left/right cycle the focused field's value.
+// down/up are NOT handled here (spec §3 split from tab/shift-tab: down/up
+// also cross into/out of the RELATED panel, which lives on App, not here —
+// see App.launcherDown/launcherUp) — this used to share a branch with tab/
+// shift-tab before the panel existed.
 func (f *launcherForm) update(msg tea.KeyMsg) tea.Cmd {
 	switch msg.Type {
-	case tea.KeyTab, tea.KeyDown:
+	case tea.KeyTab:
 		f.setFocus(cycle(f.focus, 1, 4))
 		return nil
-	case tea.KeyShiftTab, tea.KeyUp:
+	case tea.KeyShiftTab:
 		f.setFocus(cycle(f.focus, -1, 4))
 		return nil
 	case tea.KeyLeft, tea.KeyRight:
@@ -97,10 +103,14 @@ func (f *launcherForm) setFocus(n int) {
 	}
 }
 
-func (f *launcherForm) view() string {
+// view renders the 4-field form. active is false when focus has moved into
+// the RELATED panel (spec §3) — in that case no field shows the cursor
+// marker, since focus has left the form entirely (exactly one thing
+// highlighted at a time, mirroring the panel's own cursor highlight).
+func (f *launcherForm) view(active bool) string {
 	sel := func(i int, label, val string) string {
 		marker := "  "
-		if f.focus == i {
+		if active && f.focus == i {
 			marker = styCursor.Render("▸ ")
 		}
 		return fmt.Sprintf("%s%-9s ‹ %s ›", marker, label, val)
@@ -110,7 +120,7 @@ func (f *launcherForm) view() string {
 		proj = f.projects[f.projIdx].Label
 	}
 	seedMarker := "  "
-	if f.focus == 3 {
+	if active && f.focus == 3 {
 		seedMarker = styCursor.Render("▸ ")
 	}
 	// The title and a help footer are NOT rendered here: View() wraps this

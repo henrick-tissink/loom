@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/transcript"
 	"github.com/henricktissink/loom/internal/workflow"
 )
 
@@ -805,7 +807,7 @@ func TestDetailRendersTranscriptFieldsAndSummaryHint(t *testing.T) {
 	a := NewApp(Deps{Store: st})
 	a.width, a.height = 100, 30
 	a.now = time.Unix(3000, 0)
-	a.openDetail(hit)
+	a.openDetail(hit, viewSearch)
 
 	out := a.View()
 	for _, want := range []string{
@@ -841,7 +843,7 @@ func TestResumeBlockedOnLiveRowNeverCallsResume(t *testing.T) {
 	}
 	a := NewApp(Deps{Store: st, Launcher: &session.Launcher{Store: st}})
 	a.width, a.height = 100, 30
-	a.openDetail(hit)
+	a.openDetail(hit, viewSearch)
 
 	_, cmd := a.Update(key("r"))
 	if cmd == nil {
@@ -889,7 +891,7 @@ func TestResumeTerminalRowUsesThatRowNotSynthesized(t *testing.T) {
 		ReadyTimeout: 200 * time.Millisecond, PollEvery: 50 * time.Millisecond}
 	a := NewApp(Deps{Store: st, Launcher: l})
 	a.width, a.height = 80, 24
-	a.openDetail(hit)
+	a.openDetail(hit, viewSearch)
 
 	_, cmd := a.Update(key("r"))
 	if cmd == nil {
@@ -931,7 +933,7 @@ func TestResumeSynthesizesRowWhenNoneExists(t *testing.T) {
 		ReadyTimeout: 200 * time.Millisecond, PollEvery: 50 * time.Millisecond}
 	a := NewApp(Deps{Store: st, Launcher: l})
 	a.width, a.height = 80, 24
-	a.openDetail(hit)
+	a.openDetail(hit, viewSearch)
 
 	_, cmd := a.Update(key("r"))
 	if cmd == nil {
@@ -972,7 +974,7 @@ func TestResumeDisabledWhenCwdEmptyOrFileMissing(t *testing.T) {
 		st, hit := detailFixtureStore(t, tr)
 		a := NewApp(Deps{Store: st})
 		a.width, a.height = 100, 30
-		a.openDetail(hit)
+		a.openDetail(hit, viewSearch)
 		if strings.Contains(a.View(), "r resume") {
 			t.Fatalf("keybar shows r resume when disabled (cwd=%q missing=%v)", tr.Cwd, tr.FileMissing)
 		}
@@ -993,7 +995,7 @@ func TestSummarizeConfirmThenRegenerate(t *testing.T) {
 	sm := newFakeSummarizer(t, st)
 	a := NewApp(Deps{Store: st, Summarizer: sm})
 	a.width, a.height = 100, 30
-	a.openDetail(hit)
+	a.openDetail(hit, viewSearch)
 
 	_, cmd := a.Update(key("s"))
 	if cmd != nil {
@@ -1039,7 +1041,7 @@ func TestSummarizeFirstPressStartsImmediatelyWhenEmpty(t *testing.T) {
 	sm := newFakeSummarizer(t, st)
 	a := NewApp(Deps{Store: st, Summarizer: sm})
 	a.width, a.height = 100, 30
-	a.openDetail(hit)
+	a.openDetail(hit, viewSearch)
 
 	_, cmd := a.Update(key("s"))
 	if cmd == nil {
@@ -1061,7 +1063,7 @@ func TestSummarizeNoopWhileInFlight(t *testing.T) {
 	sm := newFakeSummarizer(t, st)
 	a := NewApp(Deps{Store: st, Summarizer: sm})
 	a.width, a.height = 100, 30
-	a.openDetail(hit)
+	a.openDetail(hit, viewSearch)
 
 	if _, cmd := a.Update(key("s")); cmd == nil {
 		t.Fatal("s did not start summarizing")
@@ -1085,8 +1087,8 @@ func TestSummaryMsgStaleSessionDiscarded(t *testing.T) {
 
 	a := NewApp(Deps{Store: st})
 	a.width, a.height = 100, 30
-	a.openDetail(hitA) // as if sess-a's summarize were in flight
-	a.openDetail(hitB) // user navigated to a different session's detail
+	a.openDetail(hitA, viewSearch) // as if sess-a's summarize were in flight
+	a.openDetail(hitB, viewSearch) // user navigated to a different session's detail
 
 	a.Update(summaryMsg{sessionID: "sess-a", text: "STALE"})
 	if a.detailTranscript.SessionID != "sess-b" || a.detailTranscript.LLMSummary != "b summary" {
@@ -1149,7 +1151,7 @@ func TestDetailFrameInvariantPopulatedContent(t *testing.T) {
 
 	a := NewApp(Deps{Store: st})
 	a.now = time.Unix(600000, 0)
-	a.openDetail(hit)
+	a.openDetail(hit, viewSearch)
 	a.detailHint = "already live — attach from the dashboard"
 	a.detailConfirmRegen = true
 
@@ -1940,5 +1942,776 @@ func TestWFStartFlowRunAppearsAndStaysInView(t *testing.T) {
 	}
 	if a.wfRuns[0].run.Name != "demo" {
 		t.Fatalf("run name = %q, want demo", a.wfRuns[0].run.Name)
+	}
+}
+
+// --- Task 2: launcher RELATED panel (spec §3-§6) ------------------------
+
+// recallLauncherFixture seeds a store with two projects' worth of sessions:
+// projA has three recency-ordered sessions (s3 newest .. s1 oldest), one of
+// which (s2) is ALSO independently reachable by a real recall query sharing
+// ≥2 content terms ("card","monitoring") with its indexed doc; projB has one
+// session, existing purely so project-field / staleness-key tests have a
+// second project to switch to. Returns the App (ready to open the launcher)
+// plus both registry.Project values.
+func recallLauncherFixture(t *testing.T) (a *App, projA, projB registry.Project) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	dirA := filepath.Join(t.TempDir(), "alpha")
+	dirB := filepath.Join(t.TempDir(), "beta")
+	projA = registry.Project{Label: "alpha", Path: dirA}
+	projB = registry.Project{Label: "beta", Path: dirB}
+	pdA := transcript.ProjectDirName(dirA)
+	pdB := transcript.ProjectDirName(dirB)
+
+	seed := func(id, pd, cwd, title, ask, outcome, doc string, lastTS int64) {
+		t.Helper()
+		if err := st.UpsertTranscript(store.Transcript{
+			SessionID: id, ProjectDir: pd, Cwd: cwd, Title: title, Ask: ask,
+			Outcome: outcome, FirstTS: lastTS, LastTS: lastTS,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if doc != "" {
+			if err := st.ReplaceFileDocs(store.IndexedFile{Path: "/f-" + id, SessionID: id, Size: 1, Mtime: 1},
+				[]store.Doc{{Content: doc, Role: "user", TS: lastTS}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	seed("s1", pdA, dirA, "first session", "early ask", "did the first thing", "", 100)
+	seed("s2", pdA, dirA, "card monitoring fix", "fix the card monitoring alerts",
+		"fixed the card monitoring thresholds", "card monitoring alert thresholds bug", 200)
+	seed("s3", pdA, dirA, "third session", "later ask", "did the third thing", "", 300)
+	seed("s4", pdB, dirB, "beta session", "beta ask", "beta outcome", "", 100)
+
+	l := &session.Launcher{Store: st}
+	a = NewApp(Deps{Store: st, Projects: []registry.Project{projA, projB}, Launcher: l})
+	a.width, a.height = 100, 30
+	return a, projA, projB
+}
+
+// openLauncherAndDrain opens the launcher and, if a panel query cmd was
+// returned, runs it and applies the result inline — the same "invoke the
+// cmd manually" pattern existing tests use for tea.Cmds.
+func openLauncherAndDrain(a *App) {
+	_, cmd := a.Update(key("n"))
+	if cmd != nil {
+		a.Update(cmd())
+	}
+}
+
+// --- §3 focus model: every transition, verbatim --------------------------
+
+func TestLauncherFocusTabCyclesFormOnlyWrapping(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	if a.form.focus != 0 || a.panelFocused {
+		t.Fatalf("initial focus = form:%d panel:%v, want form:0 panel:false", a.form.focus, a.panelFocused)
+	}
+	for i, want := range []int{1, 2, 3, 0} {
+		a.Update(tea.KeyMsg{Type: tea.KeyTab})
+		if a.form.focus != want || a.panelFocused {
+			t.Fatalf("tab %d: focus = form:%d panel:%v, want form:%d panel:false", i, a.form.focus, a.panelFocused, want)
+		}
+	}
+	for i, want := range []int{3, 2, 1, 0} {
+		a.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		if a.form.focus != want || a.panelFocused {
+			t.Fatalf("shift-tab %d: focus = form:%d panel:%v, want form:%d panel:false", i, a.form.focus, a.panelFocused, want)
+		}
+	}
+}
+
+// TestLauncherTabFromPanelReturnsToForm: tab "never enters the panel" (spec
+// §3) — pressed while panel-focused, it clears panelFocused and cycles the
+// form field forward from wherever form.focus sits (seed(3), since that's
+// how the panel is entered).
+func TestLauncherTabFromPanelReturnsToForm(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // seed(3) -> panel[0]
+	if !a.panelFocused {
+		t.Fatal("down from seed did not enter the panel")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if a.panelFocused {
+		t.Fatal("tab did not clear panelFocused")
+	}
+	if a.form.focus != 0 { // cycle(3,1,4) wraps to 0
+		t.Fatalf("form.focus after tab-from-panel = %d, want 0", a.form.focus)
+	}
+}
+
+func TestLauncherDownUpFormOnlyNoWrap(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	// Empty the panel so down-from-seed can't leave the form — isolates
+	// this test to the FORM-only ↓/↑ transitions.
+	a.panelHits = nil
+	a.includes = nil
+
+	for i, want := range []int{1, 2, 3} {
+		a.Update(tea.KeyMsg{Type: tea.KeyDown})
+		if a.form.focus != want {
+			t.Fatalf("down %d: focus = %d, want %d", i, a.form.focus, want)
+		}
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // seed(3), empty panel: no-op
+	if a.form.focus != 3 || a.panelFocused {
+		t.Fatalf("down at seed with empty panel = form:%d panel:%v, want form:3 panel:false", a.form.focus, a.panelFocused)
+	}
+	for i, want := range []int{2, 1, 0} {
+		a.Update(tea.KeyMsg{Type: tea.KeyUp})
+		if a.form.focus != want {
+			t.Fatalf("up %d: focus = %d, want %d", i, a.form.focus, want)
+		}
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyUp}) // project(0): no-op, no wrap
+	if a.form.focus != 0 {
+		t.Fatalf("up at project(0) = %d, want 0 (no wrap)", a.form.focus)
+	}
+}
+
+func TestLauncherDownFromSeedEntersPanelAndUpLeavesIt(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	n := a.panelLen()
+	if n == 0 {
+		t.Fatal("fixture produced an empty panel; test needs rows")
+	}
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if !a.panelFocused || a.panelCursor != 0 {
+		t.Fatalf("down from seed = panelFocused:%v cursor:%d, want true/0", a.panelFocused, a.panelCursor)
+	}
+	for i := 1; i < n; i++ {
+		a.Update(tea.KeyMsg{Type: tea.KeyDown})
+		if a.panelCursor != i {
+			t.Fatalf("panel down %d: cursor = %d, want %d", i, a.panelCursor, i)
+		}
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // at bottom: no-op, no wrap
+	if a.panelCursor != n-1 {
+		t.Fatalf("panel down at bottom = %d, want no-op at %d", a.panelCursor, n-1)
+	}
+	for i := n - 2; i >= 0; i-- {
+		a.Update(tea.KeyMsg{Type: tea.KeyUp})
+		if a.panelCursor != i {
+			t.Fatalf("panel up: cursor = %d, want %d", a.panelCursor, i)
+		}
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyUp}) // panel[0] -> seed(3)
+	if a.panelFocused || a.form.focus != 3 {
+		t.Fatalf("up from panel[0] = panelFocused:%v form.focus:%d, want false/3", a.panelFocused, a.form.focus)
+	}
+}
+
+func TestLauncherEnterFormFocusedLaunches(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.view != viewDash {
+		t.Fatalf("view after form-focused enter = %v, want viewDash", a.view)
+	}
+	if cmd == nil {
+		t.Fatal("form-focused enter did not return a launch command")
+	}
+}
+
+func TestLauncherEnterPanelFocusedOpensDetail(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.view != viewDetail {
+		t.Fatalf("view after panel-focused enter = %v, want viewDetail", a.view)
+	}
+	if a.detailReturn != viewLauncher {
+		t.Fatalf("detailReturn = %v, want viewLauncher", a.detailReturn)
+	}
+}
+
+func TestLauncherSpacePanelFocusedTogglesInclude(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	row, ok := a.panelSelected()
+	if !ok {
+		t.Fatal("no panel row selected")
+	}
+	a.Update(key(" "))
+	if _, on := a.includes[row.t.SessionID]; !on {
+		t.Fatalf("space did not include %s", row.t.SessionID)
+	}
+	a.Update(key(" ")) // re-toggle off
+	if _, on := a.includes[row.t.SessionID]; on {
+		t.Fatal("second space did not un-include")
+	}
+}
+
+// TestLauncherSpaceInSeedTypesASpace is the spec §3 binding test: space
+// while the SEED field (not the panel) is focused inserts a literal space
+// into the textinput and toggles NOTHING.
+func TestLauncherSpaceInSeedTypesASpace(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.form.seed.SetValue("hello")
+	a.form.seed.CursorEnd()
+	a.Update(key(" "))
+	a.Update(key("world"))
+	if got := a.form.seed.Value(); got != "hello world" {
+		t.Fatalf("seed value = %q, want %q", got, "hello world")
+	}
+	if len(a.includes) != 0 {
+		t.Fatalf("space-in-seed toggled an include: %+v", a.includes)
+	}
+}
+
+func TestLauncherEscReturnsToDashFromAnyFocus(t *testing.T) {
+	for _, enterPanel := range []bool{false, true} {
+		a, _, _ := recallLauncherFixture(t)
+		openLauncherAndDrain(a)
+		if enterPanel {
+			a.form.setFocus(3)
+			a.Update(tea.KeyMsg{Type: tea.KeyDown})
+			if !a.panelFocused {
+				t.Fatal("fixture setup: expected panel focus")
+			}
+		}
+		a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		if a.view != viewDash {
+			t.Fatalf("esc (panelFocused=%v): view = %v, want viewDash", enterPanel, a.view)
+		}
+	}
+}
+
+// --- §4 includes: pinning, SessionID keying, project-change clear, max-3 -
+
+func TestLauncherIncludesPinnedAcrossRerank(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	row0, ok := a.panelSelected()
+	if !ok {
+		t.Fatal("no panel row")
+	}
+	a.Update(key(" ")) // include it
+
+	// A fresh query result that no longer contains this session at all.
+	a.panelHits = []memory.RelatedHit{{T: store.Transcript{SessionID: "unrelated", Title: "unrelated"}}}
+	a.clampPanelCursor()
+
+	rows := a.panelRows()
+	if len(rows) == 0 || rows[0].t.SessionID != row0.t.SessionID || !rows[0].included {
+		t.Fatalf("included row not pinned at top after rerank: %+v", rows)
+	}
+	a.panelCursor = 0
+	a.Update(key(" ")) // re-toggle off
+	if _, on := a.includes[row0.t.SessionID]; on {
+		t.Fatal("re-toggle did not un-include the pinned row")
+	}
+}
+
+func TestLauncherIncludeKeyedBySessionIDNotPosition(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	rows := a.panelRows()
+	if len(rows) < 2 {
+		t.Fatal("fixture needs >=2 panel rows")
+	}
+	target := rows[1].t.SessionID
+
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // panel[0]
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // panel[1]
+	a.Update(key(" "))                      // include rows[1]
+
+	// Reorder panelHits (simulating a re-rank shuffle) — the include must
+	// still be keyed to `target`'s SessionID, never "whatever is now at
+	// index 1".
+	reordered := make([]memory.RelatedHit, len(a.panelHits))
+	for i, h := range a.panelHits {
+		reordered[len(a.panelHits)-1-i] = h
+	}
+	a.panelHits = reordered
+	a.clampPanelCursor()
+
+	if _, on := a.includes[target]; !on {
+		t.Fatalf("include lost after reorder: includes=%+v, want %s present", a.includes, target)
+	}
+}
+
+func TestLauncherProjectChangeClearsIncludes(t *testing.T) {
+	a, _, projB := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(key(" ")) // include something from projA
+	if len(a.includes) == 0 {
+		t.Fatal("fixture setup: expected an include")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyTab}) // back to form; cycle(3,1,4) wraps to project(0)
+	if a.panelFocused || a.form.focus != 0 {
+		t.Fatalf("test setup: focus = form:%d panel:%v, want form:0 panel:false", a.form.focus, a.panelFocused)
+	}
+
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyRight}) // projA -> projB
+	if len(a.includes) != 0 {
+		t.Fatalf("includes not cleared on project change: %+v", a.includes)
+	}
+	if cmd == nil {
+		t.Fatal("project change did not refire the panel query")
+	}
+	msg, ok := cmd().(panelResultsMsg)
+	if !ok {
+		t.Fatalf("project-change cmd() = %T, want panelResultsMsg", msg)
+	}
+	if want := transcript.ProjectDirName(projB.Path); msg.projectDir != want {
+		t.Fatalf("refired query projectDir = %q, want projB's %q", msg.projectDir, want)
+	}
+}
+
+func TestLauncherIncludeMaxThree(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	// Pad to >=4 distinct rows (the fixture's own same-project data has 3).
+	a.panelHits = append(a.panelHits, memory.RelatedHit{T: store.Transcript{SessionID: "extra", Title: "extra"}})
+
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	for i := 0; i < 4; i++ {
+		a.Update(key(" "))
+		if i < 3 {
+			a.Update(tea.KeyMsg{Type: tea.KeyDown})
+		}
+	}
+	if len(a.includes) != includeCap {
+		t.Fatalf("includes = %d, want cap %d: %+v", len(a.includes), includeCap, a.includes)
+	}
+}
+
+// --- §4 slash-seed warning -------------------------------------------------
+
+func TestLauncherSlashSeedWarningBlocksDroppedAtLaunch(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(key(" "))                    // include one entry
+	a.Update(tea.KeyMsg{Type: tea.KeyUp}) // back to seed(3)
+	a.Update(key("/deploy"))
+	if a.form.seed.Value() != "/deploy" {
+		t.Fatalf("seed = %q, want /deploy", a.form.seed.Value())
+	}
+	if a.panelWarn == "" {
+		t.Fatal("slash seed with includes did not warn")
+	}
+	if out := a.View(); !strings.Contains(out, "⚠") {
+		t.Fatalf("warning not rendered:\n%s", out)
+	}
+
+	seed, warned := buildSeedWithRecall(a.form.seed.Value(), a.includeSnapshot(), a.deps.Projects)
+	if !warned || seed != "/deploy" {
+		t.Fatalf("buildSeedWithRecall(%q, includes) = (%q,%v), want (\"/deploy\",true) — blocks dropped",
+			a.form.seed.Value(), seed, warned)
+	}
+}
+
+func TestLauncherWarningClearsWhenIncludesEmptied(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(key(" "))
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	a.Update(key("/deploy"))
+	if a.panelWarn == "" {
+		t.Fatal("expected warning")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(key(" ")) // un-include
+	if a.panelWarn != "" {
+		t.Fatalf("warning not cleared after un-including: %q", a.panelWarn)
+	}
+}
+
+// --- §4 seed assembly (buildSeedWithRecall): caps, marker format, safety -
+
+func TestBuildSeedWithRecallMarkerFormatAndOrder(t *testing.T) {
+	includes := []store.Transcript{
+		{SessionID: "s1", ProjectDir: "-Users-h-Sauce-alpha", Cwd: "/Users/h/Sauce/alpha", Title: "fix parser", Outcome: "fixed the tokenizer bug"},
+		{SessionID: "s2", ProjectDir: "-Users-h-Sauce-beta", Cwd: "/Users/h/Sauce/beta", Ask: "add caching", Outcome: "added an LRU cache"},
+	}
+	seed, warned := buildSeedWithRecall("continue this", includes, nil)
+	if warned {
+		t.Fatal("warned=true for a plain seed")
+	}
+	if !strings.HasPrefix(seed, "continue this") {
+		t.Fatalf("seed lost its original prefix: %q", seed)
+	}
+	want1 := memory.RecallMarker + "alpha·fix parser]: fixed the tokenizer bug"
+	want2 := memory.RecallMarker + "beta·add caching]: added an LRU cache"
+	i1 := strings.Index(seed, want1)
+	i2 := strings.Index(seed, want2)
+	if i1 < 0 || i2 < 0 {
+		t.Fatalf("seed = %q, want both markers %q and %q present", seed, want1, want2)
+	}
+	if i1 > i2 {
+		t.Fatalf("markers out of includes order: %q", seed)
+	}
+}
+
+func TestBuildSeedWithRecallZeroIncludesUnchanged(t *testing.T) {
+	seed, warned := buildSeedWithRecall("hello", nil, nil)
+	if seed != "hello" || warned {
+		t.Fatalf("got (%q,%v), want (\"hello\",false)", seed, warned)
+	}
+}
+
+func TestBuildSeedWithRecallSlashSeedDropsBlocks(t *testing.T) {
+	includes := []store.Transcript{{SessionID: "s1", Title: "t", Outcome: "o"}}
+	seed, warned := buildSeedWithRecall("/run-thing", includes, nil)
+	if seed != "/run-thing" || !warned {
+		t.Fatalf("got (%q,%v), want (\"/run-thing\",true)", seed, warned)
+	}
+}
+
+func TestBuildSeedWithRecallOutcomeTruncatedByteSafe(t *testing.T) {
+	huge := strings.Repeat("x", outcomeCap*2)
+	includes := []store.Transcript{{SessionID: "s1", Title: "t", Outcome: huge}}
+	seed, _ := buildSeedWithRecall("seed", includes, nil)
+	if !strings.Contains(seed, recallTruncMarker) {
+		t.Fatal("expected truncation marker in the assembled seed")
+	}
+	if len(seed) > seedInvariantMax {
+		t.Fatalf("seed len = %d, exceeds invariant %d", len(seed), seedInvariantMax)
+	}
+}
+
+func TestBuildSeedWithRecallStripsCRLFForSingleLineOutput(t *testing.T) {
+	includes := []store.Transcript{{SessionID: "s1", Title: "line1\nline2", Outcome: "out1\r\nout2"}}
+	seed, _ := buildSeedWithRecall("seed", includes, nil)
+	if strings.ContainsAny(seed, "\n\r") {
+		t.Fatalf("seed contains a newline, breaking the tmux send-keys single-line invariant: %q", seed)
+	}
+}
+
+func TestBuildSeedWithRecallDefensiveCapAtIncludeCap(t *testing.T) {
+	var includes []store.Transcript
+	for i := 0; i < 5; i++ {
+		includes = append(includes, store.Transcript{SessionID: fmt.Sprintf("s%d", i), Title: fmt.Sprintf("t%d", i), Outcome: fmt.Sprintf("o%d", i)})
+	}
+	seed, _ := buildSeedWithRecall("seed", includes, nil)
+	if n := strings.Count(seed, memory.RecallMarker); n != includeCap {
+		t.Fatalf("marker count = %d, want defensive cap %d", n, includeCap)
+	}
+}
+
+func TestBuildSeedWithRecallNeverPanicsOnPathologicalInput(t *testing.T) {
+	huge := strings.Repeat("z", 1_000_000)
+	includes := []store.Transcript{
+		{SessionID: "s1", ProjectDir: "x", Cwd: huge, Title: huge, Ask: huge, Outcome: huge},
+		{SessionID: "s2", ProjectDir: "x", Cwd: huge, Title: huge, Ask: huge, Outcome: huge},
+		{SessionID: "s3", ProjectDir: "x", Cwd: huge, Title: huge, Ask: huge, Outcome: huge},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("buildSeedWithRecall panicked on pathological (but cap-bounded) input: %v", r)
+		}
+	}()
+	seed, _ := buildSeedWithRecall("seed", includes, nil)
+	if len(seed) > seedInvariantMax {
+		t.Fatalf("seed len = %d, exceeds invariant %d", len(seed), seedInvariantMax)
+	}
+}
+
+// --- §6 M3: registry reverse-match else basename(cwd) ---------------------
+
+func TestRelatedLabelRegistryReverseMatchElseBasenameCwd(t *testing.T) {
+	proj := registry.Project{Label: "alpha-custom-label", Path: "/Users/h/Sauce/alpha"}
+	t1 := store.Transcript{ProjectDir: transcript.ProjectDirName(proj.Path), Cwd: ""} // cwd empty on purpose
+	if got := relatedLabel([]registry.Project{proj}, t1); got != "alpha-custom-label" {
+		t.Fatalf("reverse-match label = %q, want alpha-custom-label", got)
+	}
+	t2 := store.Transcript{ProjectDir: "no-match", Cwd: "/Users/h/Sauce/other"}
+	if got := relatedLabel([]registry.Project{proj}, t2); got != "other" {
+		t.Fatalf("fallback label = %q, want other (basename cwd)", got)
+	}
+}
+
+// --- §5 detail round-trip: origin-tracked esc, r hidden -------------------
+
+func TestLauncherDetailRoundTripPreservesAllStateAndHidesResume(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+
+	a.form.projIdx = 1
+	a.form.modeIdx = 2
+	a.form.setFocus(3)
+	a.form.seed.SetValue("some seed text")
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // enter panel[0]
+	a.Update(key(" "))                      // include row0
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // move to row1
+
+	wantCursor := a.panelCursor
+	wantPanelFocused := a.panelFocused
+	wantIncludes := len(a.includes)
+	wantHits := len(a.panelHits)
+	wantSeed := a.form.seed.Value()
+	wantModeIdx := a.form.modeIdx
+	wantProjIdx := a.form.projIdx
+
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter}) // panel-focused -> detail
+	if a.view != viewDetail {
+		t.Fatal("enter on panel row did not open detail")
+	}
+	if a.detailReturn != viewLauncher {
+		t.Fatalf("detailReturn = %v, want viewLauncher", a.detailReturn)
+	}
+
+	// r must be hidden/no-op for a launcher-origin detail (spec §5), even
+	// though the fixture's transcript has a real, resumable cwd.
+	beforeView := a.view
+	_, rcmd := a.Update(key("r"))
+	if a.view != beforeView || rcmd != nil {
+		t.Fatal("'r' was not hidden/no-op for a launcher-origin detail")
+	}
+	if out := a.View(); strings.Contains(out, "r resume") {
+		t.Fatalf("keybar shows r resume for a launcher-origin detail:\n%s", out)
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewLauncher {
+		t.Fatalf("esc from detail = %v, want viewLauncher", a.view)
+	}
+	if a.panelFocused != wantPanelFocused || a.panelCursor != wantCursor {
+		t.Fatalf("panel focus/cursor lost: focused=%v cursor=%d, want %v/%d",
+			a.panelFocused, a.panelCursor, wantPanelFocused, wantCursor)
+	}
+	if len(a.includes) != wantIncludes {
+		t.Fatalf("includes lost: %d, want %d", len(a.includes), wantIncludes)
+	}
+	if len(a.panelHits) != wantHits {
+		t.Fatalf("panelHits lost: %d, want %d", len(a.panelHits), wantHits)
+	}
+	if a.form.seed.Value() != wantSeed {
+		t.Fatalf("seed lost: %q, want %q", a.form.seed.Value(), wantSeed)
+	}
+	if a.form.modeIdx != wantModeIdx || a.form.projIdx != wantProjIdx {
+		t.Fatalf("form fields lost: mode=%d proj=%d, want %d/%d", a.form.modeIdx, a.form.projIdx, wantModeIdx, wantProjIdx)
+	}
+}
+
+// --- §6 freshness: staleness key, debounce --------------------------------
+
+// TestPanelStalenessKeyDiscardsStaleProjectResult is the spec §6 I6 binding
+// test: the staleness key is (seed,projectDir), not seed alone — a stale
+// result for a project the launcher has since switched away from must be
+// discarded even though its seed still matches the live input.
+func TestPanelStalenessKeyDiscardsStaleProjectResult(t *testing.T) {
+	a, projA, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a) // loads projA's (index 0) recency panel
+	freshA := append([]memory.RelatedHit(nil), a.panelHits...)
+	if len(freshA) == 0 {
+		t.Fatal("fixture: expected projA panel hits")
+	}
+
+	_, switchCmd := a.Update(tea.KeyMsg{Type: tea.KeyRight}) // projA -> projB
+	if switchCmd == nil {
+		t.Fatal("project switch did not refire the panel query")
+	}
+	a.Update(switchCmd())
+	freshB := append([]memory.RelatedHit(nil), a.panelHits...)
+	if len(freshB) == 0 {
+		t.Fatal("fixture: expected projB panel hits")
+	}
+
+	stale := panelResultsMsg{
+		seed:       "",
+		projectDir: transcript.ProjectDirName(projA.Path),
+		hits:       []memory.RelatedHit{{T: store.Transcript{SessionID: "should-not-apply"}}},
+	}
+	a.Update(stale)
+	if !reflect.DeepEqual(a.panelHits, freshB) {
+		t.Fatalf("stale projA result overwrote the live projB panel: got %+v, want %+v", a.panelHits, freshB)
+	}
+}
+
+// TestPanelDebounceStaleSeqDiscarded: a panelDebounceMsg carrying an older
+// generation than a.panelSeq (a newer keystroke has since bumped it) fires
+// no query at all.
+func TestPanelDebounceStaleSeqDiscarded(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+
+	_, cmd1 := a.Update(key("x"))
+	seqAfterFirst := a.panelSeq
+	if cmd1 == nil {
+		t.Fatal("seed keystroke did not return a command")
+	}
+	batch1, ok := cmd1().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("seed keystroke cmd = %T, want tea.BatchMsg", cmd1())
+	}
+	var debounce1 panelDebounceMsg
+	found := false
+	for _, c := range batch1 {
+		if c == nil {
+			continue
+		}
+		if dm, ok := c().(panelDebounceMsg); ok {
+			debounce1, found = dm, true
+		}
+	}
+	if !found || debounce1.seq != seqAfterFirst {
+		t.Fatalf("debounce1 = %+v found=%v, want seq %d", debounce1, found, seqAfterFirst)
+	}
+
+	a.Update(key("y")) // a second keystroke bumps panelSeq again
+	if _, cmd := a.Update(debounce1); cmd != nil {
+		t.Fatal("stale debounce generation fired a query instead of being discarded")
+	}
+}
+
+// --- §6 M4: both recency-preview and real-snippet row shapes --------------
+
+func TestLauncherPanelBothM4Shapes(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a) // empty seed -> recency fallback: no snippet
+	rows := a.panelRows()
+	if len(rows) == 0 {
+		t.Fatal("expected recency-fallback rows")
+	}
+	for _, r := range rows {
+		if r.snippet != "" {
+			t.Fatalf("recency-fallback row has a non-empty snippet (M4 shape violated): %+v", r)
+		}
+	}
+
+	q := "card monitoring alert thresholds"
+	msg, ok := a.panelQueryCmd(q, a.currentProjectDir())().(panelResultsMsg)
+	if !ok {
+		t.Fatal("panelQueryCmd did not return panelResultsMsg")
+	}
+	a.form.seed.SetValue(q)
+	a.Update(msg)
+
+	found := false
+	for _, r := range a.panelRows() {
+		if r.t.SessionID == "s2" {
+			found = true
+			if r.snippet == "" {
+				t.Fatalf("real recall hit s2 has an empty snippet (M4 shape violated): %+v", r)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected s2 to qualify for the real recall query")
+	}
+}
+
+// --- frame invariants, populated panel + pinned includes ------------------
+
+// TestLauncherFrameInvariantPopulatedPanelAndIncludes: the frame invariant
+// at both 100 and 40 cells wide (same "100/40" precedent as
+// TestDetailFrameInvariantPopulatedContent), with the panel populated, an
+// include pinned, and the slash-seed warning line all rendering at once.
+func TestLauncherFrameInvariantPopulatedPanelAndIncludes(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.form.seed.SetValue("a very long seed prompt for testing frame width invariants across the launcher panel")
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // enter panel
+	a.Update(key(" "))                      // include row0 (pinned rendering path)
+	if len(a.includes) == 0 {
+		t.Fatal("fixture: expected an include for this test")
+	}
+	a.panelWarn = "slash-command seed — related context will NOT be appended"
+
+	for _, width := range []int{100, 40} {
+		a.width, a.height = width, 30
+		out := a.View()
+		for i, line := range strings.Split(out, "\n") {
+			if lw := lipgloss.Width(line); lw != width {
+				t.Fatalf("width %d line %d = %d cells (want %d): %q", width, i, lw, width, line)
+			}
+		}
+	}
+}
+
+func TestLauncherPanelRendersIncludeCheckboxesAndSectionHeader(t *testing.T) {
+	a, _, _ := recallLauncherFixture(t)
+	openLauncherAndDrain(a)
+	a.form.setFocus(3)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(key(" "))
+	out := a.View()
+	if !strings.Contains(out, "RELATED") {
+		t.Fatalf("RELATED section header missing:\n%s", out)
+	}
+	if !strings.Contains(out, "[x]") {
+		t.Fatalf("included checkbox missing:\n%s", out)
+	}
+}
+
+// --- zero-Deps (nil Store) safety -----------------------------------------
+
+func TestLauncherZeroDepsNilStoreSafe(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 30
+	openLauncherAndDrain(a) // "n" -> panelQueryCmd returns nil (no store, no projects)
+	if a.view != viewLauncher {
+		t.Fatal("launcher did not open with zero Deps")
+	}
+	for _, msg := range []tea.Msg{
+		tea.KeyMsg{Type: tea.KeyTab},
+		tea.KeyMsg{Type: tea.KeyDown},
+		tea.KeyMsg{Type: tea.KeyDown},
+		tea.KeyMsg{Type: tea.KeyUp},
+		key(" "),
+		tea.KeyMsg{Type: tea.KeyEnter},
+	} {
+		a.Update(msg)
+	}
+	if a.view != viewDash {
+		t.Fatalf("form-focused enter with zero Deps should launch-noop to dash, view = %v", a.view)
+	}
+
+	openLauncherAndDrain(a)
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewDash {
+		t.Fatalf("esc with zero Deps = %v, want viewDash", a.view)
+	}
+}
+
+func TestPanelQueryCmdNilWhenStoreOrProjectDirEmpty(t *testing.T) {
+	a := NewApp(Deps{})
+	if cmd := a.panelQueryCmd("seed", ""); cmd != nil {
+		t.Fatal("panelQueryCmd with empty projectDir must be nil")
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	a2 := NewApp(Deps{Store: st})
+	if cmd := a2.panelQueryCmd("seed", ""); cmd != nil {
+		t.Fatal("panelQueryCmd with empty projectDir must be nil even with a Store")
+	}
+	if cmd := a2.panelQueryCmd("seed", "some-dir"); cmd == nil {
+		t.Fatal("panelQueryCmd with a Store and projectDir must be non-nil")
 	}
 }
