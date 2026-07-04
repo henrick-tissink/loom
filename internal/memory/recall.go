@@ -55,7 +55,8 @@ var tokenRe = regexp.MustCompile(`[^\p{L}\p{N}]+`)
 // buildRecallQuery builds recall's own FTS5 match expression from a seed
 // (spec §2, binding, empirically derived against the real index by a
 // red-team): tokenize on non-letter/digit boundaries; drop tokens under 4
-// characters and the stopword list above; quote-escape each surviving term
+// characters and the stopword list above; deduplicate surviving tokens while
+// preserving first-occurrence order; quote-escape each surviving term
 // (doubling any embedded quote, mirroring store.sanitizeFTSQuery's
 // escaping); OR-join the quoted terms with NO trailing `*` (recall wants
 // exact-term matches across sessions, not prefix-complete the seed's last
@@ -63,13 +64,16 @@ var tokenRe = regexp.MustCompile(`[^\p{L}\p{N}]+`)
 // callers use to fall back to same-project recency instead of running a
 // single-term (or zero-term) query that would surface confident noise.
 //
-// terms is returned (lowercased, in seed order) so the caller can compute
-// per-hit matched-term counts without re-tokenizing.
+// terms is returned (lowercased, in seed order, deduplicated) so the caller
+// can compute per-hit matched-term counts without re-tokenizing, and the
+// ≥2-matched-term gate correctly counts distinct terms.
 func buildRecallQuery(seed string) (expr string, terms []string) {
+	seen := make(map[string]bool)
 	for _, tok := range tokenRe.Split(strings.ToLower(seed), -1) {
-		if len(tok) < 4 || stopwords[tok] {
+		if len(tok) < 4 || stopwords[tok] || seen[tok] {
 			continue
 		}
+		seen[tok] = true
 		terms = append(terms, tok)
 	}
 	if len(terms) < 2 {

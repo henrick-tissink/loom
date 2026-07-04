@@ -85,6 +85,27 @@ func TestBuildRecallQueryQuoteEscaping(t *testing.T) {
 	}
 }
 
+func TestBuildRecallQueryDeduplicatesTokens(t *testing.T) {
+	// Seed with duplicate tokens: "card" appears twice. After filtering and
+	// deduplication, each surviving term should appear exactly once in the
+	// terms slice and in the OR expression, so countMatchedTerms counts
+	// distinct terms correctly.
+	expr, terms := buildRecallQuery("card payments card refunds")
+	wantTerms := []string{"card", "payments", "refunds"}
+	if len(terms) != len(wantTerms) {
+		t.Fatalf("terms = %v, want %v (deduped)", terms, wantTerms)
+	}
+	for i, w := range wantTerms {
+		if terms[i] != w {
+			t.Fatalf("terms[%d] = %q, want %q (terms=%v)", i, terms[i], w, terms)
+		}
+	}
+	want := `"card" OR "payments" OR "refunds"`
+	if expr != want {
+		t.Fatalf("expr = %q, want %q (deduped)", expr, want)
+	}
+}
+
 // --- Related: relevance gate, boosting, fallback (spec §2/§6) -----------
 
 func TestRelatedTwoTermGateKillsOneTermNoiseHit(t *testing.T) {
@@ -235,5 +256,47 @@ func TestRelatedRecencyFallbackOnZeroQualifyingHits(t *testing.T) {
 	if got[0].T.SessionID != "new" || got[1].T.SessionID != "onlyone" || got[2].T.SessionID != "old" {
 		t.Fatalf("got order %v, want [new onlyone old] by last_ts desc",
 			[]string{got[0].T.SessionID, got[1].T.SessionID, got[2].T.SessionID})
+	}
+}
+
+func TestRelatedDuplicateTokensInSeedDoesNotWarpGate(t *testing.T) {
+	// Regression test: seed with duplicate tokens ("card payments card
+	// refunds") must not cause countMatchedTerms to double-count "card" and
+	// falsely pass a session containing only "card" (once). The deduplication
+	// fix ensures terms == ["card", "payments", "refunds"] and countMatchedTerms
+	// counts distinct terms, so the ≥2-term gate correctly rejects this noise.
+	s := openStore(t)
+
+	// Noise: session contains only "card", many times. Before the fix,
+	// buildRecallQuery yields terms=["card", "payments", "card", "refunds"]
+	// (duplicated), countMatchedTerms counts 2 matches (both "card" entries
+	// match), gate wrongly passes. After the fix, buildRecallQuery dedupes to
+	// terms=["card", "payments", "refunds"], countMatchedTerms counts only 1
+	// match, gate correctly rejects.
+	seedRecallSession(t, s, "noise", "loom",
+		"card card card card card processing card card card", 100)
+
+	// Real hit: contains "card" and "payments" together.
+	seedRecallSession(t, s, "good", "loom",
+		"we need to process card payments for the invoice", 200)
+
+	got, err := Related(s, "loom", "card payments card refunds", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Noise session must be filtered out (only 1 matched distinct term: "card").
+	for _, h := range got {
+		if h.T.SessionID == "noise" {
+			t.Fatalf("session with only 1 distinct term must not qualify: %+v", got)
+		}
+	}
+
+	// The "good" session should either be in the results (if FTS finds it) or
+	// we fall back to recency. Either way, "noise" must not appear.
+	// Since "good" mentions "card" and "payments", it should survive the gate
+	// and be returned.
+	if len(got) == 0 {
+		t.Fatalf("expected at least recency fallback results, got none")
 	}
 }
