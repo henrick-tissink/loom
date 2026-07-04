@@ -178,8 +178,12 @@ func TestSetTitle(t *testing.T) {
 // belt-and-braces with the per-migration transaction.
 func TestMigrationsAreTransactional(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "loom.db")
-	s, err := Open(p) // creates at latest version (v5), including v4 objects
+	s, err := Open(p) // creates at the latest migration version, including v4 objects
 	if err != nil {
+		t.Fatal(err)
+	}
+	var want int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&want); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -211,8 +215,8 @@ func TestMigrationsAreTransactional(t *testing.T) {
 	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 5 {
-		t.Fatalf("user_version = %d, want 5", v)
+	if v != want {
+		t.Fatalf("user_version = %d, want %d", v, want)
 	}
 
 	// The re-applied v4 objects must still be usable (IF NOT EXISTS re-run

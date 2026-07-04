@@ -92,6 +92,10 @@ launch, monitor, and return to real `claude` sessions across a whole workspace.
 
     go build -o loom ./cmd/loom && ./loom
 
+To get `loom` on your PATH:
+
+    ln -s "$PWD/loom" ~/.local/bin/loom
+
 ## Notes
 
 - Scrollback inside a session uses tmux copy-mode (Ctrl-b [), not the terminal's

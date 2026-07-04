@@ -13,6 +13,7 @@ import (
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/transcript"
 )
 
 // sinkCatScript is used for hand-built tmux sessions (continue-relation
@@ -88,19 +89,10 @@ func writeTranscript(t *testing.T, ccd, cwd, sessionID string, lines ...string) 
 	return p
 }
 
-// projectDirNameForTest mirrors transcript.ProjectDirName without importing
-// it for this one helper — actually just reuse the real one for accuracy.
+// projectDirNameForTest delegates to the real transcript.ProjectDirName so
+// this test fixture can never drift from the encoding it's meant to mirror.
 func projectDirNameForTest(cwd string) string {
-	var b strings.Builder
-	for _, r := range cwd {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	return b.String()
+	return transcript.ProjectDirName(cwd)
 }
 
 // stdFixtureLines is a minimal transcript: a user prompt, a final

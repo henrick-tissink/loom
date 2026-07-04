@@ -1094,10 +1094,13 @@ func (a *App) updateWorkflowsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "enter":
+		a.wfHint = ""
 		return a.wfActivate()
 	case "n":
+		a.wfHint = ""
 		return a.wfPressN()
 	case "x":
+		a.wfHint = ""
 		return a.wfPressX()
 	}
 	return a, nil
@@ -1202,6 +1205,7 @@ func (a *App) updateWFConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.view = viewWorkflows
 		return a, nil
 	case "y":
+		a.wfHint = ""
 		if a.wfPreviewLoading || a.wfPreviewErr != "" || a.wfContinueDead || a.deps.Runner == nil {
 			return a, nil // not (yet/anymore) a valid confirm state
 		}
@@ -1216,6 +1220,7 @@ func (a *App) updateWFConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w, h := a.width, a.height
 		return a, a.advanceCmd(target, false, w, h)
 	case "f":
+		a.wfHint = ""
 		if !a.wfContinueDead || a.deps.Runner == nil {
 			return a, nil
 		}
@@ -1964,6 +1969,12 @@ func statusGlyphWord(status string) (string, string) {
 		return "✓", "done"
 	case "error":
 		return "✗", "error"
+	case "unknown":
+		// A freshly-started run's step session hasn't had its first status
+		// poll land yet (session/launch.go seeds LastStatus="unknown") — show
+		// "starting" rather than the more alarming-looking "unknown", glyph
+		// unchanged.
+		return "·", "starting"
 	default:
 		return "·", "unknown"
 	}
