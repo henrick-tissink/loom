@@ -43,6 +43,7 @@ const (
 	viewWFConfirm
 	viewWFConfirmAbandon
 	viewFanout
+	viewWall
 )
 
 type Deps struct {
@@ -241,6 +242,37 @@ type App struct {
 	// next actual keypress on the dashboard (the wfHint discipline,
 	// generalized to "any key" since fanHint isn't tied to one action).
 	fanHint string
+
+	// --- Wall (`W`) — spec §3 ----------------------------------------------
+
+	// wallOrder is the wall's STABLE display order (spec §3.1: CreatedAt
+	// then Name — deterministic regardless of a.snap.Live's own slice order,
+	// and NEVER the attention order rebuildRows computes — attention is the
+	// dashboard's job, reordering it here would teleport the grid under the
+	// reader). Recomputed on every snapMsg (applyWallOrder, called
+	// unconditionally alongside rebuildRows — cheap, and keeps the wall
+	// current the instant it's opened rather than only after its own first
+	// poll). wallSelected is the NAME-keyed selection (spec §3.5): it
+	// survives a.wallOrder being rebuilt/reordered/paginated out from under
+	// it, and applyWallOrder resolves the nearest-neighbor fallback the
+	// moment the selected name is no longer present.
+	wallOrder    []status.Row
+	wallSelected string
+
+	// wallCaptures is the per-session captured-pane cache (spec §3.3/§3.4),
+	// keyed by session name — populated by wallMsg, pruned of any name no
+	// longer in wallOrder on every applyWallOrder pass. A name absent from
+	// this map simply renders as a blank (not-yet-captured) cell, never an
+	// error.
+	wallCaptures map[string]wallCapture
+
+	// wallSeq is the wall capture command's generation counter (spec §3.3
+	// "stale... discard", same debounce-generation discipline as
+	// searchSeq/panelSeq): bumped every time a NEW wallCaptureCmd is fired
+	// (view-open, and once per tick while the wall is open) — a wallMsg
+	// carrying any other generation is a stale, fully-discarded result (an
+	// overlapping capture from a slower, earlier tick), never applied.
+	wallSeq int64
 }
 
 // wfRunRow is one RUNS-section entry: a store.RunRow plus the display/action
@@ -421,6 +453,29 @@ type (
 		group   string
 		results []fanResult
 	}
+
+	// wallCaptureResult is one session's CapturePane outcome within a
+	// wallMsg (spec §3.3/§3.4): err true means CapturePane itself failed
+	// (peek precedent — the cell keeps rendering, as "(pane unavailable)",
+	// rather than disappearing outright); lines is nil for an error result.
+	wallCaptureResult struct {
+		name  string
+		lines []string
+		err   bool
+	}
+
+	// wallMsg is the result of one wall capture cmd (spec §3.3): gen pins it
+	// to the generation that fired it — Update's wallMsg case discards the
+	// WHOLE message when gen no longer matches a.wallSeq (a newer capture
+	// has since been fired: the peekCmd/searchDebounceMsg staleness
+	// discipline, generalized to a per-tick refresh rather than a keystroke
+	// debounce). Even a fresh-generation message drops any individual result
+	// whose name is no longer in a.wallOrder (spec: "stale/vanished entries
+	// dropped") — the session ended between the cmd firing and landing.
+	wallMsg struct {
+		gen     int64
+		results []wallCaptureResult
+	}
 )
 
 func NewApp(deps Deps) *App {
@@ -502,6 +557,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// whether to re-fire the current query (active, or an
 			// active→inactive edge).
 			return a, tea.Batch(a.pollCmd(), tickAfter(), a.searchStatusCmd())
+		case viewWall:
+			// spec §3.3: "per poll tick while open, ONE one-shot tea.Cmd
+			// captures the VISIBLE page's panes" — bumping wallSeq here
+			// (before firing the new capture cmd) is what makes any
+			// still-in-flight PRIOR tick's capture stale the instant this
+			// one is fired, per the wallMsg staleness discipline.
+			a.wallSeq++
+			return a, tea.Batch(a.pollCmd(), tickAfter(), a.wallCaptureCmd())
 		}
 		return a, tea.Batch(a.pollCmd(), tickAfter())
 	case pollNowMsg:
@@ -515,6 +578,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.errStr = ""
 		a.now = time.Now()
 		a.rebuildRows()
+		a.applyWallOrder()
 		if len(m.NewlyNeedsYou) > 0 {
 			return a, notifyCmd(m.NewlyNeedsYou)
 		}
@@ -686,6 +750,27 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// launched (and now-tagged) sessions appear on the dashboard
 		// immediately, not after the next 1.5s tick.
 		return a, a.pollCmd()
+	case wallMsg:
+		// stale: a newer capture cmd has since been fired (gen mismatch), or
+		// the wall isn't even open anymore — discard the WHOLE message (spec
+		// §3.3/§3.4).
+		if a.view != viewWall || m.gen != a.wallSeq {
+			return a, nil
+		}
+		if a.wallCaptures == nil {
+			a.wallCaptures = map[string]wallCapture{}
+		}
+		alive := make(map[string]bool, len(a.wallOrder))
+		for _, r := range a.wallOrder {
+			alive[r.Name] = true
+		}
+		for _, res := range m.results {
+			if !alive[res.name] {
+				continue // vanished between cmd-fire and landing — dropped.
+			}
+			a.wallCaptures[res.name] = wallCapture{lines: res.lines, err: res.err}
+		}
+		return a, nil
 	case tea.KeyMsg:
 		return a.updateKeys(m)
 	}
@@ -773,6 +858,9 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case viewFanout:
 		return a.updateFanoutKeys(msg)
+
+	case viewWall:
+		return a.updateWallKeys(msg)
 	}
 
 	// viewDash
@@ -799,6 +887,8 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.openFanout()
 	case "w":
 		return a, a.openWorkflows()
+	case "W":
+		return a, a.openWall()
 	case "x":
 		if r, ok := a.selected(); ok {
 			a.actionTarget = r
@@ -1987,6 +2077,8 @@ func (a *App) View() string {
 		return a.renderWFAbandon(w)
 	case viewFanout:
 		return a.viewFanout(w)
+	case viewWall:
+		return a.renderWall(w)
 	}
 
 	inner := w - 4
@@ -2048,7 +2140,7 @@ func (a *App) View() string {
 	counts := fmt.Sprintf("%d live · %d needs you", live, needs)
 	keybar := "↵ attach · space peek · n new · x kill · t tag · r reopen · q quit"
 	if inner > lipgloss.Width(keybar)+24 {
-		keybar += " · / search · w workflows · N fan-out"
+		keybar += " · / search · w workflows · N fan-out · W wall"
 	}
 	return frame(w, "LOOM", counts, body, keybar)
 }

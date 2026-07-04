@@ -3367,3 +3367,483 @@ func TestFanoutEnterFromSeedFocusLaunches(t *testing.T) {
 		t.Fatal("view must stay on viewFanout until fanResultMsg lands")
 	}
 }
+
+// --- Wall (`W`) — spec §3 -------------------------------------------------
+
+// wallFixtureSnap builds three live rows with distinct CreatedAt values
+// (200/100/300) so a naive "input order" assertion would be wrong — the
+// wall's own stable sort (CreatedAt then Name) must reorder them to
+// a(100) < b(200) < c(300) regardless of this slice's own order.
+func wallFixtureSnap() status.Snapshot {
+	return status.Snapshot{Live: []status.Row{
+		{SessionRow: store.SessionRow{Name: "loom-b", ProjectLabel: "tavli", CreatedAt: 200}, Status: status.NeedsYou},
+		{SessionRow: store.SessionRow{Name: "loom-a", ProjectLabel: "parallax", CreatedAt: 100}, Status: status.Running, LastTool: "Edit"},
+		{SessionRow: store.SessionRow{Name: "loom-c", ProjectLabel: "volar", CreatedAt: 300}, Status: status.Idle},
+	}}
+}
+
+func wallContainsSubstring(lines []string, sub string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func wallFixtureApp() *App {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 30
+	a.Update(snapMsg(wallFixtureSnap()))
+	return a
+}
+
+// TestWOpensWallFromDash: `W` opens viewWall (spec §1/§4 — verified unbound,
+// distinct from lowercase `w` workflows).
+func TestWOpensWallFromDash(t *testing.T) {
+	a := wallFixtureApp()
+	a.Update(key("W"))
+	if a.view != viewWall {
+		t.Fatalf("view = %v, want viewWall", a.view)
+	}
+}
+
+// TestWallStableOrderCreatedAtThenNameNotAttentionOrder guards spec §3.1 I4:
+// the wall's order is CreatedAt-then-Name, NOT the dashboard's attention
+// order (NeedsYou/Running/Idle) — and a status flip does NOT reorder it.
+func TestWallStableOrderCreatedAtThenNameNotAttentionOrder(t *testing.T) {
+	a := wallFixtureApp()
+	got := make([]string, len(a.wallOrder))
+	for i, r := range a.wallOrder {
+		got[i] = r.Name
+	}
+	want := []string{"loom-a", "loom-b", "loom-c"} // CreatedAt 100,200,300
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("wallOrder = %v, want %v (CreatedAt-then-Name, not attention order)", got, want)
+	}
+
+	// Flip loom-a's status to NeedsYou (would jump to the front of the
+	// dashboard's attention order) and re-poll: the wall order must NOT
+	// change.
+	snap := wallFixtureSnap()
+	snap.Live[1].Status = status.NeedsYou // loom-a
+	a.Update(snapMsg(snap))
+	got2 := make([]string, len(a.wallOrder))
+	for i, r := range a.wallOrder {
+		got2[i] = r.Name
+	}
+	if !reflect.DeepEqual(got2, want) {
+		t.Fatalf("wallOrder reordered on a status flip: %v, want unchanged %v", got2, want)
+	}
+}
+
+// TestWallSelectionSurvivesInputReshuffle: the wall's own sort makes its
+// order independent of a.snap.Live's own slice order — feeding the SAME
+// sessions back in a different slice order must not move the selection.
+func TestWallSelectionSurvivesInputReshuffle(t *testing.T) {
+	a := wallFixtureApp()
+	a.wallSelected = "loom-b"
+	snap := wallFixtureSnap()
+	snap.Live[0], snap.Live[2] = snap.Live[2], snap.Live[0] // reshuffle input order
+	a.Update(snapMsg(snap))
+	if a.wallSelected != "loom-b" {
+		t.Fatalf("wallSelected = %q, want unchanged \"loom-b\" across an input reshuffle", a.wallSelected)
+	}
+}
+
+// TestWallSelectionNearestNeighborOnDeath guards spec §3.5: when the
+// selected session vanishes, selection moves to its nearest neighbor (here:
+// loom-b at index 1 dies; loom-a at index 0 is the nearest survivor).
+func TestWallSelectionNearestNeighborOnDeath(t *testing.T) {
+	a := wallFixtureApp()
+	a.wallSelected = "loom-b"
+	snap := wallFixtureSnap()
+	snap.Live = []status.Row{snap.Live[1], snap.Live[2]} // drop loom-b (a,c remain)
+	a.Update(snapMsg(snap))
+	if a.wallSelected != "loom-a" {
+		t.Fatalf("wallSelected = %q, want nearest-neighbor \"loom-a\" after loom-b vanished", a.wallSelected)
+	}
+}
+
+// TestWallSelectionClearedWhenAllVanish: no panic, no dangling selection,
+// when the whole live set disappears.
+func TestWallSelectionClearedWhenAllVanish(t *testing.T) {
+	a := wallFixtureApp()
+	a.wallSelected = "loom-b"
+	a.Update(snapMsg(status.Snapshot{}))
+	if a.wallSelected != "" {
+		t.Fatalf("wallSelected = %q, want \"\" once every session has vanished", a.wallSelected)
+	}
+	a.view = viewWall
+	out := a.View() // must not panic
+	if !strings.Contains(out, "no live sessions") {
+		t.Fatalf("empty wall must render the empty-state message:\n%s", out)
+	}
+}
+
+// TestWallColumnWidthsExtraToRightColumn guards spec §3.2 ("M1 corrected"):
+// when the 2-column split is uneven, the extra cell goes to the RIGHT
+// column.
+func TestWallColumnWidthsExtraToRightColumn(t *testing.T) {
+	// inner=42 -> usable (minus 1-col gutter) = 41, odd -> 20/21.
+	colL, colR := wallColumnWidths(42)
+	if colL != 20 || colR != 21 {
+		t.Fatalf("wallColumnWidths(42) = (%d,%d), want (20,21) — extra cell to the RIGHT column", colL, colR)
+	}
+	// even split: no extra either way.
+	colL, colR = wallColumnWidths(43) // usable=42, even
+	if colL != 21 || colR != 21 {
+		t.Fatalf("wallColumnWidths(43) = (%d,%d), want (21,21)", colL, colR)
+	}
+}
+
+// TestWallTailHClampTinyTerminal guards spec §3.2 M2: tailH = clamp(6,1,
+// bodyH-2) never goes below 1 or panics at a tiny terminal height, and
+// perPage never collapses to 0.
+func TestWallTailHClampTinyTerminal(t *testing.T) {
+	a := wallFixtureApp()
+	a.height = 4 // bodyH=2, bodyH-2=0 -> tailH clamps to its floor, 1
+	perPage, tailH := a.wallPageSize()
+	if tailH != 1 {
+		t.Fatalf("tailH = %d, want 1 (clamped) at a tiny terminal", tailH)
+	}
+	if perPage < 2 {
+		t.Fatalf("perPage = %d, want >= 2 even at a tiny terminal", perPage)
+	}
+	a.view = viewWall
+	out := a.View() // must not panic
+	for i, line := range strings.Split(out, "\n") {
+		if lw := lipgloss.Width(line); lw != a.width {
+			t.Fatalf("tiny-terminal wall line %d = %d cells, want %d: %q", i, lw, a.width, line)
+		}
+	}
+}
+
+// TestWallPaginationIndicatorFollowsSelection guards spec §3.2: paging
+// follows the selection (there is no separate "next page" key) — a tiny
+// height forcing perPage=2 with 3 sessions splits into two pages; selecting
+// the last session must show page 2's indicator and hide the first page's
+// labels.
+func TestWallPaginationIndicatorFollowsSelection(t *testing.T) {
+	a := wallFixtureApp()
+	a.height = 5 // bodyH=3 -> tailH clamps to 1, cellH=3, rowsThatFit=1, perPage=2
+	perPage, _ := a.wallPageSize()
+	if perPage != 2 {
+		t.Fatalf("perPage = %d, want 2 for this fixture height", perPage)
+	}
+	a.wallSelected = "loom-c" // index 2 -> page 1 (start=2,end=3)
+	a.view = viewWall
+	out := a.View()
+	if !strings.Contains(out, "3–3 of 3") {
+		t.Fatalf("View() missing the page-2 indicator \"3–3 of 3\":\n%s", out)
+	}
+	if strings.Contains(out, "parallax") || strings.Contains(out, "tavli") {
+		t.Fatalf("page 2 must not render page 1's cells:\n%s", out)
+	}
+	if !strings.Contains(out, "volar") {
+		t.Fatalf("page 2 must render the selected session's cell:\n%s", out)
+	}
+}
+
+// TestWallCursorMovesAcrossPageBoundary: ↓ from the last row of page 1
+// crosses onto page 2, updating both the indicator and the selection.
+func TestWallCursorMovesAcrossPageBoundary(t *testing.T) {
+	a := wallFixtureApp()
+	a.height = 5 // perPage=2, same fixture as above
+	a.wallSelected = "loom-b"
+	a.view = viewWall
+	a.Update(key("j"))
+	if a.wallSelected != "loom-c" {
+		t.Fatalf("wallSelected = %q, want \"loom-c\" after moving down from the last row of page 1", a.wallSelected)
+	}
+	out := a.View()
+	if !strings.Contains(out, "3–3 of 3") {
+		t.Fatalf("View() did not follow the selection onto page 2:\n%s", out)
+	}
+}
+
+// TestWallUpDownClampNoWrap: at either end of wallOrder, further movement in
+// the same direction is a no-op (no wrap — same discipline as the dashboard
+// cursor).
+func TestWallUpDownClampNoWrap(t *testing.T) {
+	a := wallFixtureApp()
+	a.view = viewWall
+	a.wallSelected = "loom-a" // index 0
+	a.Update(key("k"))
+	if a.wallSelected != "loom-a" {
+		t.Fatalf("up from the first row moved selection to %q, want no-op", a.wallSelected)
+	}
+	a.wallSelected = "loom-c" // last index
+	a.Update(key("j"))
+	if a.wallSelected != "loom-c" {
+		t.Fatalf("down from the last row moved selection to %q, want no-op", a.wallSelected)
+	}
+}
+
+// TestWallLayoutExactWidthCJK guards spec §5: "layout exact-width at
+// 100/46/odd (CJK content)" — a CJK project label and CJK captured pane
+// content must not overshoot the frame at any of these widths.
+func TestWallLayoutExactWidthCJK(t *testing.T) {
+	a := wallFixtureApp()
+	a.snap.Live[0].ProjectLabel = "日本語プロジェクト"
+	a.snap.Live[0].Title = "続けて作業する"
+	a.rebuildRows()
+	a.applyWallOrder()
+	a.wallCaptures = map[string]wallCapture{
+		"loom-b": {lines: []string{"漢字とひらがなを含む出力行です", "second line", strings.Repeat("字", 60)}},
+	}
+	a.view = viewWall
+	for _, w := range []int{100, 46, 47} {
+		a.width = w
+		out := a.View()
+		for i, line := range strings.Split(out, "\n") {
+			if lw := lipgloss.Width(line); lw != w {
+				t.Fatalf("width %d line %d = %d cells (want %d): %q", w, i, lw, w, line)
+			}
+		}
+	}
+}
+
+// TestWallCaptureErrorCellRendersUnavailableAndGatesEnter guards spec §3.4:
+// a known capture error keeps the cell, renders "(pane unavailable)", and
+// gates ↵ off for that specific session.
+func TestWallCaptureErrorCellRendersUnavailableAndGatesEnter(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomwallerr%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	a := NewApp(Deps{Tmux: tm})
+	a.width, a.height = 100, 30
+	a.Update(snapMsg(wallFixtureSnap()))
+	a.wallSelected = "loom-a"
+	a.wallCaptures = map[string]wallCapture{"loom-a": {err: true}}
+	a.view = viewWall
+
+	out := a.View()
+	if !strings.Contains(out, "(pane unavailable)") {
+		t.Fatalf("View() missing \"(pane unavailable)\":\n%s", out)
+	}
+	_, cmd := a.Update(key("enter"))
+	if cmd != nil {
+		t.Fatal("enter on a capture-error cell must be gated off (nil command)")
+	}
+}
+
+// TestWallRealCaptureLiveAndErrorCells drives wallCaptureCmd against a real
+// throwaway tmux session (a plain shell pane — no fake-claude launcher
+// needed, CapturePane doesn't care what's running) alongside a row whose
+// name has no backing tmux session at all: one page's capture must produce
+// one successful, content-bearing result and one error result. Also proves
+// ↵ attaches (returns a non-nil command, per the TestWFAttachOnLiveRunReturnsCommand
+// precedent — never actually invoked, so no real attach happens in-test) on
+// the live cell once its capture has landed clean.
+func TestWallRealCaptureLiveAndErrorCells(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomwallcap%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := tm.NewSession("loom-wall-live", dir, "sh -c 'printf hello-wall-test; sleep 30'", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewApp(Deps{Tmux: tm})
+	a.width, a.height = 100, 30
+	a.Update(snapMsg(status.Snapshot{Live: []status.Row{
+		{SessionRow: store.SessionRow{Name: "loom-wall-live", ProjectLabel: "live", CreatedAt: 1}, Status: status.Running},
+		{SessionRow: store.SessionRow{Name: "loom-wall-dead", ProjectLabel: "dead", CreatedAt: 2}, Status: status.Running},
+	}}))
+	a.wallSelected = "loom-wall-live"
+	a.view = viewWall
+
+	// The shell command needs a moment to actually run before its output
+	// shows up in a capture — same "poll until it lands" discipline as
+	// internal/tmux's own TestKillSessionMarksDeadWithExitCode.
+	deadline := time.Now().Add(5 * time.Second)
+	var live wallCapture
+	for {
+		msg, ok := a.wallCaptureCmd()().(wallMsg)
+		if !ok {
+			t.Fatalf("wallCaptureCmd's result = %T, want wallMsg", msg)
+		}
+		a.Update(msg)
+		var capOK bool
+		live, capOK = a.wallCaptures["loom-wall-live"]
+		if capOK && !live.err && wallContainsSubstring(live.lines, "hello-wall-test") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("captured lines never showed \"hello-wall-test\": %+v", live)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	dead, ok := a.wallCaptures["loom-wall-dead"]
+	if !ok || !dead.err {
+		t.Fatalf("loom-wall-dead capture = %+v, want err=true (no backing tmux session)", dead)
+	}
+
+	out := a.View()
+	if !strings.Contains(out, "hello-wall-test") {
+		t.Fatalf("View() missing the live cell's captured content:\n%s", out)
+	}
+
+	_, attachCmd := a.Update(key("enter"))
+	if attachCmd == nil {
+		t.Fatal("enter on the clean-captured live cell must return a command")
+	}
+}
+
+// TestWallStaleCaptureGenerationDiscarded guards spec §3.3: a wallMsg
+// carrying an older generation than the CURRENT a.wallSeq is discarded in
+// full, even though its session name is still alive.
+func TestWallStaleCaptureGenerationDiscarded(t *testing.T) {
+	a := wallFixtureApp()
+	a.view = viewWall
+	a.wallSeq = 5 // a newer capture has "since been fired"
+	a.Update(wallMsg{gen: 4, results: []wallCaptureResult{{name: "loom-a", lines: []string{"stale"}}}})
+	if _, ok := a.wallCaptures["loom-a"]; ok {
+		t.Fatal("a stale-generation wallMsg must not populate wallCaptures")
+	}
+	a.Update(wallMsg{gen: 5, results: []wallCaptureResult{{name: "loom-a", lines: []string{"fresh"}}}})
+	got, ok := a.wallCaptures["loom-a"]
+	if !ok || len(got.lines) == 0 || got.lines[0] != "fresh" {
+		t.Fatalf("a fresh-generation wallMsg was not applied: %+v", got)
+	}
+}
+
+// TestWallVanishedEntryDroppedFromCapture guards spec §3.3/§3.4: even within
+// a fresh-generation wallMsg, a result whose name is no longer in
+// a.wallOrder (the session ended between cmd-fire and landing) is dropped.
+func TestWallVanishedEntryDroppedFromCapture(t *testing.T) {
+	a := wallFixtureApp()
+	a.view = viewWall
+	a.Update(wallMsg{gen: a.wallSeq, results: []wallCaptureResult{
+		{name: "loom-a", lines: []string{"ok"}},
+		{name: "loom-ghost", lines: []string{"should be dropped"}},
+	}})
+	if _, ok := a.wallCaptures["loom-a"]; !ok {
+		t.Fatal("a live session's capture result must be applied")
+	}
+	if _, ok := a.wallCaptures["loom-ghost"]; ok {
+		t.Fatal("a vanished session's capture result must be dropped")
+	}
+}
+
+// TestWallTickFiresOneTickAfterPlusCapture guards the ONE-tickAfter
+// discipline (the peekCmd/searchStatusCmd batching precedent, spec §5's
+// binding "ONE-tickAfter sweep"): a tickMsg while viewWall is open returns a
+// batch of exactly tickAfter + wallCaptureCmd (pollCmd nil-filtered, Engine
+// is nil here) — never a second, independent tick chain.
+func TestWallTickFiresOneTickAfterPlusCapture(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomwalltick%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	a := NewApp(Deps{Tmux: tm}) // Engine nil -> pollCmd() nil, filtered out of the batch
+	a.width, a.height = 100, 30
+	a.Update(snapMsg(wallFixtureSnap()))
+	a.wallSelected = "loom-a"
+	a.view = viewWall
+
+	_, cmd := a.Update(tickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatal("tick in viewWall returned no command")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("tick in viewWall cmd = %T, want tea.BatchMsg", cmd())
+	}
+	if len(batch) != 2 {
+		t.Fatalf("batch len = %d, want 2 (tickAfter + wallCaptureCmd; pollCmd nil-filtered)", len(batch))
+	}
+}
+
+// TestWallKeybarWEntryElisionTier mirrors TestFanoutKeybarNEntryElisionTier:
+// `W wall` only appears once the frame is wide enough.
+func TestWallKeybarWEntryElisionTier(t *testing.T) {
+	a := fixtureApp()
+	a.width, a.height = 40, 24
+	if strings.Contains(a.View(), "W wall") {
+		t.Fatal("narrow dashboard must elide the W wall keybar entry")
+	}
+	a.width = 140
+	if !strings.Contains(a.View(), "W wall") {
+		t.Fatal("wide dashboard must show the W wall keybar entry")
+	}
+}
+
+// TestWallViewFrameInvariantEmptyAndPopulated guards the exact-width
+// invariant (TestViewFrameInvariantAllViews/TestViewNarrowNoPanic precedent)
+// for both the empty-wall and populated-wall states, across widths.
+func TestWallViewFrameInvariantEmptyAndPopulated(t *testing.T) {
+	for _, w := range []int{40, 80, 100} {
+		a := NewApp(Deps{})
+		a.width, a.height = w, 24
+		a.view = viewWall
+		for i, line := range strings.Split(a.View(), "\n") {
+			if lw := lipgloss.Width(line); lw != w {
+				t.Fatalf("empty wall, width %d line %d = %d cells (want %d): %q", w, i, lw, w, line)
+			}
+		}
+
+		b := wallFixtureApp()
+		b.width, b.height = w, 24
+		b.view = viewWall
+		for i, line := range strings.Split(b.View(), "\n") {
+			if lw := lipgloss.Width(line); lw != w {
+				t.Fatalf("populated wall, width %d line %d = %d cells (want %d): %q", w, i, lw, w, line)
+			}
+		}
+	}
+}
+
+// TestWallEscReturnsToDash / TestWallQCtrlCQuits round out the basic
+// navigation contract (spec §3.5).
+func TestWallEscReturnsToDash(t *testing.T) {
+	a := wallFixtureApp()
+	a.view = viewWall
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewDash {
+		t.Fatalf("view = %v, want viewDash after esc", a.view)
+	}
+}
+
+func TestWallQCtrlCQuits(t *testing.T) {
+	a := wallFixtureApp()
+	a.view = viewWall
+	_, cmd := a.Update(key("q"))
+	if cmd == nil {
+		t.Fatal("q in viewWall did not return a command")
+	}
+	_, cmd2 := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd2 == nil {
+		t.Fatal("ctrl+c in viewWall did not return a command")
+	}
+}
+
+// TestWallZeroDepsNoPanic: Deps{} — opening the wall, ticking, moving the
+// selection, pressing enter, and closing it must all be no-ops that never
+// panic (Deps nil-safety contract, same as every other view).
+func TestWallZeroDepsNoPanic(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 30
+	a.Update(key("W"))
+	if a.view != viewWall {
+		t.Fatal("W did not open the wall with Deps{}")
+	}
+	a.Update(tickMsg(time.Now()))
+	a.Update(key("j"))
+	a.Update(key("k"))
+	_, cmd := a.Update(key("enter"))
+	if cmd != nil {
+		t.Fatal("enter with Deps{} (nil Tmux, no sessions) must be a no-op")
+	}
+	_ = a.View()
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewDash {
+		t.Fatal("esc did not return to the dashboard")
+	}
+}
