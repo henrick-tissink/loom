@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -2713,5 +2714,432 @@ func TestPanelQueryCmdNilWhenStoreOrProjectDirEmpty(t *testing.T) {
 	}
 	if cmd := a2.panelQueryCmd("seed", "some-dir"); cmd == nil {
 		t.Fatal("panelQueryCmd with a Store and projectDir must be non-nil")
+	}
+}
+
+// --- Fan-out (`N`) — spec §2, plan Task 1 ----------------------------------
+
+func fanoutProjects() []registry.Project {
+	return []registry.Project{{Label: "alpha", Path: "/tmp/alpha"}, {Label: "beta", Path: "/tmp/beta"}}
+}
+
+func TestNKeyOpensFanoutAndEscCloses(t *testing.T) {
+	a := fixtureApp()
+	a.Update(key("N"))
+	if a.view != viewFanout {
+		t.Fatalf("view = %v, want viewFanout", a.view)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewDash {
+		t.Fatalf("view = %v, want dash after esc", a.view)
+	}
+}
+
+// TestFanoutFocusTabCyclesFourZonesWrapping guards spec §2.1: tab/shift-tab
+// cycle the 4 focus zones (0 checklist .. 3 seed), wrapping both directions.
+func TestFanoutFocusTabCyclesFourZonesWrapping(t *testing.T) {
+	a := NewApp(Deps{Projects: fanoutProjects()})
+	a.width, a.height = 100, 30
+	a.Update(key("N"))
+	if a.fanForm.focus != 0 {
+		t.Fatalf("initial focus = %d, want 0 (checklist)", a.fanForm.focus)
+	}
+	for want := 1; want <= 3; want++ {
+		a.Update(tea.KeyMsg{Type: tea.KeyTab})
+		if a.fanForm.focus != want {
+			t.Fatalf("after %d tabs focus = %d, want %d", want, a.fanForm.focus, want)
+		}
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyTab}) // wraps 3 -> 0
+	if a.fanForm.focus != 0 {
+		t.Fatalf("tab from seed did not wrap to 0: focus = %d", a.fanForm.focus)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyShiftTab}) // wraps 0 -> 3
+	if a.fanForm.focus != 3 {
+		t.Fatalf("shift-tab from checklist did not wrap to 3: focus = %d", a.fanForm.focus)
+	}
+}
+
+// TestFanoutChecklistDownUpScrollsAndSpaceToggles guards spec §2.1: when the
+// checklist is focused, ↓/↑ move its own cursor (no wrap) and space toggles
+// the hovered project.
+func TestFanoutChecklistDownUpScrollsAndSpaceToggles(t *testing.T) {
+	a := NewApp(Deps{Projects: fanoutProjects()})
+	a.width, a.height = 100, 30
+	a.Update(key("N"))
+
+	a.Update(tea.KeyMsg{Type: tea.KeyUp}) // no-op: already at top, no wrap
+	if a.fanForm.listCur != 0 {
+		t.Fatalf("listCur = %d, want 0 (no wrap upward)", a.fanForm.listCur)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if a.fanForm.listCur != 1 {
+		t.Fatalf("listCur = %d, want 1 after one down", a.fanForm.listCur)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // no-op: already at bottom (2 projects), no wrap
+	if a.fanForm.listCur != 1 {
+		t.Fatalf("listCur = %d, want 1 (no wrap downward past last project)", a.fanForm.listCur)
+	}
+	a.Update(key(" ")) // toggles beta (listCur==1)
+	if !a.fanForm.checked[1] {
+		t.Fatal("space did not toggle the hovered (index 1) project")
+	}
+	if a.fanForm.checked[0] {
+		t.Fatal("space toggled the wrong project")
+	}
+	a.Update(key(" ")) // toggling again un-checks it
+	if a.fanForm.checked[1] {
+		t.Fatal("second space did not un-toggle")
+	}
+}
+
+// TestFanoutDownUpNoopOnModelModeFields guards spec §2.1: "on fields 1-3,
+// ↓/↑ do nothing (tab is field-nav — one dialect per zone, stated)".
+func TestFanoutDownUpNoopOnModelModeFields(t *testing.T) {
+	a := NewApp(Deps{Projects: fanoutProjects()})
+	a.width, a.height = 100, 30
+	a.Update(key("N"))
+	a.Update(tea.KeyMsg{Type: tea.KeyTab}) // -> focus 1 (model)
+	if a.fanForm.focus != 1 {
+		t.Fatalf("focus = %d, want 1", a.fanForm.focus)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if a.fanForm.focus != 1 || a.fanForm.modelIdx != 0 {
+		t.Fatalf("down/up mutated model field: focus=%d modelIdx=%d", a.fanForm.focus, a.fanForm.modelIdx)
+	}
+}
+
+// TestFanoutSpaceInSeedTypesASpace guards spec §2.1: "space on seed TYPES a
+// space (launcher precedent, tested)".
+func TestFanoutSpaceInSeedTypesASpace(t *testing.T) {
+	a := NewApp(Deps{Projects: fanoutProjects()})
+	a.width, a.height = 100, 30
+	a.Update(key("N"))
+	for i := 0; i < 3; i++ {
+		a.Update(tea.KeyMsg{Type: tea.KeyTab}) // -> focus 3 (seed)
+	}
+	if a.fanForm.focus != 3 {
+		t.Fatalf("focus = %d, want 3 (seed)", a.fanForm.focus)
+	}
+	a.Update(key("a"))
+	a.Update(key(" "))
+	a.Update(key("b"))
+	if got := a.fanForm.seed.Value(); got != "a b" {
+		t.Fatalf("seed value = %q, want %q", got, "a b")
+	}
+}
+
+// TestFanoutEnterEmptySelectionNoop guards spec §2.1: "↵ ... empty selection
+// -> no-op with inline hint".
+func TestFanoutEnterEmptySelectionNoop(t *testing.T) {
+	a := NewApp(Deps{Projects: fanoutProjects(), Launcher: &session.Launcher{}})
+	a.width, a.height = 100, 30
+	a.Update(key("N"))
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("enter with empty selection must not return a command")
+	}
+	if a.view != viewFanout {
+		t.Fatalf("view = %v, want to stay on viewFanout", a.view)
+	}
+	if a.fanForm.hint == "" {
+		t.Fatal("empty-selection enter must set an inline form hint")
+	}
+}
+
+// fanoutTestHarness spins up a throwaway tmux server + store + Launcher —
+// same shape as session.testLauncher / TestLaunchAndResumeCmdsEmitPollNowNotTick
+// above — for tests that need a REAL Launch+SetTags round trip ("throwaway
+// tmux + fake claude", spec §5).
+func fanoutTestHarness(t *testing.T) (*session.Launcher, *store.Store, *tmux.Client) {
+	t.Helper()
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomfanout%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	l := &session.Launcher{Tmux: tm, Store: st, ReadyTimeout: 200 * time.Millisecond, PollEvery: 50 * time.Millisecond}
+	return l, st, tm
+}
+
+// TestFanoutLaunchTagsEverySelectedProject is the binding groupID test (spec
+// §2.2/§5): every launched session gets the SAME "fan:"+groupID tag via the
+// two-step Launch-then-SetTags workflow.
+func TestFanoutLaunchTagsEverySelectedProject(t *testing.T) {
+	l, st, _ := fanoutTestHarness(t)
+	dirA, dirB := t.TempDir(), t.TempDir()
+	projects := []registry.Project{{Label: "alpha", Path: dirA}, {Label: "beta", Path: dirB}}
+
+	a := NewApp(Deps{Launcher: l, Projects: projects})
+	a.width, a.height = 80, 24
+	a.Update(key("N"))
+	a.Update(key(" "))                      // toggle alpha (listCur 0)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown}) // -> beta
+	a.Update(key(" "))                      // toggle beta
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter with 2 selected projects must return a command")
+	}
+	if !a.fanInFlight {
+		t.Fatal("fanInFlight must be set the moment the launch command is fired")
+	}
+	if a.view != viewFanout {
+		t.Fatal("view must stay on viewFanout until fanResultMsg lands (spec §2.3 I2)")
+	}
+
+	msg := cmd()
+	res, ok := msg.(fanResultMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want fanResultMsg", msg)
+	}
+	if len(res.results) != 2 {
+		t.Fatalf("results = %d, want 2", len(res.results))
+	}
+	for _, r := range res.results {
+		if r.Err != nil {
+			t.Fatalf("project %s: unexpected launch error: %v", r.Project, r.Err)
+		}
+		if r.Untagged {
+			t.Fatalf("project %s: unexpectedly untagged", r.Project)
+		}
+		row, ok, err := st.Get(r.Name)
+		if err != nil || !ok {
+			t.Fatalf("store row for %s missing: ok=%v err=%v", r.Name, ok, err)
+		}
+		if row.Tags != "fan:"+res.group {
+			t.Fatalf("project %s Tags = %q, want fan:%s", r.Project, row.Tags, res.group)
+		}
+	}
+
+	// Delivering the result msg: view transitions to dash, fanHint carries
+	// the summary, in-flight guard clears.
+	a.Update(res)
+	if a.view != viewDash {
+		t.Fatalf("view after fanResultMsg = %v, want viewDash", a.view)
+	}
+	if a.fanInFlight {
+		t.Fatal("fanInFlight must clear once fanResultMsg lands")
+	}
+	if !strings.Contains(a.fanHint, "2/2 launched") {
+		t.Fatalf("fanHint = %q, want it to report 2/2 launched", a.fanHint)
+	}
+	if !strings.Contains(a.fanHint, res.group) {
+		t.Fatalf("fanHint = %q, want it to contain the group id %s", a.fanHint, res.group)
+	}
+}
+
+// TestFanoutPartialFailureCountedFailedOthersSucceed guards spec §5: "partial
+// failure (invalid cwd project -> counted failed, others succeed)".
+//
+// Disclosed deviation from the letter of the spec's test description: an
+// "invalid cwd" is NOT a reproducible real Launch failure in this
+// environment — verified empirically (see the shell probes run while
+// building this test): tmux 3.7b's `new-session -c <dir>` exits 0 and
+// silently falls back to another cwd for a missing directory, an
+// unreadable directory, a non-directory path, and even a >4000-byte path;
+// only a duplicate SESSION NAME makes tmux fail new-session, and session
+// names are internal random UUIDs (session.NewSessionID) the ui package
+// cannot predict to engineer a collision without modifying internal/session
+// or internal/tmux (out of scope: zero non-ui package changes). So this
+// exercises the REAL fanLaunchCmdWith sequential/counting/continuation
+// logic — the two-step Launch-then-SetTags workflow, real Store writes for
+// the succeeding project — with only the single Launch call for the "bad"
+// project stubbed to return an error, via the fanLaunchFn seam documented
+// on fanLaunchCmd. This is the same category of disclosed unit-level
+// fallback the spec itself explicitly allows for the sibling untagged-
+// accounting case.
+func TestFanoutPartialFailureCountedFailedOthersSucceed(t *testing.T) {
+	l, st, _ := fanoutTestHarness(t)
+	goodDir := t.TempDir()
+	projects := []registry.Project{{Label: "good", Path: goodDir}, {Label: "bad", Path: t.TempDir()}}
+
+	a := NewApp(Deps{Launcher: l, Projects: projects})
+	a.width, a.height = 80, 24
+
+	badCwdErr := errors.New("bad cwd")
+	stub := func(r session.Recipe, w, h int, now time.Time) (string, error) {
+		if r.ProjectLabel == "bad" {
+			return "", badCwdErr
+		}
+		return l.Launch(r, w, h, now) // "good" goes through the REAL launcher
+	}
+	cmd := a.fanLaunchCmdWith(stub, projects, a.fanForm.recipeFor, a.width, a.height)
+	if cmd == nil {
+		t.Fatal("expected a launch command")
+	}
+	res := cmd().(fanResultMsg)
+	if len(res.results) != 2 {
+		t.Fatalf("results = %d, want 2", len(res.results))
+	}
+	var goodErr, badErr error
+	var name string
+	for _, r := range res.results {
+		switch r.Project {
+		case "good":
+			goodErr = r.Err
+			name = r.Name
+		case "bad":
+			badErr = r.Err
+		}
+	}
+	if goodErr != nil {
+		t.Fatalf("good project unexpectedly failed: %v", goodErr)
+	}
+	if badErr == nil {
+		t.Fatal("bad project must be counted as failed, not silently succeed")
+	}
+	if !errors.Is(badErr, badCwdErr) {
+		t.Fatalf("badErr = %v, want the stubbed error surfaced verbatim", badErr)
+	}
+	row, ok, err := st.Get(name)
+	if err != nil || !ok || row.Tags != "fan:"+res.group {
+		t.Fatalf("good project (the ONE that continued past the failure) was not tagged: row=%+v ok=%v err=%v", row, ok, err)
+	}
+
+	hint := formatFanHint(res.group, res.results)
+	if !strings.Contains(hint, "1/2 launched") {
+		t.Fatalf("hint = %q, want 1/2 launched", hint)
+	}
+	if !strings.Contains(hint, "failed: bad (bad cwd)") {
+		t.Fatalf("hint = %q, want a failed:bad clause", hint)
+	}
+}
+
+// TestFanoutUntaggedAccountingResultAssembly covers spec §5's "inject a
+// SetTags failure if cheaply possible — else unit-test the result-assembly
+// path, disclose": a live SetTags failure is not cheaply injectable against a
+// real store (any name Launch just created will always accept a tag write),
+// so this unit-tests formatFanHint's assembly of a launched-but-untagged
+// result directly, per the spec's own disclosed fallback.
+func TestFanoutUntaggedAccountingResultAssembly(t *testing.T) {
+	results := []fanResult{
+		{Project: "tavli", Name: "loom-1", Err: errors.New("bad cwd")},
+		{Project: "volar", Name: "loom-2", Untagged: true},
+		{Project: "parallax", Name: "loom-3"},
+	}
+	hint := formatFanHint("a1b2c3", results)
+	want := "fan #a1b2c3: 2/3 launched · failed: tavli (bad cwd) · volar launched untagged"
+	if hint != want {
+		t.Fatalf("hint = %q, want %q", hint, want)
+	}
+}
+
+// TestFanoutHintSurvivesSnapMsgClearedOnDashKeypress is the binding test for
+// spec §2.3/C1: fanHint is a DEDICATED field that survives a snapMsg (which
+// wipes errStr) and is cleared only by the next dashboard keypress.
+func TestFanoutHintSurvivesSnapMsgClearedOnDashKeypress(t *testing.T) {
+	a := fixtureApp()
+	a.fanHint = "fan #abcdef: 1/1 launched"
+	a.Update(snapMsg(a.snap)) // a poll landing must NOT clear fanHint
+	if a.fanHint == "" {
+		t.Fatal("fanHint was wiped by a snapMsg — must survive polls (spec §2.3 C1)")
+	}
+	a.Update(key("j")) // any dashboard keypress clears it
+	if a.fanHint != "" {
+		t.Fatalf("fanHint = %q, want cleared after a dashboard keypress", a.fanHint)
+	}
+}
+
+// TestFanoutDoubleEnterInFlightGuardNoops guards spec §2.3 I2: a second ↵
+// while a launch group is still in flight is a no-op.
+func TestFanoutDoubleEnterInFlightGuardNoops(t *testing.T) {
+	l, _, _ := fanoutTestHarness(t)
+	projects := []registry.Project{{Label: "alpha", Path: t.TempDir()}}
+	a := NewApp(Deps{Launcher: l, Projects: projects})
+	a.width, a.height = 80, 24
+	a.Update(key("N"))
+	a.Update(key(" "))
+	_, cmd1 := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd1 == nil {
+		t.Fatal("first enter must return a command")
+	}
+	_, cmd2 := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd2 != nil {
+		t.Fatal("second enter while in flight must no-op (no command)")
+	}
+	if a.view != viewFanout {
+		t.Fatal("view must remain viewFanout across the double-enter no-op")
+	}
+}
+
+// TestFanoutResultMsgFiresPollCmd guards spec §2.3: "the result msg also
+// fires pollCmd (M6) so the swarm appears immediately."
+func TestFanoutResultMsgFiresPollCmd(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomfanoutpoll%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	a := NewApp(Deps{Engine: status.NewEngine(tm, st, t.TempDir())})
+	a.width, a.height = 80, 24
+	_, cmd := a.Update(fanResultMsg{group: "abcdef", results: []fanResult{{Project: "p", Name: "loom-x"}}})
+	if a.view != viewDash {
+		t.Fatalf("view = %v, want viewDash", a.view)
+	}
+	if cmd == nil {
+		t.Fatal("fanResultMsg must fire pollCmd (a non-nil command)")
+	}
+	switch cmd().(type) {
+	case snapMsg, errMsg:
+		// pollCmd fired and ran Engine.Poll — either outcome proves it fired.
+	default:
+		t.Fatal("fanResultMsg's command did not invoke Engine.Poll")
+	}
+}
+
+// TestFanoutMarkerRenderedInActivityCell guards spec §2.4: dashboard rows
+// whose Tags contain "fan:" render a dim "· fan" marker in the activity
+// cell (the seed-failed precedent).
+func TestFanoutMarkerRenderedInActivityCell(t *testing.T) {
+	a := fixtureApp()
+	a.snap.Live[1].Tags = "fan:a1b2c3"
+	a.rebuildRows()
+	out := a.View()
+	if !strings.Contains(out, "· fan") {
+		t.Fatalf("View() missing the · fan marker:\n%s", out)
+	}
+}
+
+// TestFanoutKeybarNEntryElisionTier guards the plan's "keybar N entry in the
+// elision tier": N fan-out only appears once the frame is wide enough,
+// alongside / search and w workflows.
+func TestFanoutKeybarNEntryElisionTier(t *testing.T) {
+	a := fixtureApp()
+	a.width, a.height = 40, 24
+	if strings.Contains(a.View(), "N fan-out") {
+		t.Fatal("narrow dashboard must elide the N fan-out keybar entry")
+	}
+	a.width = 140
+	if !strings.Contains(a.View(), "N fan-out") {
+		t.Fatal("wide dashboard must show the N fan-out keybar entry")
+	}
+}
+
+// TestFanoutViewFrameInvariant guards the frame exact-width invariant for
+// the new view (same discipline as TestViewFrameInvariantAllViews /
+// TestViewNarrowNoPanic, added separately since existing tests stay
+// unmodified).
+func TestFanoutViewFrameInvariant(t *testing.T) {
+	a := NewApp(Deps{Projects: fanoutProjects()})
+	for _, w := range []int{40, 80, 100} {
+		a.width, a.height = w, 24
+		a.Update(key("N"))
+		for i, line := range strings.Split(a.View(), "\n") {
+			if lw := lipgloss.Width(line); lw != a.width {
+				t.Fatalf("width %d line %d: %d cells (want %d): %q", w, i, lw, a.width, line)
+			}
+		}
 	}
 }

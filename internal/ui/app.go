@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,7 @@ const (
 	viewWorkflows
 	viewWFConfirm
 	viewWFConfirmAbandon
+	viewFanout
 )
 
 type Deps struct {
@@ -220,6 +223,24 @@ type App struct {
 	// launch/CAS.
 	wfInFlight      map[int64]bool
 	wfStartInFlight map[string]bool
+
+	// --- Fan-out (`N`) — spec §2 ------------------------------------------
+
+	// fanForm is fan-out's own form (fanout.go), reset fresh every time
+	// openFanout runs (same "fresh state on open" shape as the launcher).
+	fanForm fanoutForm
+
+	// fanInFlight is the double-↵ guard (spec §2.3 I2): set the moment a
+	// launch group is fired, cleared only when its fanResultMsg lands — a
+	// second ↵ while it's still true is a no-op.
+	fanInFlight bool
+
+	// fanHint is the dashboard's dedicated persistent summary field (spec
+	// §2.3, C1): unlike errStr — which every snapMsg wipes (see the snapMsg
+	// case in Update) — fanHint survives polling and is only cleared by the
+	// next actual keypress on the dashboard (the wfHint discipline,
+	// generalized to "any key" since fanHint isn't tied to one action).
+	fanHint string
 }
 
 // wfRunRow is one RUNS-section entry: a store.RunRow plus the display/action
@@ -379,12 +400,33 @@ type (
 		runName string
 		err     error
 	}
+
+	// fanResult is one project's outcome within a fan-out launch group (spec
+	// §2.2). Err non-nil means Launch itself failed (Name may be empty);
+	// Err nil and Untagged true means the session launched fine but its
+	// SetTags("fan:"+group) call failed — spec §2.2's binding rule: "a
+	// SetTags failure is COUNTED in the result as launched, untagged" —
+	// NEVER silently dropped.
+	fanResult struct {
+		Project  string
+		Name     string
+		Err      error
+		Untagged bool
+	}
+
+	// fanResultMsg is the result of a fan-out launch group (spec §2.2/§2.3):
+	// group is the minted 6-hex groupID, results is one entry per selected
+	// project, in selection order.
+	fanResultMsg struct {
+		group   string
+		results []fanResult
+	}
 )
 
 func NewApp(deps Deps) *App {
 	ti := textinput.New()
 	ti.Placeholder = "tags (comma separated)"
-	return &App{deps: deps, form: newLauncherForm(deps.Projects), tag: ti}
+	return &App{deps: deps, form: newLauncherForm(deps.Projects), fanForm: newFanoutForm(deps.Projects), tag: ti}
 }
 
 func (a *App) Init() tea.Cmd { return tea.Batch(a.pollCmd(), tickAfter()) }
@@ -631,6 +673,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.errStr = m.err.Error()
 		a.view = viewWorkflows
 		return a, a.wfLoadCmd()
+	case fanResultMsg:
+		// spec §2.3: the view STAYS on the fan-out form until this msg
+		// lands, then transitions to viewDash with the summary in fanHint
+		// (a dedicated persistent field, not errStr — see the type's doc
+		// comment). The in-flight guard is cleared unconditionally: this is
+		// the only msg that ever sets it, so there's nothing to gate.
+		a.fanInFlight = false
+		a.view = viewDash
+		a.fanHint = formatFanHint(m.group, m.results)
+		// spec §2.3: "the result msg also fires pollCmd" — so the newly
+		// launched (and now-tagged) sessions appear on the dashboard
+		// immediately, not after the next 1.5s tick.
+		return a, a.pollCmd()
 	case tea.KeyMsg:
 		return a.updateKeys(m)
 	}
@@ -715,9 +770,18 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case viewWFConfirmAbandon:
 		return a.updateWFAbandonKeys(msg)
+
+	case viewFanout:
+		return a.updateFanoutKeys(msg)
 	}
 
 	// viewDash
+	// fanHint is cleared on the next dashboard keypress, whichever key it
+	// is (spec §2.3: "cleared on next dashboard keypress, NOT on polls") —
+	// polls never reach here (they arrive as snapMsg/tickMsg, handled
+	// entirely in Update, above), so this only ever fires on a real
+	// keystroke while viewDash is showing.
+	a.fanHint = ""
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return a, tea.Quit
@@ -731,6 +795,8 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "n":
 		return a, a.openLauncher()
+	case "N":
+		return a, a.openFanout()
 	case "w":
 		return a, a.openWorkflows()
 	case "x":
@@ -1666,6 +1732,159 @@ func (a *App) wfStartCmd(def workflow.Definition, w, h int) tea.Cmd {
 	}
 }
 
+// --- Fan-out (`N`) -------------------------------------------------------
+
+// openFanout resets the fan-out form to a fresh state (spec §2.1: empty
+// checklist, model/mode/seed defaults, focus on the checklist) — same
+// "fresh state on open" shape as openLauncher/openSearch/openWorkflows. No
+// RELATED panel query here (spec §2.5: absent in fan-out mode) — fanInFlight
+// is also reset defensively, though the only path that sets it (fanLaunch)
+// always gets cleared again by fanResultMsg before the view could return
+// here.
+func (a *App) openFanout() tea.Cmd {
+	a.fanForm = newFanoutForm(a.deps.Projects)
+	a.fanForm.setFocus(0)
+	a.fanInFlight = false
+	a.view = viewFanout
+	return nil
+}
+
+// updateFanoutKeys handles keys while viewFanout is open (spec §2.1,
+// VERBATIM): esc always returns to the dashboard; ↵ launches from ANY
+// focus (fanLaunch handles the empty-selection no-op and the in-flight
+// guard); every other key (tab/shift-tab, ↓/↑, ←/→, space, seed typing) is
+// the form's own concern — delegated to fanoutForm.update unchanged, since
+// fan-out (unlike the launcher) has no RELATED panel to additionally
+// dispatch against.
+func (a *App) updateFanoutKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return a, tea.Quit
+	}
+	switch msg.Type {
+	case tea.KeyEsc:
+		a.view = viewDash
+		return a, nil
+	case tea.KeyEnter:
+		return a.fanLaunch()
+	}
+	cmd := a.fanForm.update(msg)
+	return a, cmd
+}
+
+// fanLaunch handles ↵ (spec §2.1/§2.2/§2.3 I2): a double-↵ while a launch
+// group is already in flight is a no-op; an empty selection is a no-op with
+// an inline hint on the still-open form; otherwise it mints the group and
+// fires the sequential launch+tag command, staying on viewFanout until
+// fanResultMsg lands (Update's fanResultMsg case does the view transition).
+func (a *App) fanLaunch() (tea.Model, tea.Cmd) {
+	if a.fanInFlight {
+		return a, nil
+	}
+	projects := a.fanForm.selectedProjects()
+	if len(projects) == 0 {
+		a.fanForm.hint = "select at least one project"
+		return a, nil
+	}
+	if a.deps.Launcher == nil {
+		return a, nil
+	}
+	a.fanInFlight = true
+	recipeFor := a.fanForm.recipeFor
+	w, h := a.width, a.height
+	return a, a.fanLaunchCmd(projects, recipeFor, w, h)
+}
+
+// newGroupID mints the 6-hex fan-out group id (spec §2.2).
+func newGroupID() string {
+	b := make([]byte, 3)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// fanLaunchFn abstracts the launch step (spec §2.2's Launcher.Launch call)
+// so fanLaunchCmdWith's sequential/partial-failure/continuation logic can be
+// exercised with a controlled stub in tests — disclosed reason: reliably
+// forcing session.Launcher.Launch itself to fail for exactly one of several
+// selected projects (e.g. an "invalid cwd" project) is NOT reproducible live
+// here (verified empirically: tmux 3.7b's `new-session -c <bad dir>` always
+// exits 0 and falls back to another cwd rather than erroring — see
+// TestFanoutPartialFailureCountedFailedOthersSucceed's doc comment), and
+// session IDs are internal, random UUIDs the ui package cannot predict to
+// engineer a real tmux duplicate-session-name collision either. Faking this
+// one seam (kept ui-package-internal; zero non-ui changes) is the disclosed
+// alternative the spec itself allows for the sibling untagged-accounting
+// case. The production path (fanLaunchCmd below) always passes
+// Launcher.Launch unchanged — a real Launch call, never faked outside tests.
+type fanLaunchFn func(r session.Recipe, w, h int, now time.Time) (string, error)
+
+// fanLaunchCmd builds the one async tea.Cmd that launches every selected
+// project SEQUENTIALLY (spec §2.2: measured ~36ms for 5 — cheap enough for
+// one shot, no per-project concurrency needed) via the two-step workflow
+// precedent: Launcher.Launch(recipe) then Store.SetTags(name, "fan:"+group).
+// A SetTags failure does NOT fail the project — spec §2.2's binding rule is
+// that it's counted in the result as launched-but-untagged, never dropped.
+func (a *App) fanLaunchCmd(projects []registry.Project, recipeFor func(registry.Project) session.Recipe, w, h int) tea.Cmd {
+	return a.fanLaunchCmdWith(a.deps.Launcher.Launch, projects, recipeFor, w, h)
+}
+
+// fanLaunchCmdWith is fanLaunchCmd's actual implementation, parameterized
+// over the launch step (see fanLaunchFn's doc comment above for why).
+func (a *App) fanLaunchCmdWith(launch fanLaunchFn, projects []registry.Project, recipeFor func(registry.Project) session.Recipe, w, h int) tea.Cmd {
+	st := a.deps.Launcher.Store
+	group := newGroupID()
+	return func() tea.Msg {
+		results := make([]fanResult, 0, len(projects))
+		for _, p := range projects {
+			r := recipeFor(p)
+			name, err := launch(r, w, h, time.Now())
+			if err != nil {
+				results = append(results, fanResult{Project: p.Label, Name: name, Err: err})
+				continue
+			}
+			res := fanResult{Project: p.Label, Name: name}
+			if tagErr := st.SetTags(name, "fan:"+group); tagErr != nil {
+				res.Untagged = true
+			}
+			results = append(results, res)
+		}
+		return fanResultMsg{group: group, results: results}
+	}
+}
+
+// formatFanHint renders the fanHint summary (spec §2.3, exact shape):
+// "fan #<group>: <launched>/<total> launched · failed: <project> (<err>) ·
+// <project> launched untagged" — one clause per failed/untagged result, in
+// launch order; a fully-clean group renders with no trailing clauses at all.
+func formatFanHint(group string, results []fanResult) string {
+	launched := 0
+	for _, r := range results {
+		if r.Err == nil {
+			launched++
+		}
+	}
+	hint := fmt.Sprintf("fan #%s: %d/%d launched", group, launched, len(results))
+	for _, r := range results {
+		switch {
+		case r.Err != nil:
+			hint += fmt.Sprintf(" · failed: %s (%s)", r.Project, r.Err.Error())
+		case r.Untagged:
+			hint += fmt.Sprintf(" · %s launched untagged", r.Project)
+		}
+	}
+	return hint
+}
+
+// viewFanout renders the fan-out frame (spec §2.1): the form's own body
+// (checklist + shared model/mode/seed) wrapped in the standard frame, with a
+// keybar naming the checklist's own dialect (space toggle) alongside the
+// shared field-nav/launch/cancel keys.
+func (a *App) viewFanout(w int) string {
+	inner := w - 4
+	body := a.fanForm.view(inner)
+	return frame(w, "fan-out", "", body,
+		"tab/↓↑ move · space toggle · ←/→ value · ↵ launch · esc cancel")
+}
+
 func (a *App) selected() (uiRow, bool) {
 	if a.cursor < 0 || a.cursor >= len(a.rows) {
 		return uiRow{}, false
@@ -1719,6 +1938,8 @@ func (a *App) View() string {
 		return a.renderWFConfirm(w)
 	case viewWFConfirmAbandon:
 		return a.renderWFAbandon(w)
+	case viewFanout:
+		return a.viewFanout(w)
 	}
 
 	inner := w - 4
@@ -1754,6 +1975,13 @@ func (a *App) View() string {
 		}
 		body = append(body, "", strings.Repeat(" ", pad)+styHelp.Render("no sessions — press n to launch one"), "")
 	}
+	if a.fanHint != "" {
+		// spec §2.3: fanHint is the dedicated persistent field — rendered
+		// like errStr/wfHint below, but NEVER wiped by a snapMsg (see the
+		// snapMsg case in Update, which only clears errStr); cleared only
+		// by the next dashboard keypress (see updateKeys' viewDash branch).
+		body = append(body, "", styHelp.Render(truncPlain(a.fanHint, inner)))
+	}
 	if a.errStr != "" {
 		body = append(body, "", styErr.Render(truncPlain("! "+a.errStr, inner)))
 	}
@@ -1773,7 +2001,7 @@ func (a *App) View() string {
 	counts := fmt.Sprintf("%d live · %d needs you", live, needs)
 	keybar := "↵ attach · space peek · n new · x kill · t tag · r reopen · q quit"
 	if inner > lipgloss.Width(keybar)+24 {
-		keybar += " · / search · w workflows"
+		keybar += " · / search · w workflows · N fan-out"
 	}
 	return frame(w, "LOOM", counts, body, keybar)
 }
@@ -1818,6 +2046,12 @@ func sectionRule(label string, inner int, alert bool) string {
 // when a session's seed prompt failed to deliver — see renderRow.
 const seedFailedSuffix = " · seed failed"
 
+// fanMarkerSuffix is appended (dim/chrome, same precedent as
+// seedFailedSuffix) to the activity cell for any row whose Tags contain a
+// "fan:" group tag (spec §2.4, the "honest" group affordance: no dedicated
+// group view in v1, just this marker + the tag editor + fanHint).
+const fanMarkerSuffix = " · fan"
+
 // renderRow: cursor(2) icon(1)+1 project(12)+1 activity(flex)+1 ctx(4)+1 model·mode(13)+1 age(4)
 func (a *App) renderRow(i int, r uiRow, inner int) string {
 	actW := inner - 41
@@ -1847,8 +2081,11 @@ func (a *App) renderRow(i int, r uiRow, inner int) string {
 func (a *App) renderActivityCell(r uiRow, actW int) string {
 	base := activityText(r)
 	suffix := ""
+	if strings.Contains(r.row.Tags, "fan:") {
+		suffix += fanMarkerSuffix
+	}
 	if r.row.SeedStatus == "failed" {
-		suffix = seedFailedSuffix
+		suffix += seedFailedSuffix
 	}
 	// rune count, not len(suffix): suffix contains "·" (U+00B7), which is
 	// 2 bytes in UTF-8 — len() would overcount its width by one.
