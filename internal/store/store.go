@@ -113,6 +113,13 @@ func (s *Store) migrate() error {
 			created_at    INTEGER NOT NULL,
 			updated_at    INTEGER NOT NULL
 		)`,
+		// v6: recall (spec docs/superpowers/specs/2026-07-04-recall-design.md
+		// §6) — supports RecentTranscriptsByProjectDir, the same-project
+		// recency query used both as the panel's default (no seed typed yet)
+		// and as the fallback when the recall query builder can't produce a
+		// usable FTS expression or zero hits qualify. IF NOT EXISTS for the
+		// same re-entrancy reason as v4/v5.
+		`CREATE INDEX IF NOT EXISTS idx_transcripts_project ON transcripts(project_dir, last_ts)`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {

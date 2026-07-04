@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -462,5 +463,75 @@ func TestAskUsable(t *testing.T) {
 		if got := AskUsable(in); got != want {
 			t.Fatalf("AskUsable(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// --- Echo-chamber guard (spec §4 I4, RecallMarker) -----------------------
+
+// TestRecallMarkerStrippedFromUserDocAndAskNotAssistant guards the
+// echo-chamber guard: a user turn seeded with launcher-appended recall
+// context must have that context stripped from both its indexed doc and
+// its ask, but an assistant doc containing the identical marker text must
+// pass through untouched (the marker only ever appears in text seeded INTO
+// a user turn; assistant docs are never scanned for it).
+func TestRecallMarkerStrippedFromUserDocAndAskNotAssistant(t *testing.T) {
+	userText := "continue debugging the parser" + RecallMarker + "loom·fix parser]: fixed the tokenizer bug"
+	assistantText := "wrapping up" + RecallMarker + "loom·fix parser]: should stay intact"
+	line1 := fmt.Sprintf(`{"isSidechain":false,"type":"user","message":{"role":"user","content":%q},"uuid":"u1","timestamp":"2026-07-02T12:55:36.397Z","cwd":"/w/loom","sessionId":"s1"}`, userText)
+	line2 := fmt.Sprintf(`{"isSidechain":false,"type":"assistant","message":{"role":"assistant","content":%q},"uuid":"a1","timestamp":"2026-07-02T12:56:36.397Z","cwd":"/w/loom","sessionId":"s1"}`, assistantText)
+	p := writeJSONL(t, line1, line2)
+
+	ex, err := ExtractFile(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ex.Docs) != 2 {
+		t.Fatalf("Docs = %+v, want 2 (one user, one assistant)", ex.Docs)
+	}
+
+	wantUser := "continue debugging the parser"
+	if ex.Docs[0].Content != wantUser || ex.Docs[0].Role != "user" {
+		t.Fatalf("user doc = %+v, want content %q", ex.Docs[0], wantUser)
+	}
+	if ex.Ask != wantUser {
+		t.Fatalf("Ask = %q, want %q (marker-stripped)", ex.Ask, wantUser)
+	}
+	if strings.Contains(ex.Ask, "Related prior work") {
+		t.Fatalf("Ask leaked recall marker text: %q", ex.Ask)
+	}
+
+	wantAssistant := CleanText(assistantText)
+	if ex.Docs[1].Content != wantAssistant || ex.Docs[1].Role != "assistant" {
+		t.Fatalf("assistant doc = %+v, want unaffected content %q", ex.Docs[1], wantAssistant)
+	}
+	if !strings.Contains(ex.Docs[1].Content, "Related prior work") {
+		t.Fatalf("assistant doc must NOT be stripped: %q", ex.Docs[1].Content)
+	}
+}
+
+// TestRecallMarkerStrippedFromAskFallbackCandidate guards the third
+// surface the strip must apply to: firstUserText, the ask-fallback
+// candidate captured before the excluded-prefix check (spec §2.3) and
+// used by result() when no normal ask filter ever passes. A recall marker
+// riding along on that very first (excluded-prefix) user text must still
+// be stripped before it can surface as Ask.
+func TestRecallMarkerStrippedFromAskFallbackCandidate(t *testing.T) {
+	text := "<command-name>investigate</command-name>" + RecallMarker + "loom·x]: outcome text"
+	line := fmt.Sprintf(`{"isSidechain":false,"type":"user","message":{"role":"user","content":%q},"uuid":"u1","timestamp":"2026-07-02T12:55:36.397Z","cwd":"/w/loom","sessionId":"s1"}`, text)
+	p := writeJSONL(t, line)
+
+	ex, err := ExtractFile(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ex.Docs) != 0 {
+		t.Fatalf("Docs = %+v, want none (excluded-prefix text is never indexed)", ex.Docs)
+	}
+	want := CleanText("<command-name>investigate</command-name>")
+	if ex.Ask != want {
+		t.Fatalf("Ask (fallback) = %q, want %q (marker-stripped)", ex.Ask, want)
+	}
+	if strings.Contains(ex.Ask, "Related prior work") {
+		t.Fatalf("Ask fallback leaked recall marker text: %q", ex.Ask)
 	}
 }

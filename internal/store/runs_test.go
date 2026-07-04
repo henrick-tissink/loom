@@ -16,6 +16,14 @@ func TestMigrationV5OnV4CopyDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// want = whatever the latest migration version is (not hardcoded 5):
+	// rolling back to v4 below and reopening must replay every migration
+	// after v4, including any added since (e.g. v6), landing back at
+	// latest — same derivation as TestMigrationsAreTransactional.
+	var want int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&want); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -46,8 +54,8 @@ func TestMigrationV5OnV4CopyDB(t *testing.T) {
 	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 5 {
-		t.Fatalf("user_version = %d, want 5", v)
+	if v != want {
+		t.Fatalf("user_version = %d, want %d", v, want)
 	}
 	if _, err := s2.InsertRun("wf", "{}", 100); err != nil {
 		t.Fatalf("workflow_runs unusable after migration: %v", err)
@@ -63,6 +71,12 @@ func TestMigrationV5Reentrant(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "loom.db")
 	s, err := Open(p) // creates at latest version, including v5's objects
 	if err != nil {
+		t.Fatal(err)
+	}
+	// want = whatever the latest migration version is (not hardcoded 5) —
+	// see the matching comment in TestMigrationV5OnV4CopyDB.
+	var want int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&want); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -90,8 +104,8 @@ func TestMigrationV5Reentrant(t *testing.T) {
 	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 5 {
-		t.Fatalf("user_version = %d, want 5", v)
+	if v != want {
+		t.Fatalf("user_version = %d, want %d", v, want)
 	}
 	if _, err := s2.InsertRun("wf", "{}", 100); err != nil {
 		t.Fatalf("workflow_runs unusable after re-entrant migration: %v", err)

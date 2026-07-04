@@ -107,6 +107,28 @@ var excludedPrefixes = []string{
 	"<local-command-stdout>",
 }
 
+// RecallMarker is the prefix the launcher appends to a seed when the user
+// includes RELATED-panel entries at launch (spec
+// docs/superpowers/specs/2026-07-04-recall-design.md §4): each included
+// entry becomes " ── Related prior work [<label>·<title-or-ask>]:
+// <outcome>", glued onto the seed the user typed. stripRecallMarker cuts a
+// user text at the first occurrence of this marker (and everything after
+// it) before it becomes a user doc or ask — the echo-chamber guard (I4):
+// prior-session context pulled in via recall must never re-index as THIS
+// session's own text, or recall could compound across generations. Applies
+// only to user text (docs, ask, and the ask-fallback candidate
+// firstUserText, since all three derive from the same stripped value in
+// feedUser) — assistant docs are never touched, since the marker only ever
+// appears in text seeded INTO a user turn.
+const RecallMarker = " ── Related prior work ["
+
+func stripRecallMarker(s string) string {
+	if i := strings.Index(s, RecallMarker); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
 func hasExcludedPrefix(s string) bool {
 	for _, p := range excludedPrefixes {
 		if strings.HasPrefix(s, p) {
@@ -270,6 +292,10 @@ func (e *extractState) feedUser(r record, role string, ts int64) {
 	if !ok {
 		return
 	}
+	// Echo-chamber guard (spec §4 I4): strip any launcher-appended recall
+	// context before it can become this session's own doc/ask/ask-fallback
+	// text. Must happen before firstUserText capture below.
+	text = stripRecallMarker(text)
 	// Track first user text for fallback (before checking excluded prefixes,
 	// but skip compact summaries which must never set Ask). Spec §2.3.
 	if e.isMain && e.firstUserText == "" && !r.IsCompactSummary {

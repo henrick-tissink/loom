@@ -326,6 +326,62 @@ func TestUpsertPreservesLLMSummary(t *testing.T) {
 	}
 }
 
+func TestRecentTranscriptsByProjectDirOrderingAndLimit(t *testing.T) {
+	s := open(t)
+	mk := func(id, project string, lastTS int64) {
+		if err := s.UpsertTranscript(Transcript{SessionID: id, ProjectDir: project, LastTS: lastTS}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("a", "loom", 100)
+	mk("b", "loom", 300)
+	mk("c", "loom", 200)
+	mk("d", "other", 400) // different project: must be excluded regardless of recency
+
+	got, err := s.RecentTranscriptsByProjectDir("loom", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d hits, want 2 (limit): %+v", len(got), got)
+	}
+	if got[0].SessionID != "b" || got[1].SessionID != "c" {
+		t.Fatalf("order = [%s %s], want [b c] (last_ts desc)", got[0].SessionID, got[1].SessionID)
+	}
+}
+
+func TestSearchSessionsRawUsesPrebuiltExprNoSanitizing(t *testing.T) {
+	s := open(t)
+	if err := s.UpsertTranscript(Transcript{
+		SessionID: "sess1", ProjectDir: "loom", Cwd: "/w/loom", Title: "t", LastTS: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceFileDocs(IndexedFile{Path: "/f1", SessionID: "sess1", Size: 1, Mtime: 1}, []Doc{
+		{Content: "database migration notes", Role: "user", TS: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A pre-built OR expression, exactly the shape buildRecallQuery
+	// produces — NOT run through sanitizeFTSQuery's implicit-AND +
+	// trailing-* shape.
+	hits, err := s.SearchSessionsRaw(`"database" OR "migration"`, 15)
+	if err != nil {
+		t.Fatalf("SearchSessionsRaw error: %v", err)
+	}
+	if len(hits) != 1 || hits[0].SessionID != "sess1" {
+		t.Fatalf("hits = %+v, want 1 hit for sess1", hits)
+	}
+
+	// Empty expr never errors and returns no hits (mirrors SearchSessions'
+	// malformed-input contract).
+	hits, err = s.SearchSessionsRaw("", 15)
+	if err != nil || len(hits) != 0 {
+		t.Fatalf("SearchSessionsRaw(\"\") = %+v, err=%v; want 0 hits, nil err", hits, err)
+	}
+}
+
 func TestDeleteFileDocs(t *testing.T) {
 	s := open(t)
 

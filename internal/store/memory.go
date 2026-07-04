@@ -345,6 +345,70 @@ func sanitizeFTSQuery(raw string) string {
 	return strings.Join(quoted, " ") + "*"
 }
 
+// RecentTranscriptsByProjectDir returns a project's most recent sessions,
+// newest first (spec §6): the recall panel's default (no seed typed yet)
+// and the recency fallback used by internal/memory.Related when the recall
+// query builder can't produce a usable FTS expression, or produces one but
+// zero hits qualify. Backed by idx_transcripts_project (migration v6).
+func (s *Store) RecentTranscriptsByProjectDir(projectDir string, limit int) ([]Transcript, error) {
+	rows, err := s.db.Query(
+		"SELECT "+transcriptCols+" FROM transcripts WHERE project_dir=? ORDER BY last_ts DESC LIMIT ?",
+		projectDir, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Transcript
+	for rows.Next() {
+		var t Transcript
+		if err := rows.Scan(&t.SessionID, &t.ProjectDir, &t.Cwd, &t.Title, &t.FirstTS, &t.LastTS, &t.MsgCount,
+			&t.Ask, &t.Outcome, &t.Files, &t.FileMissing, &t.LLMSummary, &t.SummaryAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// SearchSessionsRaw is SearchSessions' sibling for recall (spec §2):
+// internal/memory.Related builds its OWN FTS5 match expression
+// (buildRecallQuery) rather than going through sanitizeFTSQuery, whose
+// implicit-AND + trailing-`*` shape returns ZERO sessions for
+// natural-sentence seeds (verified on the real index) — recall owns its
+// query text and hands over an already-built expression. Reuses the exact
+// same verified MATERIALIZED-CTE shape (searchSQL) as SearchSessions,
+// un-sanitized, with a caller-supplied limit (recall fetches a wider set
+// than it displays, spec §6, so the same-project boost can promote hits
+// ranked lower by raw bm25). Matched-term counts aren't available at the
+// SQL level (rank/bm25 don't expose a per-term match count) — the caller
+// computes those client-side from the returned Snippet/Title/Ask.
+//
+// SearchSessions itself is untouched; this is new, separate code that
+// happens to reuse the same searchSQL constant and scan shape.
+func (s *Store) SearchSessionsRaw(matchExpr string, limit int) ([]SearchHit, error) {
+	if matchExpr == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(searchSQL, matchExpr, limit)
+	if err != nil {
+		return nil, nil
+	}
+	defer rows.Close()
+	var out []SearchHit
+	for rows.Next() {
+		var h SearchHit
+		var best float64
+		if err := rows.Scan(&h.SessionID, &h.Snippet, &best, &h.Title, &h.ProjectDir, &h.Cwd, &h.LastTS, &h.Ask); err != nil {
+			return nil, nil
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil
+	}
+	return out, nil
+}
+
 // GetLatestByClaudeSessionID returns the sessions-table row (live or
 // terminal) with the given claude_session_id and the highest created_at —
 // used for resume-collision detection (spec §6): several store rows can

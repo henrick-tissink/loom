@@ -226,6 +226,38 @@ func TestMigrationsAreTransactional(t *testing.T) {
 	}
 }
 
+// TestMigrationV6IndexCreatedAndReentrant guards the recall index migration
+// (spec §6): idx_transcripts_project must exist after Open, and re-opening
+// an already-migrated DB must be a clean no-op (IF NOT EXISTS, the same
+// convention as v4/v5).
+func TestMigrationV6IndexCreatedAndReentrant(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "loom.db")
+	s, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	if err := s.db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type='index' AND name='idx_transcripts_project'",
+	).Scan(&name); err != nil {
+		t.Fatalf("idx_transcripts_project missing: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(p) // reopen: migrations must be no-op idempotent
+	if err != nil {
+		t.Fatalf("re-entrant Open failed: %v", err)
+	}
+	defer s2.Close()
+	if err := s2.db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type='index' AND name='idx_transcripts_project'",
+	).Scan(&name); err != nil {
+		t.Fatalf("idx_transcripts_project missing after re-open: %v", err)
+	}
+}
+
 func TestSetSeedStatus(t *testing.T) {
 	s := open(t)
 	r := row("loom-aaa")
