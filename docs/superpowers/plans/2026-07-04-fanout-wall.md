@@ -25,9 +25,9 @@ Implements spec §3 verbatim: W key, stable CreatedAt-then-name order, 2-col exa
 - [ ] Failing tests per spec §5 wall row (incl. stable-order-on-status-flip and ONE-tickAfter sweep) → implement → PASS + full suite → commit `feat: read-only session wall`.
 
 ### Task 3: e2e + README + polish
-- [ ] E2E per spec §5 (scratch env isolation per Phase-3/R-3 precedent; fake claude; only own sessions killed; real DB/tmux verified untouched); captures 100/46; designer eyeball; nits fixed+disclosed.
-- [ ] README: Fan-out + Wall section.
-- [ ] `gofmt -l . && go vet ./... && go test -race -count=1 ./...` → commit `feat: fan-out+wall e2e + README`.
+- [x] E2E per spec §5 (scratch env isolation per Phase-3/R-3 precedent; fake claude; only own sessions killed; real DB/tmux verified untouched); captures 100/46; designer eyeball; nits fixed+disclosed.
+- [x] README: Fan-out + Wall section.
+- [x] `gofmt -l . && go vet ./... && go test -race -count=1 ./...` → commit `feat: fan-out+wall e2e + README`.
 
 ## Self-Review
 Spec §2→T1, §3→T2, §5 distributed, §6 respected. No placeholders (spec §§2-3 carry the exact semantics; tasks reference them as binding). Types: fanResultMsg/wallMsg local to ui; no cross-package changes.

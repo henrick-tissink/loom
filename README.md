@@ -123,6 +123,45 @@ launch, monitor, and return to real `claude` sessions across a whole workspace.
   small archive, same-project recency dominates simply because there isn't
   yet enough cross-project history for the query to rank against.
 
+## Phase 4 — Fan-out + Wall
+
+- **`N`** opens fan-out: a project checklist plus one shared model · mode ·
+  optional seed. Check as many projects as you want (`space`), `tab`/
+  `shift-tab` moves between the checklist / model / mode / seed fields,
+  `↓`/`↑` scroll the checklist while it's focused. `↵` launches — one real
+  session per checked project, all sharing the same recipe (no per-project
+  seed in v1) — and stays on the form until every launch has resolved, then
+  drops you back on the dashboard with a summary line:
+
+  ```
+  fan #a1b2c3: 4/5 launched · failed: tavli (bad cwd) · volar launched untagged
+  ```
+
+  Every session in the group is tagged `fan:<groupID>` (visible in the tag
+  editor, `t`); a launched-but-untagged session is still counted as
+  launched, never silently dropped. Rows belonging to a group get a dim
+  `· fan` marker in the dashboard's activity column — that marker plus the
+  tag editor and the summary line above are the only group affordance in v1,
+  there's no dedicated group view yet. `r`-resume on a fanned-out session
+  carries its tags forward, so a resumed session rejoins its group.
+- **`W`** opens the wall: a read-only, 2-column grid of every live session's
+  pane — header line (status · project · title/tool hint) plus a tail of
+  recent output, refreshed once per poll. Order is stable (oldest-launched
+  first, tie-broken by name) and never reshuffles on a status change, so the
+  grid doesn't jump around while you're reading it; `↓`/`↑`/`j`/`k` move the
+  selection, `↵` attaches the selected session full-screen (same hand-off as
+  the dashboard), `esc` returns to the dashboard. A session whose pane
+  couldn't be captured this tick still shows its cell, marked
+  `(pane unavailable)`, with `↵` gated off until it either recovers or is
+  reaped.
+- **Limits (v1)**: wall cells are colorless and show only the left edge of
+  wide panes (Claude's own chrome truncates on the right); only the visible
+  page's panes are captured, so paging is a read, not a live feed of
+  everything at once; fan-out recipes are uniform across the group; no
+  group view beyond the marker/tag/summary above; no remote hosts; the wall
+  is read-only — there's still no headless/scripted launch path, and there
+  isn't going to be one.
+
 ## Requirements
 
 - macOS, `tmux` ≥ 3.x, `claude` CLI, Go ≥ 1.22 (build only)
