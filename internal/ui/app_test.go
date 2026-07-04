@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2969,7 +2970,11 @@ func TestFanoutPartialFailureCountedFailedOthersSucceed(t *testing.T) {
 		}
 		return l.Launch(r, w, h, now) // "good" goes through the REAL launcher
 	}
-	cmd := a.fanLaunchCmdWith(stub, projects, a.fanForm.recipeFor, a.width, a.height)
+	items := make([]fanLaunchItem, len(projects))
+	for i, p := range projects {
+		items[i] = fanLaunchItem{Project: p, Recipe: a.fanForm.recipeFor(p)}
+	}
+	cmd := a.fanLaunchCmdWith(stub, items, a.width, a.height)
 	if cmd == nil {
 		t.Fatal("expected a launch command")
 	}
@@ -3141,5 +3146,224 @@ func TestFanoutViewFrameInvariant(t *testing.T) {
 				t.Fatalf("width %d line %d: %d cells (want %d): %q", w, i, lw, a.width, line)
 			}
 		}
+	}
+}
+
+// --- Critical review fix: fanLaunch data race / uniform-recipe split ------
+
+// TestFanoutLaunchSnapshotsRecipeAgainstConcurrentFormMutation is the
+// race-shaped regression test for the critical finding: fanLaunch used to
+// capture a.fanForm.recipeFor — a bound method value over the live,
+// still-interactive *fanoutForm — into the launch tea.Cmd. Because the form
+// STAYS open and interactive after ↵ (spec §2.3), that cmd's goroutine and
+// any subsequent keystroke read/wrote the same fanForm fields unsynchronized
+// (a data race, catchable by -race), and a keystroke landing mid-launch
+// (model/mode/seed change) could split the "uniform recipe across the
+// group" invariant. The fix (fanLaunchItem) snapshots every project's
+// recipe synchronously in fanLaunch, before the cmd is even built/returned,
+// so the cmd closure holds only value copies — nothing left for a
+// concurrent keystroke to race against or mutate underneath it.
+//
+// This fires ↵ to get the cmd, then invokes the cmd CONCURRENTLY with a
+// second goroutine hammering the form with mutating keys (tab/shift-tab,
+// arrows, typing) — exactly the shapes the finding called out — and asserts
+// every launched project's persisted recipe (model/mode/seed) matches the
+// snapshot taken at Enter-time, proving no mutation after ↵ could have
+// reached what actually got launched.
+func TestFanoutLaunchSnapshotsRecipeAgainstConcurrentFormMutation(t *testing.T) {
+	l, st, _ := fanoutTestHarness(t)
+	dirA, dirB := t.TempDir(), t.TempDir()
+	projects := []registry.Project{{Label: "alpha", Path: dirA}, {Label: "beta", Path: dirB}}
+
+	a := NewApp(Deps{Launcher: l, Projects: projects})
+	a.width, a.height = 80, 24
+	a.Update(key("N"))
+	a.Update(key(" "))                       // toggle alpha (listCur 0)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})  // -> beta
+	a.Update(key(" "))                       // toggle beta
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})   // -> model field (focus 1)
+	a.Update(tea.KeyMsg{Type: tea.KeyRight}) // modelIdx 0 -> 1
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})   // -> mode field (focus 2)
+	a.Update(tea.KeyMsg{Type: tea.KeyRight}) // modeIdx 0 -> 1
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})   // -> seed field (focus 3)
+	a.Update(key("h"))
+	a.Update(key("i"))
+
+	wantModel, wantMode, wantSeed := modelOptions[1], modeOptions[1], "hi"
+
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter with 2 selected projects must return a command")
+	}
+
+	var wg sync.WaitGroup
+	var msg tea.Msg
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		msg = cmd()
+	}()
+	go func() {
+		defer wg.Done()
+		// Form-mutating keys, fired as fast as possible right after ↵ and
+		// racing the cmd's own goroutine — tab/shift-tab, arrows, and
+		// typing, exactly the shapes named in the finding.
+		a.Update(tea.KeyMsg{Type: tea.KeyTab})
+		a.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		a.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		a.Update(tea.KeyMsg{Type: tea.KeyRight})
+		a.Update(tea.KeyMsg{Type: tea.KeyDown})
+		a.Update(tea.KeyMsg{Type: tea.KeyUp})
+		a.Update(key("z"))
+	}()
+	wg.Wait()
+
+	res, ok := msg.(fanResultMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want fanResultMsg", msg)
+	}
+	if len(res.results) != 2 {
+		t.Fatalf("results = %d, want 2", len(res.results))
+	}
+	for _, r := range res.results {
+		if r.Err != nil {
+			t.Fatalf("project %s: unexpected launch error: %v", r.Project, r.Err)
+		}
+		row, ok, err := st.Get(r.Name)
+		if err != nil || !ok {
+			t.Fatalf("store row for %s missing: ok=%v err=%v", r.Name, ok, err)
+		}
+		if row.Model != wantModel || row.Mode != wantMode || row.Seed != wantSeed {
+			t.Fatalf("project %s launched with model=%q mode=%q seed=%q, want the pre-Enter snapshot model=%q mode=%q seed=%q — the uniform-recipe invariant split",
+				r.Project, row.Model, row.Mode, row.Seed, wantModel, wantMode, wantSeed)
+		}
+	}
+}
+
+// TestFanoutFormFrozenWhileInFlight is fix #2's own regression test (the
+// "braces" half of belt-and-braces): while fanInFlight is true, every key
+// except esc/ctrl+c must no-op against fanForm — none of its fields may
+// change, including a second ↵.
+func TestFanoutFormFrozenWhileInFlight(t *testing.T) {
+	a := NewApp(Deps{Projects: fanoutProjects()})
+	a.width, a.height = 80, 24
+	a.Update(key("N"))
+	a.Update(key(" ")) // select alpha, so there's non-zero state to protect
+	a.fanInFlight = true
+	before := a.fanForm
+
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})
+	a.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	a.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	a.Update(tea.KeyMsg{Type: tea.KeyRight})
+	a.Update(key(" "))
+	a.Update(key("z"))
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter}) // must NOT fire a second launch
+
+	if a.fanForm.focus != before.focus ||
+		a.fanForm.modelIdx != before.modelIdx ||
+		a.fanForm.modeIdx != before.modeIdx ||
+		a.fanForm.listCur != before.listCur ||
+		a.fanForm.seed.Value() != before.seed.Value() ||
+		a.fanForm.hint != before.hint {
+		t.Fatalf("form mutated while fanInFlight:\nbefore: focus=%d modelIdx=%d modeIdx=%d listCur=%d seed=%q hint=%q\nafter:  focus=%d modelIdx=%d modeIdx=%d listCur=%d seed=%q hint=%q",
+			before.focus, before.modelIdx, before.modeIdx, before.listCur, before.seed.Value(), before.hint,
+			a.fanForm.focus, a.fanForm.modelIdx, a.fanForm.modeIdx, a.fanForm.listCur, a.fanForm.seed.Value(), a.fanForm.hint)
+	}
+	if !reflect.DeepEqual(a.fanForm.checked, before.checked) {
+		t.Fatalf("checked map mutated while fanInFlight: before=%v after=%v", before.checked, a.fanForm.checked)
+	}
+	if a.view != viewFanout {
+		t.Fatal("view must not have changed — esc was never pressed in this test")
+	}
+}
+
+// TestFanoutEscWhileInFlightReturnsToDashButLaunchContinues covers the
+// documented esc-while-in-flight decision (see updateFanoutKeys' doc
+// comment): esc is deliberately let through the freeze — it returns to the
+// dashboard immediately — but the in-flight launch keeps running in the
+// background, and its fanResultMsg still lands and still sets fanHint once
+// it completes, even though the view has already moved on.
+func TestFanoutEscWhileInFlightReturnsToDashButLaunchContinues(t *testing.T) {
+	l, _, _ := fanoutTestHarness(t)
+	projects := []registry.Project{{Label: "alpha", Path: t.TempDir()}}
+	a := NewApp(Deps{Launcher: l, Projects: projects})
+	a.width, a.height = 80, 24
+	a.Update(key("N"))
+	a.Update(key(" "))
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter must return a command")
+	}
+	if !a.fanInFlight {
+		t.Fatal("fanInFlight must be set the moment the launch command is fired")
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewDash {
+		t.Fatal("esc while in-flight must return to the dashboard immediately")
+	}
+	if !a.fanInFlight {
+		t.Fatal("esc while in-flight must NOT cancel the launch — fanInFlight stays true")
+	}
+
+	// The launch's own result msg still lands and still sets fanHint, even
+	// though the view moved on to the dashboard before it arrived.
+	msg := cmd()
+	res, ok := msg.(fanResultMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want fanResultMsg", msg)
+	}
+	a.Update(res)
+	if a.fanInFlight {
+		t.Fatal("fanInFlight must clear once fanResultMsg lands")
+	}
+	if a.fanHint == "" {
+		t.Fatal("fanHint must be set once fanResultMsg lands, even after an early esc")
+	}
+}
+
+// TestFanoutHintRenderedInViewAfterResultLands closes reviewer minor (c):
+// once fanResultMsg lands, its fanHint text must actually appear in the
+// rendered View() output, not just be set on the struct field.
+func TestFanoutHintRenderedInViewAfterResultLands(t *testing.T) {
+	a := fixtureApp()
+	a.Update(fanResultMsg{group: "abc123", results: []fanResult{{Project: "p", Name: "loom-x"}}})
+	if a.fanHint == "" {
+		t.Fatal("fanHint must be set after fanResultMsg lands")
+	}
+	out := a.View()
+	if !strings.Contains(out, "fan #abc123") {
+		t.Fatalf("View() output missing the fanHint text after fanResultMsg landed:\n%s", out)
+	}
+}
+
+// TestFanoutEnterFromSeedFocusLaunches closes reviewer minor (d): ↵ must
+// launch from ANY focus zone (spec §2.1 — "↵ launches from ANY focus"),
+// including focus 3 (seed), not just the checklist default.
+func TestFanoutEnterFromSeedFocusLaunches(t *testing.T) {
+	l, _, _ := fanoutTestHarness(t)
+	projects := []registry.Project{{Label: "alpha", Path: t.TempDir()}}
+	a := NewApp(Deps{Launcher: l, Projects: projects})
+	a.width, a.height = 80, 24
+	a.Update(key("N"))
+	a.Update(key(" ")) // select alpha
+	for i := 0; i < 3; i++ {
+		a.Update(tea.KeyMsg{Type: tea.KeyTab}) // -> focus 3 (seed)
+	}
+	if a.fanForm.focus != 3 {
+		t.Fatalf("focus = %d, want 3 (seed) before enter", a.fanForm.focus)
+	}
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter from seed focus must launch (return a command)")
+	}
+	if !a.fanInFlight {
+		t.Fatal("fanInFlight must be set after enter from seed focus")
+	}
+	if a.view != viewFanout {
+		t.Fatal("view must stay on viewFanout until fanResultMsg lands")
 	}
 }

@@ -1756,9 +1756,31 @@ func (a *App) openFanout() tea.Cmd {
 // the form's own concern — delegated to fanoutForm.update unchanged, since
 // fan-out (unlike the launcher) has no RELATED panel to additionally
 // dispatch against.
+//
+// Belt-and-braces freeze (critical review finding, fix #2 of 2 — see
+// fanLaunchItem's doc comment for fix #1): while fanInFlight is true, the
+// form is FROZEN — every key no-ops except esc and ctrl+c. fanLaunch already
+// snapshots the recipe synchronously before the launch cmd is even returned,
+// so this freeze doesn't prevent a data race by itself (there isn't one left
+// to prevent); it exists so a stray keystroke mid-launch can never even reach
+// fanForm's mutable state, and so a second ↵ is refused here rather than
+// relying solely on fanLaunch's own a.fanInFlight guard.
+//
+// esc-while-in-flight is deliberately ALLOWED (decision, documented here
+// since it's not obvious): it returns the view to the dashboard immediately,
+// but the in-flight launch keeps running in the background — fanResultMsg
+// still lands and still sets fanHint (Update's fanResultMsg case doesn't
+// check what view is showing) once it completes. The user backing out of the
+// fan-out screen early doesn't cancel the launch or lose the result summary.
 func (a *App) updateFanoutKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		return a, tea.Quit
+	}
+	if a.fanInFlight {
+		if msg.Type == tea.KeyEsc {
+			a.view = viewDash
+		}
+		return a, nil
 	}
 	switch msg.Type {
 	case tea.KeyEsc:
@@ -1769,6 +1791,25 @@ func (a *App) updateFanoutKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	cmd := a.fanForm.update(msg)
 	return a, cmd
+}
+
+// fanLaunchItem is a VALUE SNAPSHOT of one project's launch recipe (critical
+// review fix #1 of 2): captured synchronously, field by field, in fanLaunch
+// — on Update's own goroutine, before the tea.Cmd closure is even built or
+// returned. The bug this replaces: the cmd used to capture
+// a.fanForm.recipeFor, a bound METHOD VALUE over the live *fanoutForm — since
+// the form stays open and interactive after ↵ (spec §2.3 "stay until
+// result"), the cmd's goroutine and any subsequent keystroke were reading/
+// mutating the same fanForm fields unsynchronized, and a keystroke landing
+// mid-launch (model/mode/seed change) could split the "uniform recipe across
+// the group" invariant — different projects in the same group launching with
+// different settings. fanLaunchCmd/fanLaunchCmdWith now close over only these
+// []fanLaunchItem values — zero references into fanForm — so nothing the
+// form does after ↵ can affect an in-flight launch. (fix #2, the form-freeze,
+// is belt-and-braces on top of this: see updateFanoutKeys.)
+type fanLaunchItem struct {
+	Project registry.Project
+	Recipe  session.Recipe
 }
 
 // fanLaunch handles ↵ (spec §2.1/§2.2/§2.3 I2): a double-↵ while a launch
@@ -1788,10 +1829,15 @@ func (a *App) fanLaunch() (tea.Model, tea.Cmd) {
 	if a.deps.Launcher == nil {
 		return a, nil
 	}
+	// Snapshot every recipe NOW, synchronously — see fanLaunchItem's doc
+	// comment for why this is the critical fix.
+	items := make([]fanLaunchItem, len(projects))
+	for i, p := range projects {
+		items[i] = fanLaunchItem{Project: p, Recipe: a.fanForm.recipeFor(p)}
+	}
 	a.fanInFlight = true
-	recipeFor := a.fanForm.recipeFor
 	w, h := a.width, a.height
-	return a, a.fanLaunchCmd(projects, recipeFor, w, h)
+	return a, a.fanLaunchCmd(items, w, h)
 }
 
 // newGroupID mints the 6-hex fan-out group id (spec §2.2).
@@ -1823,25 +1869,26 @@ type fanLaunchFn func(r session.Recipe, w, h int, now time.Time) (string, error)
 // precedent: Launcher.Launch(recipe) then Store.SetTags(name, "fan:"+group).
 // A SetTags failure does NOT fail the project — spec §2.2's binding rule is
 // that it's counted in the result as launched-but-untagged, never dropped.
-func (a *App) fanLaunchCmd(projects []registry.Project, recipeFor func(registry.Project) session.Recipe, w, h int) tea.Cmd {
-	return a.fanLaunchCmdWith(a.deps.Launcher.Launch, projects, recipeFor, w, h)
+// items is the []fanLaunchItem VALUE snapshot fanLaunch built synchronously —
+// see its doc comment; this cmd closes over items only, never over fanForm.
+func (a *App) fanLaunchCmd(items []fanLaunchItem, w, h int) tea.Cmd {
+	return a.fanLaunchCmdWith(a.deps.Launcher.Launch, items, w, h)
 }
 
 // fanLaunchCmdWith is fanLaunchCmd's actual implementation, parameterized
 // over the launch step (see fanLaunchFn's doc comment above for why).
-func (a *App) fanLaunchCmdWith(launch fanLaunchFn, projects []registry.Project, recipeFor func(registry.Project) session.Recipe, w, h int) tea.Cmd {
+func (a *App) fanLaunchCmdWith(launch fanLaunchFn, items []fanLaunchItem, w, h int) tea.Cmd {
 	st := a.deps.Launcher.Store
 	group := newGroupID()
 	return func() tea.Msg {
-		results := make([]fanResult, 0, len(projects))
-		for _, p := range projects {
-			r := recipeFor(p)
-			name, err := launch(r, w, h, time.Now())
+		results := make([]fanResult, 0, len(items))
+		for _, item := range items {
+			name, err := launch(item.Recipe, w, h, time.Now())
 			if err != nil {
-				results = append(results, fanResult{Project: p.Label, Name: name, Err: err})
+				results = append(results, fanResult{Project: item.Project.Label, Name: name, Err: err})
 				continue
 			}
-			res := fanResult{Project: p.Label, Name: name}
+			res := fanResult{Project: item.Project.Label, Name: name}
 			if tagErr := st.SetTags(name, "fan:"+group); tagErr != nil {
 				res.Untagged = true
 			}
