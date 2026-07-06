@@ -235,14 +235,42 @@ func (s *Store) Get(name string) (SessionRow, bool, error) {
 
 const liveSet = "('running','needs_you','idle','unknown')"
 
+const recentSet = "('done','error')" // the terminal set Recent() selects
+
 func (s *Store) Live() ([]SessionRow, error) {
 	return s.query("SELECT " + cols + " FROM sessions WHERE last_status IN " + liveSet +
 		" ORDER BY created_at DESC")
 }
 
 func (s *Store) Recent(limit int) ([]SessionRow, error) {
-	return s.query(fmt.Sprintf("SELECT "+cols+" FROM sessions WHERE last_status IN ('done','error')"+
+	return s.query(fmt.Sprintf("SELECT "+cols+" FROM sessions WHERE last_status IN "+recentSet+
 		" ORDER BY ended_at DESC LIMIT %d", limit))
+}
+
+// DeleteSession removes a single finished row. The status guard makes deleting
+// a live row (or an unknown name) a no-op, so a live session can never be
+// removed via this path.
+func (s *Store) DeleteSession(name string) error {
+	_, err := s.db.Exec(
+		"DELETE FROM sessions WHERE name = ? AND last_status IN "+recentSet, name)
+	return err
+}
+
+// DeleteEnded removes every finished row and returns the number deleted.
+func (s *Store) DeleteEnded() (int64, error) {
+	res, err := s.db.Exec("DELETE FROM sessions WHERE last_status IN " + recentSet)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// CountEnded reports how many finished rows exist (drives the bulk-clear
+// confirm; the snapshot's Recent list is capped at 10 and would undercount).
+func (s *Store) CountEnded() (int64, error) {
+	var n int64
+	err := s.db.QueryRow("SELECT count(*) FROM sessions WHERE last_status IN " + recentSet).Scan(&n)
+	return n, err
 }
 
 // MarkLiveOrphansEnded retires live rows with no tmux backing to history as
