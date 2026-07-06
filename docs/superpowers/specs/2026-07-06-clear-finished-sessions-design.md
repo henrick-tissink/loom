@@ -80,7 +80,7 @@ place.
   the kill-confirm view).
 - **Confirm copy (`View()`, ~line 2050):** context-aware —
   - kill: `kill <label> (<name>) ?`
-  - dismiss: `dismiss <label> from history ?`
+  - dismiss: `dismiss <label> (<name>) ?` (reuses the kill layout with the verb + title swapped)
   - clear: `clear <N> finished sessions ?`
 - **Keybar (~line 2151):** stays a static superset (matching the existing
   convention where `r reopen` always shows). Change `x kill` → `x kill/dismiss`
