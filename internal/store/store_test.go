@@ -281,3 +281,54 @@ func TestSetSeedStatus(t *testing.T) {
 		t.Fatalf("SeedStatus = %q, want failed", got.SeedStatus)
 	}
 }
+
+func TestDeleteSessionRemovesFinishedRowOnly(t *testing.T) {
+	s := open(t)
+	s.Upsert(row("loom-live")) // last_status "unknown" == live
+	s.Upsert(row("loom-done"))
+	s.MarkEnded("loom-done", "done", 0, 2000)
+
+	// deleting a live row is a no-op (status guard)
+	if err := s.DeleteSession("loom-live"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.Get("loom-live"); !ok {
+		t.Fatal("live row was deleted — status guard failed")
+	}
+	// deleting a finished row removes it
+	if err := s.DeleteSession("loom-done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.Get("loom-done"); ok {
+		t.Fatal("finished row was not deleted")
+	}
+	// unknown name is a harmless no-op
+	if err := s.DeleteSession("loom-nope"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeleteEndedAndCountEnded(t *testing.T) {
+	s := open(t)
+	s.Upsert(row("loom-live"))
+	s.SetStatus("loom-live", "running")
+	s.Upsert(row("loom-d1"))
+	s.MarkEnded("loom-d1", "done", 0, 2000)
+	s.Upsert(row("loom-d2"))
+	s.MarkEnded("loom-d2", "error", 1, 2001)
+
+	n, err := s.CountEnded()
+	if err != nil || n != 2 {
+		t.Fatalf("CountEnded = %d, %v; want 2", n, err)
+	}
+	deleted, err := s.DeleteEnded()
+	if err != nil || deleted != 2 {
+		t.Fatalf("DeleteEnded = %d, %v; want 2", deleted, err)
+	}
+	if live, _ := s.Live(); len(live) != 1 || live[0].Name != "loom-live" {
+		t.Fatalf("live row lost after DeleteEnded: %+v", live)
+	}
+	if n, _ := s.CountEnded(); n != 0 {
+		t.Fatalf("CountEnded after clear = %d; want 0", n)
+	}
+}

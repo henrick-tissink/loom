@@ -3868,3 +3868,106 @@ func TestWallZeroDepsNoPanic(t *testing.T) {
 		t.Fatal("esc did not return to the dashboard")
 	}
 }
+
+func TestDismissRecentRowDeletesFromStore(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d", ProjectLabel: "gloom", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{
+		{Name: "loom-d", ProjectLabel: "gloom", LastStatus: "done"},
+	}}
+	a.rebuildRows()
+	a.cursor = 0 // the only row is the recent one
+
+	a.Update(key("x"))
+	if a.view != viewConfirmKill || !a.actionTarget.recent {
+		t.Fatalf("confirm not opened on recent row: view=%v target=%+v", a.view, a.actionTarget)
+	}
+	// confirm copy must say "dismiss", not "kill"
+	if body := a.View(); !strings.Contains(body, "dismiss") {
+		t.Fatalf("confirm copy missing 'dismiss':\n%s", body)
+	}
+
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("'y' returned no command")
+	}
+	if msg := cmd(); msg != (pollNowMsg{}) {
+		t.Fatalf("dismiss returned %T, want pollNowMsg", msg)
+	}
+	if _, ok, _ := st.Get("loom-d"); ok {
+		t.Fatal("recent row was not deleted from the store")
+	}
+}
+
+func TestBulkClearDeletesAllFinished(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d1", ProjectLabel: "a", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+	st.Upsert(store.SessionRow{Name: "loom-d2", ProjectLabel: "b", CreatedAt: 1, EndedAt: 2, ExitCode: 1, LastStatus: "error"})
+	st.Upsert(store.SessionRow{Name: "loom-live", ProjectLabel: "c", CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "running"})
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{
+		Live:   []status.Row{{SessionRow: store.SessionRow{Name: "loom-live", ProjectLabel: "c"}, Status: status.Running}},
+		Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}, {Name: "loom-d2", LastStatus: "error"}},
+	}
+	a.rebuildRows()
+
+	a.Update(key("X"))
+	if a.view != viewConfirmClear || a.clearCount != 2 {
+		t.Fatalf("clear confirm not opened: view=%v count=%d", a.view, a.clearCount)
+	}
+	if body := a.View(); !strings.Contains(body, "2") {
+		t.Fatalf("clear confirm missing count:\n%s", body)
+	}
+
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("'y' returned no command")
+	}
+	if msg := cmd(); msg != (pollNowMsg{}) {
+		t.Fatalf("clear returned %T, want pollNowMsg", msg)
+	}
+	if n, _ := st.CountEnded(); n != 0 {
+		t.Fatalf("finished rows remain after clear: %d", n)
+	}
+	if live, _ := st.Live(); len(live) != 1 {
+		t.Fatalf("live row lost in bulk clear: %+v", live)
+	}
+}
+
+func TestBulkClearInertWhenNoRecent(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Live: []status.Row{
+		{SessionRow: store.SessionRow{Name: "loom-a", ProjectLabel: "p"}, Status: status.Running},
+	}}
+	a.rebuildRows()
+	a.Update(key("X"))
+	if a.view != viewDash {
+		t.Fatalf("X opened a confirm with no recent rows: view=%v", a.view)
+	}
+}
+
+func TestKeybarShowsDismissAndClear(t *testing.T) {
+	a := fixtureApp()
+	a.width, a.height = 150, 30 // fixtureApp defaults to 100x30; widen locally so the suffix clears the width gate (fixture already has a recent row)
+	body := a.View()
+	if !strings.Contains(body, "x kill/dismiss") {
+		t.Fatalf("keybar missing 'x kill/dismiss':\n%s", body)
+	}
+	if !strings.Contains(body, "X clear") {
+		t.Fatalf("keybar missing 'X clear':\n%s", body)
+	}
+}

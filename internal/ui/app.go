@@ -35,6 +35,7 @@ const (
 	viewDash view = iota
 	viewLauncher
 	viewConfirmKill
+	viewConfirmClear
 	viewTag
 	viewPeek
 	viewSearch
@@ -106,6 +107,8 @@ type App struct {
 	// change, so the kill/tag-save handlers must act on this captured target
 	// rather than re-reading selected() at confirm/save time (finding 5).
 	actionTarget uiRow
+
+	clearCount int // finished-row count captured when the clear confirm opens
 
 	// peekTarget/peekContent: peek acts on a target captured at open time,
 	// same captured-target discipline as actionTarget above.
@@ -793,8 +796,20 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s := msg.String()
 		if s == "y" {
 			a.view = viewDash
+			name := a.actionTarget.name
+			if a.actionTarget.recent {
+				st := a.deps.Store
+				if st == nil {
+					return a, nil
+				}
+				return a, func() tea.Msg {
+					if err := st.DeleteSession(name); err != nil {
+						return errMsg{err}
+					}
+					return pollNowMsg{}
+				}
+			}
 			if a.deps.Tmux != nil {
-				name := a.actionTarget.name
 				tm := a.deps.Tmux
 				return a, func() tea.Msg {
 					if err := tm.KillSession(name); err != nil {
@@ -804,6 +819,29 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return a, nil
+		}
+		if s == "n" || msg.Type == tea.KeyEsc {
+			a.view = viewDash
+		}
+		if s == "ctrl+c" {
+			return a, tea.Quit
+		}
+		return a, nil
+
+	case viewConfirmClear:
+		s := msg.String()
+		if s == "y" {
+			a.view = viewDash
+			st := a.deps.Store
+			if st == nil {
+				return a, nil
+			}
+			return a, func() tea.Msg {
+				if _, err := st.DeleteEnded(); err != nil {
+					return errMsg{err}
+				}
+				return pollNowMsg{}
+			}
 		}
 		if s == "n" || msg.Type == tea.KeyEsc {
 			a.view = viewDash
@@ -903,6 +941,13 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if r, ok := a.selected(); ok {
 			a.actionTarget = r
 			a.view = viewConfirmKill
+		}
+	case "X":
+		if len(a.snap.Recent) > 0 && a.deps.Store != nil {
+			if n, err := a.deps.Store.CountEnded(); err == nil && n > 0 {
+				a.clearCount = int(n)
+				a.view = viewConfirmClear
+			}
 		}
 	case "t":
 		if r, ok := a.selected(); ok {
@@ -2049,8 +2094,20 @@ func (a *App) View() string {
 		return a.viewLauncher(w)
 	case viewConfirmKill:
 		r := a.actionTarget
-		return frame(w, "kill session", "",
-			[]string{"", "  kill " + styNeedsYou.Render(r.label) + styMeta.Render(" ("+r.name+")") + " ?", ""},
+		title, verb := "kill session", "kill "
+		if r.recent {
+			title, verb = "dismiss session", "dismiss "
+		}
+		return frame(w, title, "",
+			[]string{"", "  " + verb + styNeedsYou.Render(r.label) + styMeta.Render(" ("+r.name+")") + " ?", ""},
+			"y confirm · n/esc cancel")
+	case viewConfirmClear:
+		msg := fmt.Sprintf("  clear %d finished session", a.clearCount)
+		if a.clearCount != 1 {
+			msg += "s"
+		}
+		return frame(w, "clear finished", "",
+			[]string{"", styNeedsYou.Render(msg) + " ?", ""},
 			"y confirm · n/esc cancel")
 	case viewTag:
 		return frame(w, "tags", "", []string{"", "  " + a.tag.View(), ""},
@@ -2148,8 +2205,8 @@ func (a *App) View() string {
 	}
 
 	counts := fmt.Sprintf("%d live · %d needs you", live, needs)
-	keybar := "↵ attach · space peek · n new · x kill · t tag · r reopen · q quit"
-	suffix := " · / search · w workflows · N fan-out · W wall"
+	keybar := "↵ attach · space peek · n new · x kill/dismiss · t tag · r reopen · q quit"
+	suffix := " · X clear · / search · w workflows · N fan-out · W wall"
 	if inner > lipgloss.Width(keybar)+lipgloss.Width(suffix)+2 {
 		keybar += suffix
 	}
