@@ -3905,3 +3905,57 @@ func TestDismissRecentRowDeletesFromStore(t *testing.T) {
 		t.Fatal("recent row was not deleted from the store")
 	}
 }
+
+func TestBulkClearDeletesAllFinished(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d1", ProjectLabel: "a", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+	st.Upsert(store.SessionRow{Name: "loom-d2", ProjectLabel: "b", CreatedAt: 1, EndedAt: 2, ExitCode: 1, LastStatus: "error"})
+	st.Upsert(store.SessionRow{Name: "loom-live", ProjectLabel: "c", CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "running"})
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{
+		Live:   []status.Row{{SessionRow: store.SessionRow{Name: "loom-live", ProjectLabel: "c"}, Status: status.Running}},
+		Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}, {Name: "loom-d2", LastStatus: "error"}},
+	}
+	a.rebuildRows()
+
+	a.Update(key("X"))
+	if a.view != viewConfirmClear || a.clearCount != 2 {
+		t.Fatalf("clear confirm not opened: view=%v count=%d", a.view, a.clearCount)
+	}
+	if body := a.View(); !strings.Contains(body, "2") {
+		t.Fatalf("clear confirm missing count:\n%s", body)
+	}
+
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("'y' returned no command")
+	}
+	if msg := cmd(); msg != (pollNowMsg{}) {
+		t.Fatalf("clear returned %T, want pollNowMsg", msg)
+	}
+	if n, _ := st.CountEnded(); n != 0 {
+		t.Fatalf("finished rows remain after clear: %d", n)
+	}
+	if live, _ := st.Live(); len(live) != 1 {
+		t.Fatalf("live row lost in bulk clear: %+v", live)
+	}
+}
+
+func TestBulkClearInertWhenNoRecent(t *testing.T) {
+	a := NewApp(Deps{})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Live: []status.Row{
+		{SessionRow: store.SessionRow{Name: "loom-a", ProjectLabel: "p"}, Status: status.Running},
+	}}
+	a.rebuildRows()
+	a.Update(key("X"))
+	if a.view != viewDash {
+		t.Fatalf("X opened a confirm with no recent rows: view=%v", a.view)
+	}
+}
