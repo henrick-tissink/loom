@@ -793,8 +793,20 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s := msg.String()
 		if s == "y" {
 			a.view = viewDash
+			name := a.actionTarget.name
+			if a.actionTarget.recent {
+				st := a.deps.Store
+				if st == nil {
+					return a, nil
+				}
+				return a, func() tea.Msg {
+					if err := st.DeleteSession(name); err != nil {
+						return errMsg{err}
+					}
+					return pollNowMsg{}
+				}
+			}
 			if a.deps.Tmux != nil {
-				name := a.actionTarget.name
 				tm := a.deps.Tmux
 				return a, func() tea.Msg {
 					if err := tm.KillSession(name); err != nil {
@@ -2049,8 +2061,12 @@ func (a *App) View() string {
 		return a.viewLauncher(w)
 	case viewConfirmKill:
 		r := a.actionTarget
-		return frame(w, "kill session", "",
-			[]string{"", "  kill " + styNeedsYou.Render(r.label) + styMeta.Render(" ("+r.name+")") + " ?", ""},
+		title, verb := "kill session", "kill "
+		if r.recent {
+			title, verb = "dismiss session", "dismiss "
+		}
+		return frame(w, title, "",
+			[]string{"", "  " + verb + styNeedsYou.Render(r.label) + styMeta.Render(" ("+r.name+")") + " ?", ""},
 			"y confirm · n/esc cancel")
 	case viewTag:
 		return frame(w, "tags", "", []string{"", "  " + a.tag.View(), ""},

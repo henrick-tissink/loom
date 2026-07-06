@@ -3868,3 +3868,40 @@ func TestWallZeroDepsNoPanic(t *testing.T) {
 		t.Fatal("esc did not return to the dashboard")
 	}
 }
+
+func TestDismissRecentRowDeletesFromStore(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d", ProjectLabel: "gloom", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{
+		{Name: "loom-d", ProjectLabel: "gloom", LastStatus: "done"},
+	}}
+	a.rebuildRows()
+	a.cursor = 0 // the only row is the recent one
+
+	a.Update(key("x"))
+	if a.view != viewConfirmKill || !a.actionTarget.recent {
+		t.Fatalf("confirm not opened on recent row: view=%v target=%+v", a.view, a.actionTarget)
+	}
+	// confirm copy must say "dismiss", not "kill"
+	if body := a.View(); !strings.Contains(body, "dismiss") {
+		t.Fatalf("confirm copy missing 'dismiss':\n%s", body)
+	}
+
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("'y' returned no command")
+	}
+	if msg := cmd(); msg != (pollNowMsg{}) {
+		t.Fatalf("dismiss returned %T, want pollNowMsg", msg)
+	}
+	if _, ok, _ := st.Get("loom-d"); ok {
+		t.Fatal("recent row was not deleted from the store")
+	}
+}
