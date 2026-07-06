@@ -25,7 +25,7 @@ import (
 
 func fixtureApp() *App {
 	a := NewApp(Deps{})
-	a.width, a.height = 100, 30
+	a.width, a.height = 150, 30
 	a.snap = status.Snapshot{
 		Live: []status.Row{
 			{SessionRow: store.SessionRow{Name: "loom-b", ProjectLabel: "tavli"}, Status: status.NeedsYou},
@@ -3957,5 +3957,16 @@ func TestBulkClearInertWhenNoRecent(t *testing.T) {
 	a.Update(key("X"))
 	if a.view != viewDash {
 		t.Fatalf("X opened a confirm with no recent rows: view=%v", a.view)
+	}
+}
+
+func TestKeybarShowsDismissAndClear(t *testing.T) {
+	a := fixtureApp() // 100x30, has a recent row; wide enough for the suffix
+	body := a.View()
+	if !strings.Contains(body, "x kill/dismiss") {
+		t.Fatalf("keybar missing 'x kill/dismiss':\n%s", body)
+	}
+	if !strings.Contains(body, "X clear") {
+		t.Fatalf("keybar missing 'X clear':\n%s", body)
 	}
 }

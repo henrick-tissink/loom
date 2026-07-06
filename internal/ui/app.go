@@ -2205,8 +2205,8 @@ func (a *App) View() string {
 	}
 
 	counts := fmt.Sprintf("%d live · %d needs you", live, needs)
-	keybar := "↵ attach · space peek · n new · x kill · t tag · r reopen · q quit"
-	suffix := " · / search · w workflows · N fan-out · W wall"
+	keybar := "↵ attach · space peek · n new · x kill/dismiss · t tag · r reopen · q quit"
+	suffix := " · X clear · / search · w workflows · N fan-out · W wall"
 	if inner > lipgloss.Width(keybar)+lipgloss.Width(suffix)+2 {
 		keybar += suffix
 	}
