@@ -25,7 +25,7 @@ import (
 
 func fixtureApp() *App {
 	a := NewApp(Deps{})
-	a.width, a.height = 150, 30
+	a.width, a.height = 100, 30
 	a.snap = status.Snapshot{
 		Live: []status.Row{
 			{SessionRow: store.SessionRow{Name: "loom-b", ProjectLabel: "tavli"}, Status: status.NeedsYou},
@@ -3961,7 +3961,8 @@ func TestBulkClearInertWhenNoRecent(t *testing.T) {
 }
 
 func TestKeybarShowsDismissAndClear(t *testing.T) {
-	a := fixtureApp() // 100x30, has a recent row; wide enough for the suffix
+	a := fixtureApp()
+	a.width, a.height = 150, 30 // fixtureApp defaults to 100x30; widen locally so the suffix clears the width gate (fixture already has a recent row)
 	body := a.View()
 	if !strings.Contains(body, "x kill/dismiss") {
 		t.Fatalf("keybar missing 'x kill/dismiss':\n%s", body)
