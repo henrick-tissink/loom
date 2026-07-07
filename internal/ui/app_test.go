@@ -4193,6 +4193,37 @@ func TestClearCountRecomputesOnTick(t *testing.T) {
 	}
 }
 
+// H6 change 3: if the recomputed count hits 0 while the clear dialog is
+// open (everything finished got removed out from under it), the dialog
+// must auto-close back to the dashboard rather than show "clear 0 finished
+// sessions".
+func TestClearDialogClosesWhenCountHitsZero(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d1", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.Update(key("X"))
+	if a.view != viewConfirmClear || a.clearCount != 1 {
+		t.Fatalf("clear confirm not opened: view=%v count=%d", a.view, a.clearCount)
+	}
+
+	// the one finished row disappears out from under the open dialog
+	if err := st.DeleteSession("loom-d1"); err != nil {
+		t.Fatal(err)
+	}
+	a.Update(tickMsg{})
+	if a.view != viewDash {
+		t.Fatalf("view = %v, want viewDash (dialog should auto-close at 0)", a.view)
+	}
+}
+
 // F3: the clear confirm's decline/quit branches must be locked down.
 func TestClearConfirmDeclineAndQuit(t *testing.T) {
 	mk := func() *App {

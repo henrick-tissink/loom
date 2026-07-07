@@ -583,6 +583,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if st := a.deps.Store; st != nil {
 				if n, err := st.CountEnded(); err == nil {
 					a.clearCount = int(n)
+					if a.clearCount == 0 {
+						a.view = viewDash
+					}
 				}
 			}
 			return a, tea.Batch(a.pollCmd(), tickAfter())
@@ -798,19 +801,44 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// reapDeadElseSkipLive decides whether name's finished row is safe to delete.
+// It returns skip=true when the row must be kept: the tmux pane is genuinely
+// live (a resurrection race — not really finished), OR a dead pane's reap
+// failed (deleting anyway would let the status engine re-adopt a zero-metadata
+// zombie; leaving the row lets the engine re-reap the pane and a later dismiss
+// succeed). It returns skip=false when it is safe to delete: no tmux session
+// exists, a dead pane was successfully reaped, or Tmux is not wired.
+func (a *App) reapDeadElseSkipLive(name string) bool {
+	tm := a.deps.Tmux
+	if tm == nil {
+		return false
+	}
+	ps, err := tm.PaneStatus(name)
+	if err != nil {
+		return false // no session — nothing to reap, safe to delete
+	}
+	if !ps.Dead {
+		return true // genuinely live — don't dismiss a live session
+	}
+	if err := tm.KillSession(name); err != nil {
+		return true // dead but reap failed — keep the row, engine will re-reap
+	}
+	return false // dead pane reaped — safe to delete
+}
+
 // confirmCancel handles the shared non-'y' keys of the confirm dialogs
 // (viewConfirmKill / viewConfirmClear): n/esc return to the dashboard, ctrl+c
-// quits. It returns (model, cmd, handled=true) when it consumed the key.
-func (a *App) confirmCancel(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+// quits, any other key is a no-op while a confirm is open.
+func (a *App) confirmCancel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
 	if s == "n" || msg.Type == tea.KeyEsc {
 		a.view = viewDash
-		return a, nil, true
+		return a, nil
 	}
 	if s == "ctrl+c" {
-		return a, tea.Quit, true
+		return a, tea.Quit
 	}
-	return a, nil, true // any other key is a no-op while a confirm is open
+	return a, nil // any other key is a no-op while a confirm is open
 }
 
 func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -828,7 +856,6 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if st == nil {
 					return a, nil
 				}
-				tm := a.deps.Tmux
 				return a, func() tea.Msg {
 					// Close the reap window (adversarial finding F2): if a
 					// lingering tmux session still exists for this "finished"
@@ -836,13 +863,8 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					// a zero-metadata zombie. Reap a DEAD pane first; leave a
 					// genuinely LIVE one alone (a resurrection race — it isn't
 					// really finished, so don't dismiss it).
-					if tm != nil {
-						if ps, err := tm.PaneStatus(name); err == nil {
-							if !ps.Dead {
-								return pollNowMsg{}
-							}
-							_ = tm.KillSession(name)
-						}
+					if a.reapDeadElseSkipLive(name) {
+						return pollNowMsg{}
 					}
 					if err := st.DeleteSession(name); err != nil {
 						return errMsg{err}
@@ -861,8 +883,7 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
-		m, cmd, _ := a.confirmCancel(msg)
-		return m, cmd
+		return a.confirmCancel(msg)
 
 	case viewConfirmClear:
 		s := msg.String()
@@ -885,11 +906,8 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return errMsg{err}
 				}
 				for _, n := range names {
-					if ps, e := tm.PaneStatus(n); e == nil {
-						if !ps.Dead {
-							continue // secretly live — don't clear a live session
-						}
-						_ = tm.KillSession(n) // reap dead lingering pane
+					if a.reapDeadElseSkipLive(n) {
+						continue
 					}
 					if err := st.DeleteSession(n); err != nil {
 						return errMsg{err}
@@ -898,8 +916,7 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return pollNowMsg{}
 			}
 		}
-		m, cmd, _ := a.confirmCancel(msg)
-		return m, cmd
+		return a.confirmCancel(msg)
 
 	case viewTag:
 		// ctrl+c must quit even from a free-text input view — checked BEFORE
