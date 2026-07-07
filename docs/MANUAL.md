@@ -20,7 +20,7 @@ The one habit that matters: **F12 detaches** (session keeps living). Quitting cl
 loom            # if symlinked to your PATH, else: cd ~/Sauce/loom && ./loom
 ```
 
-On first launch the indexer sweeps your entire archive in the background (~10s for hundreds of MB); search works immediately on whatever is indexed so far and re-sweeps every 10 minutes. Projects are auto-discovered from your workspace root — `$LOOM_WORKSPACE` if set, else `~/Sauce` (anything with a `.git` or existing Claude transcripts).
+On first launch the indexer sweeps your entire archive in the background (~10s for hundreds of MB); search works immediately on whatever is indexed so far and re-sweeps every 10 minutes. Projects are auto-discovered from your workspace root — `$LOOM_WORKSPACE` if set, else `~/Sauce` (anything with a `.git` or existing Claude transcripts). A workspace subfolder that isn't itself a project is treated as a group: repos one level inside it are discovered too and labeled `group/repo`.
 
 ## 3. The dashboard
 
