@@ -332,3 +332,25 @@ func TestDeleteEndedAndCountEnded(t *testing.T) {
 		t.Fatalf("CountEnded after clear = %d; want 0", n)
 	}
 }
+
+func TestEndedNames(t *testing.T) {
+	s := open(t)
+	s.Upsert(row("loom-live"))
+	s.SetStatus("loom-live", "running")
+	s.Upsert(row("loom-d1"))
+	s.MarkEnded("loom-d1", "done", 0, 2000)
+	s.Upsert(row("loom-d2"))
+	s.MarkEnded("loom-d2", "error", 1, 2001)
+
+	names, err := s.EndedNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, n := range names {
+		got[n] = true
+	}
+	if len(names) != 2 || !got["loom-d1"] || !got["loom-d2"] || got["loom-live"] {
+		t.Fatalf("EndedNames = %v; want exactly loom-d1, loom-d2", names)
+	}
+}
