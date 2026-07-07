@@ -235,7 +235,9 @@ func (s *Store) Get(name string) (SessionRow, bool, error) {
 
 const liveSet = "('running','needs_you','idle','unknown')"
 
-const recentSet = "('done','error')" // the terminal set Recent() selects
+// endedSet is the terminal ('done'/'error') status set shared by Recent(),
+// EndedNames, DeleteSession, DeleteEnded, and CountEnded.
+const endedSet = "('done','error')"
 
 func (s *Store) Live() ([]SessionRow, error) {
 	return s.query("SELECT " + cols + " FROM sessions WHERE last_status IN " + liveSet +
@@ -243,7 +245,7 @@ func (s *Store) Live() ([]SessionRow, error) {
 }
 
 func (s *Store) Recent(limit int) ([]SessionRow, error) {
-	return s.query(fmt.Sprintf("SELECT "+cols+" FROM sessions WHERE last_status IN "+recentSet+
+	return s.query(fmt.Sprintf("SELECT "+cols+" FROM sessions WHERE last_status IN "+endedSet+
 		" ORDER BY ended_at DESC LIMIT %d", limit))
 }
 
@@ -252,13 +254,13 @@ func (s *Store) Recent(limit int) ([]SessionRow, error) {
 // removed via this path.
 func (s *Store) DeleteSession(name string) error {
 	_, err := s.db.Exec(
-		"DELETE FROM sessions WHERE name = ? AND last_status IN "+recentSet, name)
+		"DELETE FROM sessions WHERE name = ? AND last_status IN "+endedSet, name)
 	return err
 }
 
 // DeleteEnded removes every finished row and returns the number deleted.
 func (s *Store) DeleteEnded() (int64, error) {
-	res, err := s.db.Exec("DELETE FROM sessions WHERE last_status IN " + recentSet)
+	res, err := s.db.Exec("DELETE FROM sessions WHERE last_status IN " + endedSet)
 	if err != nil {
 		return 0, err
 	}
@@ -269,8 +271,27 @@ func (s *Store) DeleteEnded() (int64, error) {
 // confirm; the snapshot's Recent list is capped at 10 and would undercount).
 func (s *Store) CountEnded() (int64, error) {
 	var n int64
-	err := s.db.QueryRow("SELECT count(*) FROM sessions WHERE last_status IN " + recentSet).Scan(&n)
+	err := s.db.QueryRow("SELECT count(*) FROM sessions WHERE last_status IN " + endedSet).Scan(&n)
 	return n, err
+}
+
+// EndedNames returns the session names of all finished rows (used to reap any
+// lingering tmux panes before a bulk clear).
+func (s *Store) EndedNames() ([]string, error) {
+	rows, err := s.db.Query("SELECT name FROM sessions WHERE last_status IN " + endedSet)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
 }
 
 // MarkLiveOrphansEnded retires live rows with no tmux backing to history as

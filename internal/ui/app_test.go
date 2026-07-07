@@ -3971,3 +3971,322 @@ func TestKeybarShowsDismissAndClear(t *testing.T) {
 		t.Fatalf("keybar missing 'X clear':\n%s", body)
 	}
 }
+
+// F6+F2: dismissing a finished row whose tmux session is genuinely LIVE must
+// NOT delete the row and must NOT kill the live session.
+func TestDismissSkipsRowWithLiveTmuxSession(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomhard%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := tm.NewSession("loom-live1", dir, "sleep 30", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	// row claims done, but the tmux pane is alive (resurrection race)
+	st.Upsert(store.SessionRow{Name: "loom-live1", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st, Tmux: tm})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-live1", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.cursor = 0
+
+	a.Update(key("x"))
+	_, cmd := a.Update(key("y"))
+	if cmd != nil {
+		cmd() // run the closure
+	}
+	if _, ok, _ := st.Get("loom-live1"); !ok {
+		t.Fatal("row was deleted even though its tmux session is live")
+	}
+	if !tm.HasSession("loom-live1") {
+		t.Fatal("live tmux session was killed by a dismiss")
+	}
+}
+
+// F2: dismissing a finished row with NO tmux session deletes it (unchanged path).
+func TestDismissDeletesRowWithNoTmuxSession(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomhard2%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-gone", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st, Tmux: tm})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-gone", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.cursor = 0
+	a.Update(key("x"))
+	_, cmd := a.Update(key("y"))
+	if cmd != nil {
+		cmd()
+	}
+	if _, ok, _ := st.Get("loom-gone"); ok {
+		t.Fatal("row with no tmux session was not deleted")
+	}
+}
+
+// F2: dismissing a finished row whose tmux session is a DEAD lingering pane
+// (remain-on-exit) must reap it (KillSession) then delete the row, closing
+// the window where a bare delete lets the next poll re-adopt a zombie.
+func TestDismissReapsDeadPane(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomhard3%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := tm.NewSession("loom-dead", dir, "true", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ps, err := tm.PaneStatus("loom-dead")
+		if err != nil {
+			t.Fatalf("PaneStatus: %v", err)
+		}
+		if ps.Dead {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pane never went dead — is remain-on-exit on?")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-dead", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st, Tmux: tm})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-dead", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.cursor = 0
+
+	a.Update(key("x"))
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("'y' returned no command")
+	}
+	cmd()
+
+	if _, ok, _ := st.Get("loom-dead"); ok {
+		t.Fatal("row with a dead lingering pane was not deleted")
+	}
+	if tm.HasSession("loom-dead") {
+		t.Fatal("dead lingering pane was not reaped (KillSession) before delete")
+	}
+}
+
+// F2: bulk clear must reap DEAD lingering panes and delete their rows, but
+// skip (not kill, not delete) rows whose tmux session is secretly LIVE.
+func TestBulkClearReapsDeadSkipsLive(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomhard4%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := tm.NewSession("loom-dead", dir, "true", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.NewSession("loom-live", dir, "sleep 30", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ps, err := tm.PaneStatus("loom-dead")
+		if err != nil {
+			t.Fatalf("PaneStatus: %v", err)
+		}
+		if ps.Dead {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pane never went dead — is remain-on-exit on?")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-dead", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+	st.Upsert(store.SessionRow{Name: "loom-live", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 1, LastStatus: "error"})
+
+	a := NewApp(Deps{Store: st, Tmux: tm})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{
+		{Name: "loom-dead", LastStatus: "done"},
+		{Name: "loom-live", LastStatus: "error"},
+	}}
+	a.rebuildRows()
+
+	a.Update(key("X"))
+	if a.view != viewConfirmClear || a.clearCount != 2 {
+		t.Fatalf("clear confirm not opened: view=%v count=%d", a.view, a.clearCount)
+	}
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("'y' returned no command")
+	}
+	cmd()
+
+	if _, ok, _ := st.Get("loom-dead"); ok {
+		t.Fatal("dead-pane row was not deleted by bulk clear")
+	}
+	if tm.HasSession("loom-dead") {
+		t.Fatal("dead lingering pane was not reaped by bulk clear")
+	}
+	if _, ok, _ := st.Get("loom-live"); !ok {
+		t.Fatal("live-session row was deleted by bulk clear (should be skipped)")
+	}
+	if !tm.HasSession("loom-live") {
+		t.Fatal("live tmux session was killed by bulk clear (should be skipped)")
+	}
+}
+
+// F1: while the clear confirm is open, the shown count must track reality so it
+// can't under-report what DeleteEnded removes.
+func TestClearCountRecomputesOnTick(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d1", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+	st.Upsert(store.SessionRow{Name: "loom-d2", CreatedAt: 1, EndedAt: 2, LastStatus: "error"})
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}, {Name: "loom-d2", LastStatus: "error"}}}
+	a.rebuildRows()
+	a.Update(key("X"))
+	if a.clearCount != 2 {
+		t.Fatalf("clearCount = %d, want 2", a.clearCount)
+	}
+	// a third session finishes while the dialog is open
+	st.Upsert(store.SessionRow{Name: "loom-d3", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+	a.Update(tickMsg{})
+	if a.clearCount != 3 {
+		t.Fatalf("clearCount after tick = %d, want 3 (must track reality)", a.clearCount)
+	}
+}
+
+// H6 change 3: if the recomputed count hits 0 while the clear dialog is
+// open (everything finished got removed out from under it), the dialog
+// must auto-close back to the dashboard rather than show "clear 0 finished
+// sessions".
+func TestClearDialogClosesWhenCountHitsZero(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d1", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.Update(key("X"))
+	if a.view != viewConfirmClear || a.clearCount != 1 {
+		t.Fatalf("clear confirm not opened: view=%v count=%d", a.view, a.clearCount)
+	}
+
+	// the one finished row disappears out from under the open dialog
+	if err := st.DeleteSession("loom-d1"); err != nil {
+		t.Fatal(err)
+	}
+	a.Update(tickMsg{})
+	if a.view != viewDash {
+		t.Fatalf("view = %v, want viewDash (dialog should auto-close at 0)", a.view)
+	}
+}
+
+// F3: the clear confirm's decline/quit branches must be locked down.
+func TestClearConfirmDeclineAndQuit(t *testing.T) {
+	mk := func() *App {
+		st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		st.Upsert(store.SessionRow{Name: "loom-d1", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+		a := NewApp(Deps{Store: st})
+		a.width, a.height = 100, 30
+		a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}}}
+		a.rebuildRows()
+		a.Update(key("X"))
+		if a.view != viewConfirmClear {
+			t.Fatal("clear confirm did not open")
+		}
+		return a
+	}
+	// n -> dash, nothing deleted
+	a := mk()
+	a.Update(key("n"))
+	if a.view != viewDash {
+		t.Fatalf("n: view = %v, want dash", a.view)
+	}
+	// esc -> dash
+	a = mk()
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewDash {
+		t.Fatalf("esc: view = %v, want dash", a.view)
+	}
+	// ctrl+c -> quit
+	a = mk()
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c returned no cmd")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("ctrl+c: cmd = %T, want tea.QuitMsg", cmd())
+	}
+}
+
+// F5: exactly one finished row renders the singular copy.
+func TestClearConfirmSingularCopy(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d1", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.Update(key("X"))
+	if a.clearCount != 1 {
+		t.Fatalf("clearCount = %d, want 1", a.clearCount)
+	}
+	body := a.View()
+	if !strings.Contains(body, "1 finished session ") && !strings.Contains(body, "1 finished session ?") {
+		t.Fatalf("missing singular 'finished session':\n%s", body)
+	}
+	if strings.Contains(body, "1 finished sessions") {
+		t.Fatalf("plural used for count 1:\n%s", body)
+	}
+}
