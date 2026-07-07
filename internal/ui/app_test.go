@@ -4192,3 +4192,70 @@ func TestClearCountRecomputesOnTick(t *testing.T) {
 		t.Fatalf("clearCount after tick = %d, want 3 (must track reality)", a.clearCount)
 	}
 }
+
+// F3: the clear confirm's decline/quit branches must be locked down.
+func TestClearConfirmDeclineAndQuit(t *testing.T) {
+	mk := func() *App {
+		st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		st.Upsert(store.SessionRow{Name: "loom-d1", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+		a := NewApp(Deps{Store: st})
+		a.width, a.height = 100, 30
+		a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}}}
+		a.rebuildRows()
+		a.Update(key("X"))
+		if a.view != viewConfirmClear {
+			t.Fatal("clear confirm did not open")
+		}
+		return a
+	}
+	// n -> dash, nothing deleted
+	a := mk()
+	a.Update(key("n"))
+	if a.view != viewDash {
+		t.Fatalf("n: view = %v, want dash", a.view)
+	}
+	// esc -> dash
+	a = mk()
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.view != viewDash {
+		t.Fatalf("esc: view = %v, want dash", a.view)
+	}
+	// ctrl+c -> quit
+	a = mk()
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c returned no cmd")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("ctrl+c: cmd = %T, want tea.QuitMsg", cmd())
+	}
+}
+
+// F5: exactly one finished row renders the singular copy.
+func TestClearConfirmSingularCopy(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d1", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.Update(key("X"))
+	if a.clearCount != 1 {
+		t.Fatalf("clearCount = %d, want 1", a.clearCount)
+	}
+	body := a.View()
+	if !strings.Contains(body, "1 finished session ") && !strings.Contains(body, "1 finished session ?") {
+		t.Fatalf("missing singular 'finished session':\n%s", body)
+	}
+	if strings.Contains(body, "1 finished sessions") {
+		t.Fatalf("plural used for count 1:\n%s", body)
+	}
+}
