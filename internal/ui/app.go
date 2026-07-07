@@ -798,6 +798,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// confirmCancel handles the shared non-'y' keys of the confirm dialogs
+// (viewConfirmKill / viewConfirmClear): n/esc return to the dashboard, ctrl+c
+// quits. It returns (model, cmd, handled=true) when it consumed the key.
+func (a *App) confirmCancel(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	s := msg.String()
+	if s == "n" || msg.Type == tea.KeyEsc {
+		a.view = viewDash
+		return a, nil, true
+	}
+	if s == "ctrl+c" {
+		return a, tea.Quit, true
+	}
+	return a, nil, true // any other key is a no-op while a confirm is open
+}
+
 func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch a.view {
 	case viewLauncher:
@@ -846,13 +861,8 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
-		if s == "n" || msg.Type == tea.KeyEsc {
-			a.view = viewDash
-		}
-		if s == "ctrl+c" {
-			return a, tea.Quit
-		}
-		return a, nil
+		m, cmd, _ := a.confirmCancel(msg)
+		return m, cmd
 
 	case viewConfirmClear:
 		s := msg.String()
@@ -888,13 +898,8 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return pollNowMsg{}
 			}
 		}
-		if s == "n" || msg.Type == tea.KeyEsc {
-			a.view = viewDash
-		}
-		if s == "ctrl+c" {
-			return a, tea.Quit
-		}
-		return a, nil
+		m, cmd, _ := a.confirmCancel(msg)
+		return m, cmd
 
 	case viewTag:
 		// ctrl+c must quit even from a free-text input view — checked BEFORE
@@ -984,6 +989,9 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.openWall()
 	case "x":
 		if r, ok := a.selected(); ok {
+			if r.recent && a.deps.Store == nil {
+				break // no store to dismiss from — stay consistent with 'X'
+			}
 			a.actionTarget = r
 			a.view = viewConfirmKill
 		}
