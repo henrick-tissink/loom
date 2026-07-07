@@ -4039,3 +4039,129 @@ func TestDismissDeletesRowWithNoTmuxSession(t *testing.T) {
 		t.Fatal("row with no tmux session was not deleted")
 	}
 }
+
+// F2: dismissing a finished row whose tmux session is a DEAD lingering pane
+// (remain-on-exit) must reap it (KillSession) then delete the row, closing
+// the window where a bare delete lets the next poll re-adopt a zombie.
+func TestDismissReapsDeadPane(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomhard3%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := tm.NewSession("loom-dead", dir, "true", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ps, err := tm.PaneStatus("loom-dead")
+		if err != nil {
+			t.Fatalf("PaneStatus: %v", err)
+		}
+		if ps.Dead {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pane never went dead — is remain-on-exit on?")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-dead", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st, Tmux: tm})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-dead", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.cursor = 0
+
+	a.Update(key("x"))
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("'y' returned no command")
+	}
+	cmd()
+
+	if _, ok, _ := st.Get("loom-dead"); ok {
+		t.Fatal("row with a dead lingering pane was not deleted")
+	}
+	if tm.HasSession("loom-dead") {
+		t.Fatal("dead lingering pane was not reaped (KillSession) before delete")
+	}
+}
+
+// F2: bulk clear must reap DEAD lingering panes and delete their rows, but
+// skip (not kill, not delete) rows whose tmux session is secretly LIVE.
+func TestBulkClearReapsDeadSkipsLive(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomhard4%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := tm.NewSession("loom-dead", dir, "true", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.NewSession("loom-live", dir, "sleep 30", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ps, err := tm.PaneStatus("loom-dead")
+		if err != nil {
+			t.Fatalf("PaneStatus: %v", err)
+		}
+		if ps.Dead {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pane never went dead — is remain-on-exit on?")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-dead", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+	st.Upsert(store.SessionRow{Name: "loom-live", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 1, LastStatus: "error"})
+
+	a := NewApp(Deps{Store: st, Tmux: tm})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{
+		{Name: "loom-dead", LastStatus: "done"},
+		{Name: "loom-live", LastStatus: "error"},
+	}}
+	a.rebuildRows()
+
+	a.Update(key("X"))
+	if a.view != viewConfirmClear || a.clearCount != 2 {
+		t.Fatalf("clear confirm not opened: view=%v count=%d", a.view, a.clearCount)
+	}
+	_, cmd := a.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("'y' returned no command")
+	}
+	cmd()
+
+	if _, ok, _ := st.Get("loom-dead"); ok {
+		t.Fatal("dead-pane row was not deleted by bulk clear")
+	}
+	if tm.HasSession("loom-dead") {
+		t.Fatal("dead lingering pane was not reaped by bulk clear")
+	}
+	if _, ok, _ := st.Get("loom-live"); !ok {
+		t.Fatal("live-session row was deleted by bulk clear (should be skipped)")
+	}
+	if !tm.HasSession("loom-live") {
+		t.Fatal("live tmux session was killed by bulk clear (should be skipped)")
+	}
+}

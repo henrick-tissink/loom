@@ -141,7 +141,10 @@ if its pane happens to still read live at the moment `PaneStatus` is checked, th
 row is skipped for this pass and picked up by the next clear/dismiss. This is a
 sub-poll timing race with no data-safety impact: the terminal-status SQL guard
 still makes a live *row* unreachable via delete, so nothing is ever lost, only
-deferred by one pass.
+deferred by one pass. If the best-effort `KillSession` reap itself fails against
+a pane it just confirmed exists (very rare), the row is still deleted and the
+next engine poll can re-adopt it as a zero-metadata orphan — the same F2 loss,
+deferred by one poll.
 
 ## Testing (TDD)
 
