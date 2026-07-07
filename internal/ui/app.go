@@ -802,7 +802,22 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if st == nil {
 					return a, nil
 				}
+				tm := a.deps.Tmux
 				return a, func() tea.Msg {
+					// Close the reap window (adversarial finding F2): if a
+					// lingering tmux session still exists for this "finished"
+					// row, a bare row delete lets the next poll re-adopt it as
+					// a zero-metadata zombie. Reap a DEAD pane first; leave a
+					// genuinely LIVE one alone (a resurrection race — it isn't
+					// really finished, so don't dismiss it).
+					if tm != nil {
+						if ps, err := tm.PaneStatus(name); err == nil {
+							if !ps.Dead {
+								return pollNowMsg{}
+							}
+							_ = tm.KillSession(name)
+						}
+					}
 					if err := st.DeleteSession(name); err != nil {
 						return errMsg{err}
 					}
@@ -836,9 +851,28 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if st == nil {
 				return a, nil
 			}
+			tm := a.deps.Tmux
 			return a, func() tea.Msg {
-				if _, err := st.DeleteEnded(); err != nil {
+				if tm == nil {
+					if _, err := st.DeleteEnded(); err != nil {
+						return errMsg{err}
+					}
+					return pollNowMsg{}
+				}
+				names, err := st.EndedNames()
+				if err != nil {
 					return errMsg{err}
+				}
+				for _, n := range names {
+					if ps, e := tm.PaneStatus(n); e == nil {
+						if !ps.Dead {
+							continue // secretly live — don't clear a live session
+						}
+						_ = tm.KillSession(n) // reap dead lingering pane
+					}
+					if err := st.DeleteSession(n); err != nil {
+						return errMsg{err}
+					}
 				}
 				return pollNowMsg{}
 			}

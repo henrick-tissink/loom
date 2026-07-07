@@ -3971,3 +3971,71 @@ func TestKeybarShowsDismissAndClear(t *testing.T) {
 		t.Fatalf("keybar missing 'X clear':\n%s", body)
 	}
 }
+
+// F6+F2: dismissing a finished row whose tmux session is genuinely LIVE must
+// NOT delete the row and must NOT kill the live session.
+func TestDismissSkipsRowWithLiveTmuxSession(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomhard%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := tm.NewSession("loom-live1", dir, "sleep 30", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	// row claims done, but the tmux pane is alive (resurrection race)
+	st.Upsert(store.SessionRow{Name: "loom-live1", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st, Tmux: tm})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-live1", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.cursor = 0
+
+	a.Update(key("x"))
+	_, cmd := a.Update(key("y"))
+	if cmd != nil {
+		cmd() // run the closure
+	}
+	if _, ok, _ := st.Get("loom-live1"); !ok {
+		t.Fatal("row was deleted even though its tmux session is live")
+	}
+	if !tm.HasSession("loom-live1") {
+		t.Fatal("live tmux session was killed by a dismiss")
+	}
+}
+
+// F2: dismissing a finished row with NO tmux session deletes it (unchanged path).
+func TestDismissDeletesRowWithNoTmuxSession(t *testing.T) {
+	tm := &tmux.Client{Socket: fmt.Sprintf("loomhard2%d", os.Getpid())}
+	t.Cleanup(func() { _ = tm.KillServer() })
+	if err := tm.EnsureServer(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-gone", ProjectLabel: "p", CreatedAt: 1, EndedAt: 2, ExitCode: 0, LastStatus: "done"})
+
+	a := NewApp(Deps{Store: st, Tmux: tm})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-gone", LastStatus: "done"}}}
+	a.rebuildRows()
+	a.cursor = 0
+	a.Update(key("x"))
+	_, cmd := a.Update(key("y"))
+	if cmd != nil {
+		cmd()
+	}
+	if _, ok, _ := st.Get("loom-gone"); ok {
+		t.Fatal("row with no tmux session was not deleted")
+	}
+}

@@ -119,17 +119,29 @@ X (≥1 recent) → CountEnded() → viewConfirmClear("clear N … ?") → y
 - Nil `Store` → the dismiss/clear commands no-op, consistent with the search/status
   paths.
 
-## Known edge case (benign, self-healing)
+## Known edge case (mitigated)
 
 If an earlier `KillSession` reap failed and a **dead tmux pane lingers** for a
-finished session, dismissing its row lets the next poll re-adopt the name as a fresh
-orphan row, then `MarkEnded` + `KillSession` reap it again. The row may briefly
-reappear but converges within one or two polls / a second dismiss. This requires a
-prior failed reap (rare) and is not worth pre-empting in a single-user tool. We do
-**not** reap the tmux session on dismiss, because the engine's resurrection logic
-shows a row displayed as `done` can, in a launch race, still be a *live* session —
-reaping would risk killing it. Deleting only the row under the status guard is the
-safe minimal operation.
+finished session, a bare row-delete on dismiss (or bulk clear) is NOT benign: the
+next poll re-adopts the lingering pane's name as a fresh **zero-metadata** row,
+losing that session's Tags/Model/Mode/Seed and its true `CreatedAt` — this is a
+real data-loss defect (adversarial finding F2), not a cosmetic reappearance.
+
+Mitigation: both the dismiss path and the bulk-clear path now consult tmux before
+deleting each finished row. If a tmux session still exists for the name and its
+pane is **dead**, it is reaped (`KillSession`) first so the engine cannot re-adopt
+it, then the row is deleted. If the pane is genuinely **live** (a rare resurrection
+race — the engine's `done` status raced a real relaunch), the row is left alone
+and not dismissed/cleared; it was never really finished. If no tmux session exists
+for the name (the common case), the row is deleted directly, unchanged from
+before.
+
+Residual: a bulk clear can race a session that finishes at that exact instant —
+if its pane happens to still read live at the moment `PaneStatus` is checked, that
+row is skipped for this pass and picked up by the next clear/dismiss. This is a
+sub-poll timing race with no data-safety impact: the terminal-status SQL guard
+still makes a live *row* unreachable via delete, so nothing is ever lost, only
+deferred by one pass.
 
 ## Testing (TDD)
 
