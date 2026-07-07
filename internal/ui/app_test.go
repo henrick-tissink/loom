@@ -4165,3 +4165,30 @@ func TestBulkClearReapsDeadSkipsLive(t *testing.T) {
 		t.Fatal("live tmux session was killed by bulk clear (should be skipped)")
 	}
 }
+
+// F1: while the clear confirm is open, the shown count must track reality so it
+// can't under-report what DeleteEnded removes.
+func TestClearCountRecomputesOnTick(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	st.Upsert(store.SessionRow{Name: "loom-d1", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+	st.Upsert(store.SessionRow{Name: "loom-d2", CreatedAt: 1, EndedAt: 2, LastStatus: "error"})
+
+	a := NewApp(Deps{Store: st})
+	a.width, a.height = 100, 30
+	a.snap = status.Snapshot{Recent: []store.SessionRow{{Name: "loom-d1", LastStatus: "done"}, {Name: "loom-d2", LastStatus: "error"}}}
+	a.rebuildRows()
+	a.Update(key("X"))
+	if a.clearCount != 2 {
+		t.Fatalf("clearCount = %d, want 2", a.clearCount)
+	}
+	// a third session finishes while the dialog is open
+	st.Upsert(store.SessionRow{Name: "loom-d3", CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+	a.Update(tickMsg{})
+	if a.clearCount != 3 {
+		t.Fatalf("clearCount after tick = %d, want 3 (must track reality)", a.clearCount)
+	}
+}

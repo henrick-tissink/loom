@@ -575,6 +575,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// one is fired, per the wallMsg staleness discipline.
 			a.wallSeq++
 			return a, tea.Batch(a.pollCmd(), tickAfter(), a.wallCaptureCmd())
+		case viewConfirmClear:
+			// keep the shown count honest while the dialog is open (F1): the
+			// bulk delete removes every finished row, so the number must track
+			// new sessions finishing under it. CountEnded is a cheap indexed
+			// count, run synchronously like the 'X' handler does.
+			if st := a.deps.Store; st != nil {
+				if n, err := st.CountEnded(); err == nil {
+					a.clearCount = int(n)
+				}
+			}
+			return a, tea.Batch(a.pollCmd(), tickAfter())
 		}
 		return a, tea.Batch(a.pollCmd(), tickAfter())
 	case pollNowMsg:
