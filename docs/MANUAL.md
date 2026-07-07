@@ -20,7 +20,7 @@ The one habit that matters: **F12 detaches** (session keeps living). Quitting cl
 loom            # if symlinked to your PATH, else: cd ~/Sauce/loom && ./loom
 ```
 
-On first launch the indexer sweeps your entire archive in the background (~10s for hundreds of MB); search works immediately on whatever is indexed so far and re-sweeps every 10 minutes. Projects are auto-discovered from `~/Sauce` (anything with a `.git` or existing Claude transcripts).
+On first launch the indexer sweeps your entire archive in the background (~10s for hundreds of MB); search works immediately on whatever is indexed so far and re-sweeps every 10 minutes. Projects are auto-discovered from your workspace root — `$LOOM_WORKSPACE` if set, else `~/Sauce` (anything with a `.git` or existing Claude transcripts).
 
 ## 3. The dashboard
 

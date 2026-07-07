@@ -41,6 +41,32 @@ func TestLoadRespectsClaudeConfigDir(t *testing.T) {
 	}
 }
 
+func TestLoadRespectsLoomWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LOOM_WORKSPACE", "/custom/workspace")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.WorkspaceRoot != "/custom/workspace" {
+		t.Errorf("WorkspaceRoot = %q", c.WorkspaceRoot)
+	}
+}
+
+func TestLoadWorkspaceDefaultsToSauce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LOOM_WORKSPACE", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.WorkspaceRoot != filepath.Join(home, "Sauce") {
+		t.Errorf("WorkspaceRoot = %q", c.WorkspaceRoot)
+	}
+}
+
 func TestInsideTmux(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/x,1,0")
 	if !InsideTmux() {

@@ -11,7 +11,7 @@ import (
 type Config struct {
 	ClaudeConfigDir string // $CLAUDE_CONFIG_DIR or $HOME/.claude
 	LoomDir         string // $HOME/.loom
-	WorkspaceRoot   string // $HOME/Sauce
+	WorkspaceRoot   string // $LOOM_WORKSPACE or $HOME/Sauce
 	Home            string
 }
 
@@ -24,10 +24,14 @@ func Load() (*Config, error) {
 	if ccd == "" {
 		ccd = filepath.Join(home, ".claude")
 	}
+	ws := os.Getenv("LOOM_WORKSPACE")
+	if ws == "" {
+		ws = filepath.Join(home, "Sauce")
+	}
 	c := &Config{
 		ClaudeConfigDir: ccd,
 		LoomDir:         filepath.Join(home, ".loom"),
-		WorkspaceRoot:   filepath.Join(home, "Sauce"),
+		WorkspaceRoot:   ws,
 		Home:            home,
 	}
 	if err := os.MkdirAll(c.LoomDir, 0o755); err != nil {
