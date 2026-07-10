@@ -7,7 +7,7 @@
 GOBIN   := $(shell go env GOPATH)/bin
 WAILS   := $(GOBIN)/wails
 GUI_DIR := cmd/loom-gui
-APP     := $(GUI_DIR)/build/bin/loom-gui.app
+APP     := $(GUI_DIR)/build/bin/loom.app
 
 .PHONY: gui gui-install gui-run
 
@@ -21,9 +21,9 @@ gui: $(WAILS)
 
 # Build, then install into /Applications so it's a normal Dock/Spotlight app.
 gui-install: gui
-	rm -rf /Applications/loom-gui.app
-	cp -R "$(APP)" /Applications/loom-gui.app
-	@echo "✓ Installed to /Applications/loom-gui.app — launch it from Spotlight or the Dock."
+	rm -rf /Applications/loom.app /Applications/loom-gui.app
+	cp -R "$(APP)" /Applications/loom.app
+	@echo "✓ Installed to /Applications/loom.app — launch it from Spotlight or the Dock."
 
 # Build and launch straight from the build dir (no install).
 gui-run: gui

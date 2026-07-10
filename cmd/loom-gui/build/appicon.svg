@@ -1,23 +1,29 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="tB" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#221E2B"/><stop offset="1" stop-color="#121118"/></linearGradient>
-    <radialGradient id="vB" cx="0.5" cy="0.42" r="0.75"><stop offset="0.55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.45"/></radialGradient>
-    <radialGradient id="hB" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#F5B14C" stop-opacity="0.42"/><stop offset="1" stop-color="#F5B14C" stop-opacity="0"/></radialGradient>
-    <linearGradient id="nB" x1="0" y1="286" x2="0" y2="738" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#453F4E"/><stop offset="1" stop-color="#302C39"/></linearGradient>
-    <linearGradient id="gB" x1="0" y1="286" x2="0" y2="738" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#EFA83F"/><stop offset="0.5" stop-color="#FFD27E"/><stop offset="1" stop-color="#EFA83F"/></linearGradient>
-    <clipPath id="cB"><rect x="72" y="72" width="880" height="880" rx="200"/></clipPath>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FCEFF0"/><stop offset="1" stop-color="#F4DEE0"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#EE9E86" stop-opacity="0.30"/><stop offset="1" stop-color="#EE9E86" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="neu" x1="0" y1="286" x2="0" y2="738" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D4B2BB"/><stop offset="1" stop-color="#C098A4"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="286" x2="0" y2="738" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E88E72"/><stop offset="0.5" stop-color="#F6B99E"/><stop offset="1" stop-color="#E88E72"/>
+    </linearGradient>
+    <clipPath id="clip"><rect x="72" y="72" width="880" height="880" rx="200"/></clipPath>
   </defs>
-  <rect x="72" y="72" width="880" height="880" rx="200" fill="url(#tB)"/>
-  <g clip-path="url(#cB)">
-    <rect x="72" y="72" width="880" height="880" fill="url(#vB)"/>
-    <ellipse cx="512" cy="118" rx="430" ry="150" fill="#fff" opacity="0.05"/>
+  <rect x="72" y="72" width="880" height="880" rx="200" fill="url(#tile)"/>
+  <g clip-path="url(#clip)">
+    <ellipse cx="512" cy="120" rx="430" ry="150" fill="#ffffff" opacity="0.45"/>
   </g>
-  <rect x="73.5" y="73.5" width="877" height="877" rx="198.5" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="3"/>
-  <circle cx="512" cy="512" r="330" fill="url(#hB)"/>
-  <g stroke="url(#nB)" stroke-width="24" stroke-linecap="round">
+  <rect x="73.5" y="73.5" width="877" height="877" rx="198.5" fill="none" stroke="rgba(156,78,56,0.12)" stroke-width="3"/>
+  <circle cx="512" cy="512" r="330" fill="url(#halo)"/>
+  <g stroke="url(#neu)" stroke-width="24" stroke-linecap="round">
     <line x1="352" y1="286" x2="352" y2="738"/><line x1="432" y1="286" x2="432" y2="738"/>
     <line x1="592" y1="286" x2="592" y2="738"/><line x1="672" y1="286" x2="672" y2="738"/>
   </g>
-  <line x1="512" y1="274" x2="512" y2="750" stroke="#F5B14C" stroke-width="76" stroke-linecap="round" opacity="0.38"/>
-  <line x1="512" y1="286" x2="512" y2="738" stroke="url(#gB)" stroke-width="36" stroke-linecap="round"/>
+  <line x1="512" y1="274" x2="512" y2="750" stroke="#EE9E86" stroke-width="74" stroke-linecap="round" opacity="0.34"/>
+  <line x1="512" y1="286" x2="512" y2="738" stroke="url(#gold)" stroke-width="36" stroke-linecap="round"/>
 </svg>
