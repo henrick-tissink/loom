@@ -23,10 +23,11 @@ type App struct {
 	projects []registry.Project
 	now      func() time.Time
 	reg      *ptyRegistry
+	notifier *notifier
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, launcher *session.Launcher, projects []registry.Project, now func() time.Time) *App {
-	a := &App{engine: engine, tm: tm, launcher: launcher, projects: projects, now: now}
+	a := &App{engine: engine, tm: tm, launcher: launcher, projects: projects, now: now, notifier: newNotifier()}
 	// Until startup() wires the real emitter, events go nowhere (safe for tests).
 	a.reg = newPTYRegistry(
 		func(name string) *exec.Cmd { return tm.AttachCmd(name) },
@@ -54,7 +55,32 @@ func (a *App) ListSessions() (out []SessionDTO) {
 	if err != nil {
 		return out
 	}
-	return snapshotToDTOs(snap)
+	out = snapshotToDTOs(snap)
+	a.onSnapshot(snap, out)
+	return out
+}
+
+// onSnapshot runs the attention side effects of a poll: a native notification
+// for sessions that just flipped to needs-you (once-only, from the engine),
+// and the window title reflecting the current needs-you count.
+func (a *App) onSnapshot(snap status.Snapshot, dtos []SessionDTO) {
+	if a.notifier != nil {
+		a.notifier.needsYou(snap.NewlyNeedsYou)
+	}
+	if a.ctx == nil {
+		return
+	}
+	n := 0
+	for _, d := range dtos {
+		if d.Status == "needs_you" {
+			n++
+		}
+	}
+	title := "loom"
+	if n > 0 {
+		title = fmt.Sprintf("loom — %d need you", n)
+	}
+	wruntime.WindowSetTitle(a.ctx, title)
 }
 
 // ListProjects returns the workspace projects discovered at startup.

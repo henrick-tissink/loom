@@ -58,6 +58,16 @@ body {
 #new-session:hover { filter: brightness(0.98); }
 #new-session svg { width: 13px; height: 13px; }
 
+.tb-right { --wails-draggable: no-drag; display: flex; align-items: center; gap: 10px; }
+.attn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--accent-ink);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: 999px; padding: 3px 10px; font-variant-numeric: tabular-nums;
+}
+.attn:empty { display: none; }
+.attn .attn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--needs-you, #C56A4A); box-shadow: 0 0 6px rgba(197, 106, 74, 0.6); }
+
 /* ---- body grid ---- */
 #body { flex: 1; min-height: 0; display: grid; grid-template-columns: 252px 1fr; }
 

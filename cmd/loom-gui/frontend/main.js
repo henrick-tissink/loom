@@ -5,8 +5,18 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
 const threadsEl = document.getElementById("threads");
+const attnEl = document.getElementById("attn");
 let activeName = null;
 let latestSessions = [];
+
+function renderAttention(sessions) {
+  const n = sessions.filter((s) => s.status === "needs_you").length;
+  if (n > 0) {
+    attnEl.innerHTML = `<span class="attn-dot"></span>${n} ${n === 1 ? "needs" : "need"} you`;
+  } else {
+    attnEl.textContent = "";
+  }
+}
 
 document.getElementById("new-session").addEventListener("click", openLauncher);
 
@@ -148,6 +158,7 @@ async function poll() {
     const sessions = await window.go.main.App.ListSessions();
     latestSessions = sessions;
     renderThreads(sessions);
+    renderAttention(sessions);
     if (activeName) renderStageHeader(activeName);
   } catch (e) {
     console.error("ListSessions failed", e);
