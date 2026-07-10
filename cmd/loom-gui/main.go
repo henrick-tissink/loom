@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/henricktissink/loom/internal/config"
+	"github.com/henricktissink/loom/internal/registry"
+	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
@@ -46,8 +48,21 @@ func run() error {
 	}
 	defer st.Close()
 
+	projects, err := registry.Discover(cfg.WorkspaceRoot, cfg.ClaudeConfigDir)
+	if err != nil {
+		return fmt.Errorf("discover projects in %s: %w", cfg.WorkspaceRoot, err)
+	}
+	launcher := &session.Launcher{
+		Tmux: tm, Store: st,
+		ClaudeConfigDir: cfg.ClaudeConfigDir,
+		ClaudeJSONPath:  cfg.ClaudeJSONPath(),
+		ReadyMarker:     session.DefaultReadyMarker,
+		TrustMarker:     session.DefaultTrustMarker,
+		ReadyTimeout:    60 * time.Second,
+		PollEvery:       500 * time.Millisecond,
+	}
 	engine := status.NewEngine(tm, st, cfg.ClaudeConfigDir)
-	app := newApp(engine, tm, time.Now)
+	app := newApp(engine, tm, launcher, projects, time.Now)
 
 	return wails.Run(&options.App{
 		Title:       "loom",
