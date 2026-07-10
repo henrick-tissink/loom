@@ -206,6 +206,7 @@ function selectSession(name) {
     term.write("\r\n\x1b[2m[session ended]\x1b[0m\r\n");
   });
   term.onData((data) => window.go.main.App.SendInput(name, data));
+  registerFileLinks(term);
 
   window.go.main.App.AttachSession(name)
     .then(() => {
@@ -221,6 +222,45 @@ function onResize() {
   if (!term || !fit || !activeName) return;
   fit.fit();
   window.go.main.App.ResizeSession(activeName, term.cols, term.rows);
+}
+
+// Detect file paths in terminal output and make them clickable. Matches a
+// path with a directory segment (…/file.ext) or a bare filename with a line
+// (file.ext:88) — both with optional :line[:col] — to avoid underlining every
+// word.ext token. Clicking resolves against the session cwd and opens the
+// editor (the backend no-ops if it isn't a real file).
+const FILE_LINK_RE =
+  /(?:\.{0,2}\/)?(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z][\w]{0,9}(?::\d+(?::\d+)?)?|[\w.@~+-]+\.[A-Za-z][\w]{0,9}:\d+(?::\d+)?/g;
+
+function registerFileLinks(t) {
+  t.registerLinkProvider({
+    provideLinks(y, cb) {
+      const bufLine = t.buffer.active.getLine(y - 1);
+      if (!bufLine) { cb(undefined); return; }
+      const text = bufLine.translateToString(true);
+      const links = [];
+      let m;
+      FILE_LINK_RE.lastIndex = 0;
+      while ((m = FILE_LINK_RE.exec(text)) !== null) {
+        const token = m[0];
+        links.push({
+          text: token,
+          range: { start: { x: m.index + 1, y }, end: { x: m.index + token.length, y } },
+          activate: () => openFileToken(token),
+        });
+      }
+      cb(links.length ? links : undefined);
+    },
+  });
+}
+
+function openFileToken(token) {
+  if (!activeName) return;
+  let path = token;
+  let line = 0;
+  const cm = token.match(/^(.+?):(\d+)(?::\d+)?$/);
+  if (cm) { path = cm[1]; line = parseInt(cm[2], 10); }
+  window.go.main.App.OpenInEditor(activeName, path, line).catch((e) => console.error("open", e));
 }
 
 // ---- poll ----
