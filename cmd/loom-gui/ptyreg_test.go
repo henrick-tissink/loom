@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -99,4 +100,76 @@ func TestPTYRegistry_sendUnknownIsError(t *testing.T) {
 	if err := reg.send("nope", "x"); err == nil {
 		t.Fatal("send to unattached name should error")
 	}
+}
+
+// TestPTYRegistry_closeReapsProcess verifies the explicit-close path calls
+// Wait() on the child so it doesn't linger as a zombie. cmd.ProcessState is
+// only populated once Wait() has returned, so this is a genuine reap check
+// rather than a proxy for it.
+func TestPTYRegistry_closeReapsProcess(t *testing.T) {
+	em := &captureEmitter{}
+	reg := newPTYRegistry(func(string) *exec.Cmd { return exec.Command("sleep", "5") }, em.emit)
+
+	if err := reg.attach("reap1"); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	reg.mu.Lock()
+	h, ok := reg.ptys["reap1"]
+	reg.mu.Unlock()
+	if !ok {
+		t.Fatal("expected reap1 to be registered after attach")
+	}
+
+	reg.close("reap1")
+
+	if h.cmd.ProcessState == nil {
+		t.Fatal("expected cmd.ProcessState to be set (process reaped) after close")
+	}
+}
+
+// TestPTYRegistry_naturalExitReapsProcess verifies the read-loop's
+// deregister path (natural EOF, not an explicit close) also reaps the
+// child. This deliberately does NOT read h.cmd.ProcessState: that field is
+// written by the read-loop goroutine's Wait() call with no
+// happens-before edge exposed to an external observer (deregister unlocks
+// the registry mutex *before* calling Wait, per the required lock
+// discipline), so polling it from the test goroutine would be a genuine,
+// -race-flagged data race. Instead this asks the OS directly: a reaped
+// child's pid is freed, so kill(pid, 0) starts failing with ESRCH once
+// Wait() completes; before that the pid is a zombie and still answers
+// signal 0 successfully. That is real kernel state, not shared Go memory,
+// so it carries no race.
+func TestPTYRegistry_naturalExitReapsProcess(t *testing.T) {
+	em := &captureEmitter{}
+	reg := newPTYRegistry(func(string) *exec.Cmd { return exec.Command("true") }, em.emit)
+
+	if err := reg.attach("reap2"); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	reg.mu.Lock()
+	h, ok := reg.ptys["reap2"]
+	reg.mu.Unlock()
+	if !ok {
+		t.Fatal("expected reap2 to be registered after attach")
+	}
+	// cmd.Process is assigned once by pty.Start, before attach() returns,
+	// and never reassigned; reading its pid here is race-free.
+	pid := h.cmd.Process.Pid
+
+	if !em.waitFor("pty:exit:reap2", 2*time.Second) {
+		t.Fatal("expected pty:exit:reap2 after the command exits")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		lastErr = syscall.Kill(pid, 0)
+		if lastErr == syscall.ESRCH {
+			return // pid gone: reaped
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected pid %d to be reaped (kill(pid,0) -> ESRCH), last result: %v", pid, lastErr)
 }

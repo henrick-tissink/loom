@@ -130,6 +130,7 @@ func (r *ptyRegistry) close(name string) {
 	if h.cmd.Process != nil {
 		_ = h.cmd.Process.Kill()
 	}
+	_ = h.cmd.Wait()
 }
 
 func (r *ptyRegistry) deregister(name string) {
@@ -141,5 +142,6 @@ func (r *ptyRegistry) deregister(name string) {
 	r.mu.Unlock()
 	if ok {
 		_ = h.f.Close()
+		_ = h.cmd.Wait()
 	}
 }
