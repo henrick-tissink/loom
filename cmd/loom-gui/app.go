@@ -9,6 +9,7 @@ import (
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
+	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -19,6 +20,7 @@ type App struct {
 	ctx      context.Context
 	engine   *status.Engine
 	tm       *tmux.Client
+	st       *store.Store
 	launcher *session.Launcher
 	projects []registry.Project
 	now      func() time.Time
@@ -26,8 +28,8 @@ type App struct {
 	notifier *notifier
 }
 
-func newApp(engine *status.Engine, tm *tmux.Client, launcher *session.Launcher, projects []registry.Project, now func() time.Time) *App {
-	a := &App{engine: engine, tm: tm, launcher: launcher, projects: projects, now: now, notifier: newNotifier()}
+func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, projects []registry.Project, now func() time.Time) *App {
+	a := &App{engine: engine, tm: tm, st: st, launcher: launcher, projects: projects, now: now, notifier: newNotifier()}
 	// Until startup() wires the real emitter, events go nowhere (safe for tests).
 	a.reg = newPTYRegistry(
 		func(name string) *exec.Cmd { return tm.AttachCmd(name) },
@@ -106,3 +108,49 @@ func (a *App) ResizeSession(name string, cols, rows int) {
 	_ = a.reg.resize(name, uint16(cols), uint16(rows))
 }
 func (a *App) CloseSession(name string) { a.reg.close(name) }
+
+// ListRecent returns the most recent finished sessions for the Finished group.
+func (a *App) ListRecent() []FinishedDTO {
+	out := []FinishedDTO{}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	rows, err := a.st.Recent(30)
+	if err != nil {
+		return out
+	}
+	return recentToDTOs(rows)
+}
+
+// KillSession terminates a live tmux session (a running/needs-you agent).
+func (a *App) KillSession(name string) error {
+	if a.tm == nil {
+		return fmt.Errorf("tmux unavailable")
+	}
+	return a.tm.KillSession(name)
+}
+
+// DismissSession removes a finished session from history (does not touch tmux).
+func (a *App) DismissSession(name string) error {
+	if a.st == nil {
+		return fmt.Errorf("store unavailable")
+	}
+	return a.st.DeleteSession(name)
+}
+
+// ResumeSession relaunches a finished session via `claude --resume` and returns
+// the new tmux session name.
+func (a *App) ResumeSession(name string) (string, error) {
+	if a.launcher == nil || a.st == nil {
+		return "", fmt.Errorf("resume unavailable")
+	}
+	row, ok, err := a.st.Get(name)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("session %q not found", name)
+	}
+	return a.launcher.Resume(row, 120, 32, a.now())
+}

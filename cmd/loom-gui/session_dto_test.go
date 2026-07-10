@@ -37,3 +37,27 @@ func TestSnapshotToDTOs_emptyIsNonNil(t *testing.T) {
 		t.Fatalf("want 0, got %d", len(got))
 	}
 }
+
+func TestRecentToDTOs_filtersLiveAndDerivesStatus(t *testing.T) {
+	rows := []store.SessionRow{
+		{Name: "a", ProjectLabel: "p", Title: "done one", EndedAt: 100, ExitCode: 0},
+		{Name: "b", ProjectLabel: "p", EndedAt: 200, ExitCode: 1},
+		{Name: "live", ProjectLabel: "p", EndedAt: -1, ExitCode: -1}, // still live → skipped
+	}
+	got := recentToDTOs(rows)
+	if len(got) != 2 {
+		t.Fatalf("want 2 (live excluded), got %d", len(got))
+	}
+	if got[0].Status != "done" || got[0].Title != "done one" {
+		t.Errorf("row a: %+v", got[0])
+	}
+	if got[1].Status != "error" {
+		t.Errorf("row b should be error: %+v", got[1])
+	}
+}
+
+func TestRecentToDTOs_emptyIsNonNil(t *testing.T) {
+	if recentToDTOs(nil) == nil {
+		t.Fatal("want non-nil empty slice")
+	}
+}

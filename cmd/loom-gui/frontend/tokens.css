@@ -93,7 +93,23 @@ body {
 .tinfo { min-width: 0; }
 .tname { font-family: var(--font-mono); font-size: 12px; color: var(--text); display: block; }
 .tproj { font-size: 10.5px; color: var(--text-faint); display: block; }
-.tstatus { font-size: 10px; justify-self: end; }
+.tright { display: flex; align-items: center; gap: 6px; justify-self: end; }
+.tstatus { font-size: 10px; }
+.tactions { display: none; align-items: center; gap: 3px; }
+.thread:hover .tstatus { display: none; }
+.thread:hover .tactions { display: flex; }
+.tact {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 22px; padding: 0 5px;
+  border: 1px solid var(--edge); border-radius: 6px; cursor: pointer;
+  background: var(--stage); color: var(--text-dim);
+  font-family: var(--font-ui); font-size: 10.5px; font-weight: 600;
+}
+.tact:hover { color: var(--text); border-color: var(--text-faint); }
+.tact svg { width: 12px; height: 12px; }
+.tact-kill:hover, .tact-kill.armed { color: #fff; background: #C5604C; border-color: #C5604C; }
+.thread.finished { cursor: default; }
+.thread.finished .tname { color: var(--text-dim); }
 
 /* status icon chips (soft pastel bg, dark ink) */
 .i-needs_you { background: #F1AE96; color: #7a331e; }

@@ -8,6 +8,7 @@ const threadsEl = document.getElementById("threads");
 const attnEl = document.getElementById("attn");
 let activeName = null;
 let latestSessions = [];
+let latestRecent = [];
 
 function renderAttention(sessions) {
   const n = sessions.filter((s) => s.status === "needs_you").length;
@@ -45,27 +46,96 @@ const GROUPS = [
   { key: "Quiet", match: (s) => s !== "needs_you" && s !== "running" },
 ];
 
-function renderThreads(sessions) {
+// The tmux session name is a "loom-<uuid>" id; show the AI title when present,
+// otherwise a short id, so the rail never displays a raw uuid.
+function displayName(s) {
+  if (s.title && s.title.trim()) return s.title.trim();
+  return "session " + s.name.replace(/^loom-/, "").slice(0, 8);
+}
+
+function actionBtn(pathInner, title, onClick, extraClass) {
+  const b = document.createElement("button");
+  b.className = "tact" + (extraClass ? " " + extraClass : "");
+  b.title = title;
+  b.innerHTML = icon(pathInner, 2.3);
+  b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+  return b;
+}
+
+// killButton needs a two-step confirm so a stray click can't nuke an agent.
+function killButton(name) {
+  const b = document.createElement("button");
+  b.className = "tact tact-kill";
+  b.title = "Kill session";
+  const glyph = () => { b.innerHTML = icon('<path d="M6 6l12 12M18 6L6 18"/>', 2.3); };
+  glyph();
+  let armed = false, tid = null;
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!armed) {
+      armed = true; b.classList.add("armed"); b.textContent = "Kill?";
+      tid = setTimeout(() => { armed = false; b.classList.remove("armed"); glyph(); }, 2500);
+    } else {
+      clearTimeout(tid);
+      window.go.main.App.KillSession(name).catch((err) => console.error("kill", err));
+      poll();
+    }
+  });
+  return b;
+}
+
+function appendGroup(label) {
+  const gh = document.createElement("li");
+  gh.className = "group";
+  gh.textContent = label;
+  threadsEl.appendChild(gh);
+}
+
+function appendLiveRow(s) {
+  const li = document.createElement("li");
+  li.className = "thread" + (s.name === activeName ? " active" : "");
+  const color = statusColor(s.status);
+  li.style.setProperty("--tc", color);
+  li.innerHTML =
+    `<span class="tglyph i-${s.status}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span></span>` +
+    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}</span><span class="tactions"></span></span>`;
+  li.querySelector(".tactions").appendChild(killButton(s.name));
+  li.addEventListener("click", () => selectSession(s.name));
+  threadsEl.appendChild(li);
+}
+
+function appendFinishedRow(s) {
+  const li = document.createElement("li");
+  li.className = "thread finished";
+  const color = statusColor(s.status);
+  li.style.setProperty("--tc", color);
+  li.innerHTML =
+    `<span class="tglyph i-${s.status}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span></span>` +
+    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(s.status)}</span><span class="tactions"></span></span>`;
+  const acts = li.querySelector(".tactions");
+  acts.appendChild(actionBtn('<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v5h5"/>', "Resume", async () => {
+    try { const nn = await window.go.main.App.ResumeSession(s.name); if (nn) selectSession(nn); poll(); }
+    catch (e) { console.error("resume", e); }
+  }));
+  acts.appendChild(actionBtn('<path d="M6 6l12 12M18 6L6 18"/>', "Dismiss from history", async () => {
+    try { await window.go.main.App.DismissSession(s.name); poll(); } catch (e) { console.error("dismiss", e); }
+  }));
+  threadsEl.appendChild(li);
+}
+
+function renderRail(sessions, recent) {
   threadsEl.replaceChildren();
   for (const g of GROUPS) {
     const rows = sessions.filter((s) => g.match(s.status));
     if (!rows.length) continue;
-    const gh = document.createElement("li");
-    gh.className = "group";
-    gh.textContent = g.key;
-    threadsEl.appendChild(gh);
-    for (const s of rows) {
-      const li = document.createElement("li");
-      li.className = "thread" + (s.name === activeName ? " active" : "");
-      const color = statusColor(s.status);
-      li.style.setProperty("--tc", color);
-      li.innerHTML =
-        `<span class="tglyph i-${s.status}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
-        `<span class="tinfo"><span class="tname">${esc(s.name)}</span><span class="tproj">${esc(s.project)}</span></span>` +
-        `<span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}</span>`;
-      li.addEventListener("click", () => selectSession(s.name));
-      threadsEl.appendChild(li);
-    }
+    appendGroup(g.key);
+    for (const s of rows) appendLiveRow(s);
+  }
+  if (recent && recent.length) {
+    appendGroup("Finished");
+    for (const s of recent) appendFinishedRow(s);
   }
 }
 
@@ -75,10 +145,11 @@ function renderStageHeader(name) {
   const s = latestSessions.find((x) => x.name === name);
   const status = s ? s.status : "unknown";
   const project = s ? s.project : "";
+  const label = s ? displayName(s) : name;
   const color = statusColor(status);
   el.className = "stage-head";
   el.innerHTML =
-    `<span class="sh-name">${esc(name)}</span>` +
+    `<span class="sh-name">${esc(label)}</span>` +
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(project)}</span>` : "") +
     `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}</span></span>`;
 }
@@ -117,7 +188,7 @@ function selectSession(name) {
   host.id = "terminal";
   stage.appendChild(host);
   renderStageHeader(name);
-  renderThreads(latestSessions); // reflect active highlight immediately
+  renderRail(latestSessions, latestRecent); // reflect active highlight immediately
 
   term = new Terminal({
     fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--font-mono"),
@@ -155,13 +226,17 @@ function onResize() {
 // ---- poll ----
 async function poll() {
   try {
-    const sessions = await window.go.main.App.ListSessions();
+    const [sessions, recent] = await Promise.all([
+      window.go.main.App.ListSessions(),
+      window.go.main.App.ListRecent(),
+    ]);
     latestSessions = sessions;
-    renderThreads(sessions);
+    latestRecent = recent;
+    renderRail(sessions, recent);
     renderAttention(sessions);
     if (activeName) renderStageHeader(activeName);
   } catch (e) {
-    console.error("ListSessions failed", e);
+    console.error("poll failed", e);
   }
 }
 poll();

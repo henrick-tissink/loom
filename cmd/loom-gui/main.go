@@ -65,7 +65,7 @@ func run() error {
 		PollEvery:       500 * time.Millisecond,
 	}
 	engine := status.NewEngine(tm, st, cfg.ClaudeConfigDir)
-	app := newApp(engine, tm, launcher, projects, time.Now)
+	app := newApp(engine, tm, st, launcher, projects, time.Now)
 
 	return wails.Run(&options.App{
 		Title:       "loom",
