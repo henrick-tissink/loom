@@ -66,6 +66,12 @@ func (a *App) OpenInEditor(sessionName, path string, line int) error {
 		return fmt.Errorf("file not found: %s", path)
 	}
 	argv := editorArgv(pickEditor(exec.LookPath), abs, line)
-	// Fire and forget — the editor runs independently of loom.
-	return exec.Command(argv[0], argv[1:]...).Start()
+	// Fire and forget — the editor runs independently of loom — but reap the
+	// child (GUI editor CLIs fork-and-exit) so it doesn't linger as a zombie.
+	cmd := exec.Command(argv[0], argv[1:]...)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }

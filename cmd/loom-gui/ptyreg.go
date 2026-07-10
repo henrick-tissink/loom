@@ -68,7 +68,10 @@ func (r *ptyRegistry) attach(name string) error {
 	if _, ok := r.ptys[name]; ok {
 		r.mu.Unlock()
 		_ = f.Close()
-		_ = cmd.Process.Kill()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		go func() { _ = cmd.Wait() }() // reap the killed child (no zombie)
 		return nil
 	}
 	r.ptys[name] = &ptyHandle{cmd: cmd, f: f}

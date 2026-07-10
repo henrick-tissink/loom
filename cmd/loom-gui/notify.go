@@ -32,8 +32,12 @@ func (n *notifier) needsYou(labels []string) {
 
 func osascriptNotify(title, body string) {
 	script := fmt.Sprintf("display notification %s with title %s", asQuote(body), asQuote(title))
-	// Fire and forget — a failed notification must never disrupt polling.
-	_ = exec.Command("osascript", "-e", script).Start()
+	// Fire and forget — a failed notification must never disrupt polling — but
+	// still reap the child so it doesn't linger as a zombie.
+	cmd := exec.Command("osascript", "-e", script)
+	if err := cmd.Start(); err == nil {
+		go func() { _ = cmd.Wait() }()
+	}
 }
 
 // asQuote wraps s in an AppleScript string literal, escaping backslashes and

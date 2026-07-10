@@ -102,7 +102,12 @@ func (a *App) LaunchSession(projectPath, model, mode, seed string) (string, erro
 	return a.launcher.Launch(r, 120, 32, a.now())
 }
 
-func (a *App) AttachSession(name string) error { return a.reg.attach(name) }
+func (a *App) AttachSession(name string) error {
+	if a.tm == nil {
+		return fmt.Errorf("tmux unavailable")
+	}
+	return a.reg.attach(name)
+}
 func (a *App) SendInput(name, data string)     { _ = a.reg.send(name, data) }
 func (a *App) ResizeSession(name string, cols, rows int) {
 	_ = a.reg.resize(name, uint16(cols), uint16(rows))

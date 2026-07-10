@@ -22,7 +22,8 @@ function renderAttention(sessions) {
 document.getElementById("new-session").addEventListener("click", openLauncher);
 document.getElementById("search-btn").addEventListener("click", openSearch);
 document.addEventListener("keydown", (e) => {
-  if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+  // ⌘K only (not Ctrl+K) — Ctrl+K is the terminal's readline "kill line".
+  if (e.metaKey && (e.key === "k" || e.key === "K")) {
     e.preventDefault();
     openPalette();
     return;
@@ -83,23 +84,31 @@ function actionBtn(pathInner, title, onClick, extraClass) {
   return b;
 }
 
+// Sessions with a pending kill-confirm, keyed by name so the armed state
+// survives the 1.5s poll rail rebuild (which discards the button node).
+const armedKills = new Set();
+
 // killButton needs a two-step confirm so a stray click can't nuke an agent.
 function killButton(name) {
   const b = document.createElement("button");
   b.className = "tact tact-kill";
   b.title = "Kill session";
   const glyph = () => { b.innerHTML = icon('<path d="M6 6l12 12M18 6L6 18"/>', 2.3); };
-  glyph();
-  let armed = false, tid = null;
+  if (armedKills.has(name)) { b.classList.add("armed"); b.textContent = "Kill?"; }
+  else { glyph(); }
   b.addEventListener("click", (e) => {
     e.stopPropagation();
-    if (!armed) {
-      armed = true; b.classList.add("armed"); b.textContent = "Kill?";
-      tid = setTimeout(() => { armed = false; b.classList.remove("armed"); glyph(); }, 2500);
-    } else {
-      clearTimeout(tid);
+    if (armedKills.has(name)) {
+      armedKills.delete(name);
       window.go.main.App.KillSession(name).catch((err) => console.error("kill", err));
       poll();
+    } else {
+      armedKills.add(name);
+      b.classList.add("armed"); b.textContent = "Kill?";
+      setTimeout(() => {
+        armedKills.delete(name);
+        if (b.isConnected) { b.classList.remove("armed"); glyph(); }
+      }, 2500);
     }
   });
   return b;
@@ -118,7 +127,7 @@ function appendLiveRow(s) {
   const color = statusColor(s.status);
   li.style.setProperty("--tc", color);
   li.innerHTML =
-    `<span class="tglyph i-${s.status}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
+    `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span></span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}</span><span class="tactions"></span></span>`;
   li.querySelector(".tactions").appendChild(killButton(s.name));
@@ -132,7 +141,7 @@ function appendFinishedRow(s) {
   const color = statusColor(s.status);
   li.style.setProperty("--tc", color);
   li.innerHTML =
-    `<span class="tglyph i-${s.status}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
+    `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span></span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(s.status)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
@@ -180,6 +189,7 @@ let term = null;
 let fit = null;
 let dataUnsub = null;
 let exitUnsub = null;
+let attachGen = 0; // bumped per selectSession; guards stale async callbacks
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -199,6 +209,7 @@ function teardownTerminal() {
 function selectSession(name) {
   teardownTerminal();
   activeName = name;
+  const gen = ++attachGen;
 
   const stage = document.getElementById("stage");
   stage.replaceChildren();
@@ -231,10 +242,14 @@ function selectSession(name) {
 
   window.go.main.App.AttachSession(name)
     .then(() => {
+      if (gen !== attachGen) return; // a newer session was selected meanwhile
       fit.fit();
       window.go.main.App.ResizeSession(name, term.cols, term.rows);
     })
-    .catch((e) => term.write("\r\n\x1b[31mattach failed: " + e + "\x1b[0m\r\n"));
+    .catch((e) => {
+      if (gen !== attachGen) return;
+      term.write("\r\n\x1b[31mattach failed: " + e + "\x1b[0m\r\n");
+    });
 
   window.addEventListener("resize", onResize);
 }
@@ -314,13 +329,9 @@ function optionsHtml(pairs) {
 }
 
 async function openLauncher() {
-  let projects = [];
-  try {
-    projects = await window.go.main.App.ListProjects();
-  } catch (e) {
-    console.error("ListProjects failed", e);
-  }
-
+  if (document.querySelector(".modal-backdrop")) return; // don't stack modals
+  // Append the backdrop synchronously BEFORE any await, so a second rapid click
+  // sees it via the guard above and can't stack a duplicate during the load.
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
@@ -328,7 +339,7 @@ async function openLauncher() {
       <h2>New session</h2>
       <div class="field">
         <label for="f-project">Project</label>
-        <select id="f-project">${projects.map((p) => `<option value="${esc(p.path)}">${esc(p.label)}</option>`).join("")}</select>
+        <select id="f-project"></select>
       </div>
       <div class="field">
         <label for="f-model">Model</label>
@@ -353,6 +364,16 @@ async function openLauncher() {
   const close = () => backdrop.remove();
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
   backdrop.querySelector("#f-cancel").addEventListener("click", close);
+
+  // Load projects and fill the (already-mounted) select.
+  let projects = [];
+  try {
+    projects = await window.go.main.App.ListProjects();
+  } catch (e) {
+    console.error("ListProjects failed", e);
+  }
+  backdrop.querySelector("#f-project").innerHTML =
+    projects.map((p) => `<option value="${esc(p.path)}">${esc(p.label)}</option>`).join("");
 
   const launchBtn = backdrop.querySelector("#f-launch");
   launchBtn.addEventListener("click", async () => {

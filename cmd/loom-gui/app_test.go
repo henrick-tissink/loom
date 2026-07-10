@@ -54,6 +54,13 @@ func TestApp_KillSession_nilTmErrors(t *testing.T) {
 	}
 }
 
+func TestApp_AttachSession_nilTmErrors(t *testing.T) {
+	app := newApp(nil, nil, nil, nil, nil, time.Now)
+	if err := app.AttachSession("x"); err == nil {
+		t.Fatal("AttachSession with nil tmux must error (no panic)")
+	}
+}
+
 func TestApp_DismissSession_nilStoreErrors(t *testing.T) {
 	app := newApp(nil, tmux.New(), nil, nil, nil, time.Now)
 	if err := app.DismissSession("x"); err == nil {

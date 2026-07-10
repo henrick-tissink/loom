@@ -66,9 +66,11 @@ func (a *App) ResumeSearchHit(sessionID, cwd string) (string, error) {
 	if sessionID == "" {
 		return "", fmt.Errorf("missing session id")
 	}
-	row := store.SessionRow{ClaudeSessionID: sessionID, Cwd: cwd}
-	if cwd != "" {
-		row.ProjectLabel = filepath.Base(cwd)
+	if cwd == "" {
+		// Without a cwd, tmux would silently start in the server's own directory
+		// rather than the intended project — refuse instead of resuming wrong.
+		return "", fmt.Errorf("session has no recorded directory")
 	}
+	row := store.SessionRow{ClaudeSessionID: sessionID, Cwd: cwd, ProjectLabel: filepath.Base(cwd)}
 	return a.launcher.Resume(row, 120, 32, a.now())
 }
