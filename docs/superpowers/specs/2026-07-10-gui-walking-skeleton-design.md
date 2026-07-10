@@ -168,6 +168,33 @@ The skeleton is done when:
 Frontend logic is thin enough to verify by hand at this stage; a web test
 harness is deferred to the chrome spec (C).
 
+## Forward-compatibility seams (enable later beauty at ~zero cost)
+
+The skeleton stays unstyled, but a few structural choices are cheap to make now
+and expensive to retrofit once chrome (spec C) exists. Honoring these does **not**
+add scope — it's still "one plain sidebar + one terminal" — it just routes those
+few pixels through the right seams. See `2026-07-10-gui-design-language.md`.
+
+- **Frameless window.** Configure the Wails window frameless with a custom drag
+  region and the macOS traffic-light inset from the start. Retrofitting frameless
+  later means reworking drag regions and title-bar insets — do it once, now.
+- **Single tokens source.** All skeleton color/spacing/font values come from one
+  CSS custom-property file (`--bg`, `--surface`, `--hairline`, `--font-mono`,
+  `--font-ui`, and the six status tokens). Spec C then reskins by editing tokens,
+  not by hunting hardcoded values.
+- **Status→color in one place.** The `status → hex` mapping lives in a single
+  shared module consumed by *both* the sidebar row rendering and the xterm.js
+  theme, so a session's thread and its terminal never disagree.
+- **Themed terminal from day one.** Wire xterm.js's `theme` (background,
+  foreground, cursor, the 16 ANSI colors) and `fontFamily` from the tokens rather
+  than accepting library defaults, so the embedded terminal already reads as
+  native to the app instead of a foreign console.
+- **Font indirection.** Reference `--font-mono` / `--font-ui` everywhere; the
+  skeleton fills them with system stacks, and the real build later drops a bundled
+  programming mono into the same variable with no component changes.
+
+These are structural only — no sidebar styling, no layout chrome, no launcher.
+
 ## Out of scope (deferred to later specs)
 
 Visual chrome & styling, the launcher, search/recall, workflows, file-link
