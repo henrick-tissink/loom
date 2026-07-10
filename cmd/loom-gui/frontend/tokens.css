@@ -7,9 +7,17 @@ body {
 }
 #titlebar {
   height: 44px; flex: 0 0 44px; display: flex; align-items: center;
-  padding-left: 78px; border-bottom: 1px solid var(--hairline);
+  justify-content: space-between; padding: 0 14px 0 78px;
+  border-bottom: 1px solid var(--hairline);
   --wails-draggable: drag;
 }
+#new-session {
+  --wails-draggable: no-drag;
+  font-family: var(--font-ui); font-size: 12px; color: var(--text-dim);
+  background: transparent; border: 1px solid var(--hairline);
+  border-radius: 6px; padding: 4px 11px; cursor: pointer;
+}
+#new-session:hover { color: var(--needs); border-color: var(--needs); }
 .wordmark { font-family: var(--font-mono); letter-spacing: 0.34em; padding-left: 0.34em; }
 #body { flex: 1; min-height: 0; display: grid; grid-template-columns: 264px 1fr; }
 #rail { background: var(--rail); border-right: 1px solid var(--hairline); overflow-y: auto; }
@@ -34,3 +42,39 @@ body {
 #stage { min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 #stage-empty { margin: auto; color: var(--text-faint); font-family: var(--font-mono); }
 #terminal { flex: 1; min-height: 0; padding: 10px 12px; background: #121118; }
+
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+  display: grid; place-items: center; z-index: 50;
+}
+.modal {
+  width: 420px; max-width: calc(100vw - 48px);
+  background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: 12px; padding: 22px;
+  display: flex; flex-direction: column; gap: 16px;
+  box-shadow: 0 30px 90px -30px rgba(0,0,0,0.8);
+}
+.modal h2 {
+  margin: 0; font-size: 13px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--text-faint); font-weight: 600;
+}
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label {
+  font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-faint);
+}
+.field select, .field textarea {
+  font-family: var(--font-mono); font-size: 12.5px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--hairline); border-radius: 6px;
+  padding: 8px 10px; width: 100%;
+}
+.field textarea { resize: vertical; min-height: 62px; font-family: var(--font-ui); }
+.modal-error { color: var(--error); font-size: 12px; min-height: 0; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.modal-actions button {
+  font-family: var(--font-ui); font-size: 12.5px; padding: 7px 14px;
+  border-radius: 6px; cursor: pointer; border: 1px solid var(--hairline);
+}
+.btn-ghost { background: transparent; color: var(--text-dim); }
+.btn-ghost:hover { color: var(--text); border-color: var(--text-faint); }
+.btn-launch { background: var(--needs); color: #1a1200; border-color: var(--needs); font-weight: 600; }
+.btn-launch:disabled { opacity: 0.5; cursor: default; }

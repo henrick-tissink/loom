@@ -6,6 +6,8 @@ import { FitAddon } from "@xterm/addon-fit";
 
 applyTokens();
 
+document.getElementById("new-session").addEventListener("click", openLauncher);
+
 const threadsEl = document.getElementById("threads");
 let activeName = null;
 
@@ -103,3 +105,78 @@ async function poll() {
 
 poll();
 setInterval(poll, 1500);
+
+const MODELS = [
+  ["", "Default"], ["opus", "opus"], ["sonnet", "sonnet"], ["fable", "fable"],
+];
+const MODES = [
+  ["", "Default"], ["plan", "plan"], ["acceptEdits", "acceptEdits"],
+  ["auto", "auto"], ["bypassPermissions", "bypassPermissions"],
+];
+
+function optionsHtml(pairs) {
+  return pairs.map(([v, t]) => `<option value="${v}">${t}</option>`).join("");
+}
+
+async function openLauncher() {
+  let projects = [];
+  try {
+    projects = await window.go.main.App.ListProjects();
+  } catch (e) {
+    console.error("ListProjects failed", e);
+  }
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal" role="dialog" aria-label="New session">
+      <h2>New session</h2>
+      <div class="field">
+        <label for="f-project">Project</label>
+        <select id="f-project">${projects.map((p) => `<option value="${p.path}">${p.label}</option>`).join("")}</select>
+      </div>
+      <div class="field">
+        <label for="f-model">Model</label>
+        <select id="f-model">${optionsHtml(MODELS)}</select>
+      </div>
+      <div class="field">
+        <label for="f-mode">Permission mode</label>
+        <select id="f-mode">${optionsHtml(MODES)}</select>
+      </div>
+      <div class="field">
+        <label for="f-seed">Seed prompt (optional)</label>
+        <textarea id="f-seed" placeholder="Initial prompt or /slash-command"></textarea>
+      </div>
+      <div class="modal-error" id="f-error"></div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="f-cancel">Cancel</button>
+        <button class="btn-launch" id="f-launch">Launch</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#f-cancel").addEventListener("click", close);
+
+  const launchBtn = backdrop.querySelector("#f-launch");
+  launchBtn.addEventListener("click", async () => {
+    const path = backdrop.querySelector("#f-project").value;
+    const model = backdrop.querySelector("#f-model").value;
+    const mode = backdrop.querySelector("#f-mode").value;
+    const seed = backdrop.querySelector("#f-seed").value;
+    const errEl = backdrop.querySelector("#f-error");
+    if (!path) { errEl.textContent = "Pick a project to launch."; return; }
+    errEl.textContent = "";
+    launchBtn.disabled = true;
+    try {
+      const name = await window.go.main.App.LaunchSession(path, model, mode, seed);
+      close();
+      selectSession(name);
+      poll();
+    } catch (e) {
+      errEl.textContent = "Launch failed: " + e;
+      launchBtn.disabled = false;
+    }
+  });
+}
