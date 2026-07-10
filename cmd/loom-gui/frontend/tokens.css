@@ -73,7 +73,7 @@ body {
   border-radius: var(--radius); margin: 1px 8px;
 }
 .thread::before {
-  content: ""; position: absolute; left: -8px; top: 8px; bottom: 8px;
+  content: ""; position: absolute; left: 0; top: 10px; bottom: 10px;
   width: 3px; border-radius: 3px; background: var(--tc, var(--text-faint));
 }
 .thread:hover { background: var(--sel); }
