@@ -22,6 +22,15 @@ function renderAttention(sessions) {
 document.getElementById("new-session").addEventListener("click", openLauncher);
 document.getElementById("search-btn").addEventListener("click", openSearch);
 document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+    e.preventDefault();
+    openPalette();
+    return;
+  }
+  if (e.key === "Escape") {
+    const m = document.querySelector(".modal-backdrop");
+    if (m) { m.remove(); return; }
+  }
   if (e.key === "/" && !isTyping() && !document.querySelector(".modal-backdrop")) {
     e.preventDefault();
     openSearch();
@@ -365,6 +374,94 @@ async function openLauncher() {
       launchBtn.disabled = false;
     }
   });
+}
+
+// ---- command palette (⌘K) ----
+function buildPaletteItems() {
+  const items = [
+    { label: "New session", hint: "launch", run: () => openLauncher() },
+    { label: "Search history", hint: "find past work", run: () => openSearch() },
+  ];
+  for (const s of latestSessions) {
+    items.push({
+      label: displayName(s),
+      hint: `${s.project} · ${statusWord(s.status)}`,
+      run: () => selectSession(s.name),
+    });
+  }
+  for (const s of latestRecent) {
+    items.push({
+      label: displayName(s),
+      hint: `${s.project} · resume`,
+      run: async () => {
+        try { const nn = await window.go.main.App.ResumeSession(s.name); if (nn) selectSession(nn); poll(); }
+        catch (e) { console.error("palette-resume", e); }
+      },
+    });
+  }
+  return items;
+}
+
+function openPalette() {
+  if (document.querySelector(".modal-backdrop")) return;
+  const items = buildPaletteItems();
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal palette" role="dialog" aria-label="Command palette">
+      <input id="p-input" class="search-input" type="text" placeholder="Jump to a session or action…" autocomplete="off" spellcheck="false" />
+      <ul id="p-list" class="palette-list"></ul>
+    </div>`;
+  document.body.appendChild(backdrop);
+
+  const input = backdrop.querySelector("#p-input");
+  const list = backdrop.querySelector("#p-list");
+  input.focus();
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+
+  let filtered = items;
+  let active = 0;
+
+  function render() {
+    list.replaceChildren();
+    filtered.forEach((it, i) => {
+      const li = document.createElement("li");
+      li.className = "pitem" + (i === active ? " active" : "");
+      li.innerHTML = `<span class="pi-label">${esc(it.label)}</span><span class="pi-hint">${esc(it.hint)}</span>`;
+      li.addEventListener("mousemove", () => { if (active !== i) { active = i; paint(); } });
+      li.addEventListener("click", () => run(i));
+      list.appendChild(li);
+    });
+  }
+  function paint() {
+    [...list.children].forEach((li, i) => li.classList.toggle("active", i === active));
+  }
+  function run(i) {
+    const it = filtered[i];
+    if (!it) return;
+    close();
+    it.run();
+  }
+
+  input.addEventListener("input", () => {
+    const q = input.value.trim().toLowerCase();
+    filtered = q ? items.filter((it) => (it.label + " " + it.hint).toLowerCase().includes(q)) : items;
+    active = 0;
+    render();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(active + 1, filtered.length - 1); paint(); scrollActive(list); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(active - 1, 0); paint(); scrollActive(list); }
+    else if (e.key === "Enter") { e.preventDefault(); run(active); }
+    else if (e.key === "Escape") { e.preventDefault(); close(); }
+  });
+  render();
+}
+
+function scrollActive(list) {
+  const el = list.querySelector(".pitem.active");
+  if (el) el.scrollIntoView({ block: "nearest" });
 }
 
 // ---- search modal ----
