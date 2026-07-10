@@ -5,7 +5,9 @@
 .DS_Store
 
 # loom-gui (Wails) build artifacts
-cmd/loom-gui/build/
+cmd/loom-gui/build/*
+!cmd/loom-gui/build/appicon.png
+!cmd/loom-gui/build/appicon.svg
 cmd/loom-gui/frontend/node_modules/
 cmd/loom-gui/frontend/dist/*
 !cmd/loom-gui/frontend/dist/.gitkeep
