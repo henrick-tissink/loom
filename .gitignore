@@ -3,3 +3,11 @@
 *.db-wal
 *.db-shm
 .DS_Store
+
+# loom-gui (Wails) build artifacts
+cmd/loom-gui/build/
+cmd/loom-gui/frontend/node_modules/
+cmd/loom-gui/frontend/dist/*
+!cmd/loom-gui/frontend/dist/.gitkeep
+cmd/loom-gui/frontend/wailsjs/
+cmd/loom-gui/frontend/package.json.md5

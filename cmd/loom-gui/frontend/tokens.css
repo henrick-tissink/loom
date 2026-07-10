@@ -1,0 +1,36 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: var(--font-ui); font-size: 14px;
+  height: 100vh; display: flex; flex-direction: column;
+}
+#titlebar {
+  height: 44px; flex: 0 0 44px; display: flex; align-items: center;
+  padding-left: 78px; border-bottom: 1px solid var(--hairline);
+  --wails-draggable: drag;
+}
+.wordmark { font-family: var(--font-mono); letter-spacing: 0.34em; padding-left: 0.34em; }
+#body { flex: 1; min-height: 0; display: grid; grid-template-columns: 264px 1fr; }
+#rail { background: var(--rail); border-right: 1px solid var(--hairline); overflow-y: auto; }
+.rail-head {
+  font-size: 10.5px; letter-spacing: 0.18em; color: var(--text-faint);
+  padding: 13px 16px 9px; font-weight: 600;
+}
+#threads { list-style: none; margin: 0; padding: 0; }
+.thread {
+  position: relative; padding: 9px 14px 9px 18px; cursor: pointer;
+  display: flex; justify-content: space-between; gap: 10px;
+}
+.thread::before {
+  content: ""; position: absolute; left: 0; top: 6px; bottom: 6px;
+  width: 2px; border-radius: 2px; background: var(--tc, var(--text-faint));
+}
+.thread:hover { background: rgba(255,255,255,0.025); }
+.thread.active { background: var(--surface); }
+.thread .name { font-family: var(--font-mono); font-size: 12.5px; }
+.thread .proj { font-size: 11px; color: var(--text-faint); }
+.thread .st { font-size: 10.5px; color: var(--tc, var(--text-faint)); }
+#stage { min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
+#stage-empty { margin: auto; color: var(--text-faint); font-family: var(--font-mono); }
+#terminal { flex: 1; min-height: 0; padding: 10px 12px; background: #121118; }
