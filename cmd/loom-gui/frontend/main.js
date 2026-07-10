@@ -20,6 +20,18 @@ function renderAttention(sessions) {
 }
 
 document.getElementById("new-session").addEventListener("click", openLauncher);
+document.getElementById("search-btn").addEventListener("click", openSearch);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && !isTyping() && !document.querySelector(".modal-backdrop")) {
+    e.preventDefault();
+    openSearch();
+  }
+});
+
+function isTyping() {
+  const ae = document.activeElement;
+  return !!ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA");
+}
 
 // ---- icons ----
 const STATUS_ICON = {
@@ -352,5 +364,67 @@ async function openLauncher() {
       errEl.textContent = "Launch failed: " + e;
       launchBtn.disabled = false;
     }
+  });
+}
+
+// ---- search modal ----
+function snippetHtml(s) {
+  return esc(s).replace(/\u0001/g, "<b>").replace(/\u0002/g, "</b>");
+}
+
+function openSearch() {
+  if (document.querySelector(".modal-backdrop")) return; // don't stack modals
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal search-modal" role="dialog" aria-label="Search history">
+      <input id="s-input" class="search-input" type="text" placeholder="Search your session history…" autocomplete="off" spellcheck="false" />
+      <ul id="s-results" class="search-results"></ul>
+      <div id="s-hint" class="search-hint">Type to search past sessions — titles, asks, outcomes, and files.</div>
+    </div>`;
+  document.body.appendChild(backdrop);
+
+  const input = backdrop.querySelector("#s-input");
+  const results = backdrop.querySelector("#s-results");
+  const hint = backdrop.querySelector("#s-hint");
+  input.focus();
+
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+
+  let tid = null;
+  input.addEventListener("input", () => {
+    clearTimeout(tid);
+    const q = input.value.trim();
+    tid = setTimeout(async () => {
+      if (!q) {
+        results.replaceChildren();
+        hint.textContent = "Type to search past sessions — titles, asks, outcomes, and files.";
+        return;
+      }
+      let hits = [];
+      try { hits = await window.go.main.App.SearchSessions(q); } catch (e) { console.error("search", e); }
+      results.replaceChildren();
+      hint.textContent = hits.length ? "" : "No matches.";
+      for (const h of hits) {
+        const li = document.createElement("li");
+        li.className = "sresult";
+        const label = (h.title && h.title.trim()) || (h.ask && h.ask.trim()) || "session";
+        li.innerHTML =
+          `<div class="sr-top"><span class="sr-title">${esc(label)}</span>` +
+          (h.project ? `<span class="sr-proj">${esc(h.project)}</span>` : "") + `</div>` +
+          (h.snippet ? `<div class="sr-snip">${snippetHtml(h.snippet)}</div>` : "");
+        li.addEventListener("click", async () => {
+          try {
+            const nn = await window.go.main.App.ResumeSearchHit(h.sessionId, h.cwd);
+            close();
+            if (nn) selectSession(nn);
+            poll();
+          } catch (e) { console.error("resume-search", e); }
+        });
+        results.appendChild(li);
+      }
+    }, 200);
   });
 }
