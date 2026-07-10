@@ -1,0 +1,16 @@
+{
+  "name": "loom-gui-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}
