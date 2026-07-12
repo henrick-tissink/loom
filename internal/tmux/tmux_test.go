@@ -122,3 +122,40 @@ func TestAttachCmdStripsTMUX(t *testing.T) {
 		}
 	}
 }
+
+// envValue returns the last value for key in env ("" if absent). Last wins,
+// matching how exec applies a later duplicate over an earlier one.
+func envValue(env []string, key string) (string, bool) {
+	val, ok := "", false
+	for _, e := range env {
+		if strings.HasPrefix(e, key+"=") {
+			val, ok = strings.TrimPrefix(e, key+"="), true
+		}
+	}
+	return val, ok
+}
+
+// When loom is launched from Finder (a GUI app bundle) the process has no TERM,
+// so the attach child inherits none and `tmux attach` dies with
+// "open terminal failed: terminal does not support clear". AttachCmd must
+// supply a sane default so the embedded xterm.js terminal renders.
+func TestAttachCmdDefaultsTERMWhenUnset(t *testing.T) {
+	t.Setenv("TERM", "")
+	os.Unsetenv("TERM")
+	c := &Client{Socket: "loomtest-env"}
+	cmd := c.AttachCmd("loom-x")
+	if got, _ := envValue(cmd.Env, "TERM"); got != "xterm-256color" {
+		t.Fatalf("TERM = %q, want xterm-256color", got)
+	}
+}
+
+// In the TUI hand-off loom runs inside the user's real terminal, which already
+// has a valid TERM. AttachCmd must not clobber it.
+func TestAttachCmdPreservesExistingTERM(t *testing.T) {
+	t.Setenv("TERM", "tmux-256color")
+	c := &Client{Socket: "loomtest-env"}
+	cmd := c.AttachCmd("loom-x")
+	if got, _ := envValue(cmd.Env, "TERM"); got != "tmux-256color" {
+		t.Fatalf("TERM = %q, want tmux-256color", got)
+	}
+}

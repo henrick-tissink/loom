@@ -184,14 +184,28 @@ func (c *Client) KillServer() error {
 
 // AttachCmd builds the full-screen hand-off command. TMUX/TMUX_PANE are stripped
 // so attach works when Loom itself runs inside the user's tmux (spec §3.3).
+//
+// TERM is defaulted to xterm-256color when the process has none: a GUI app
+// bundle launched from Finder inherits no TERM, and `tmux attach` with an unset
+// TERM dies with "open terminal failed: terminal does not support clear",
+// leaving the embedded xterm.js terminal blank. xterm.js emulates
+// xterm-256color, so that is the correct fallback. An existing TERM (the TUI
+// hand-off runs inside the user's real terminal) is left untouched.
 func (c *Client) AttachCmd(name string) *exec.Cmd {
 	cmd := exec.Command("tmux", "-L", c.Socket, "attach-session", "-t", target(name))
 	var env []string
+	hasTERM := false
 	for _, e := range os.Environ() {
 		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_PANE=") {
 			continue
 		}
+		if strings.HasPrefix(e, "TERM=") && e != "TERM=" {
+			hasTERM = true
+		}
 		env = append(env, e)
+	}
+	if !hasTERM {
+		env = append(env, "TERM=xterm-256color")
 	}
 	cmd.Env = env
 	return cmd
