@@ -21,7 +21,10 @@
   --shadow-card: 0 2px 8px rgba(96, 60, 72, 0.10);
 
   --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  /* Emoji/symbol fonts are appended as fallbacks: xterm.js uses the DOM
+     renderer, so glyphs the mono fonts lack (📁 🔀 ⏵ ✻ ● and the Claude logo)
+     resolve through the CSS font chain instead of showing placeholder boxes. */
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, "Apple Color Emoji", "Apple Symbols", monospace;
 }
 
 * { box-sizing: border-box; }
