@@ -19,6 +19,18 @@ function renderAttention(sessions) {
   }
 }
 
+// The titlebar reserves 92px on the left for the macOS traffic-light buttons.
+// Those buttons vanish in fullscreen, so drop the inset when fullscreen.
+const titlebarEl = document.getElementById("titlebar");
+async function syncFullscreen() {
+  try {
+    const fs = await window.runtime.WindowIsFullscreen();
+    titlebarEl.classList.toggle("fullscreen", !!fs);
+  } catch { /* runtime not ready */ }
+}
+window.addEventListener("resize", syncFullscreen);
+syncFullscreen();
+
 document.getElementById("new-session").addEventListener("click", openLauncher);
 document.getElementById("search-btn").addEventListener("click", openSearch);
 document.addEventListener("keydown", (e) => {
