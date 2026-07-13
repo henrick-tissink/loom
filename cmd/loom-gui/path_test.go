@@ -41,3 +41,24 @@ func TestBuildPATH_dedupesAndPreservesOrder(t *testing.T) {
 		t.Errorf("shell-only dir /other missing: %q", got)
 	}
 }
+
+func TestHydrateLocale_defaultsWhenUnset(t *testing.T) {
+	for _, k := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	hydrateLocale()
+	if got := os.Getenv("LC_CTYPE"); got != "UTF-8" {
+		t.Fatalf("LC_CTYPE = %q, want UTF-8", got)
+	}
+}
+
+func TestHydrateLocale_preservesExisting(t *testing.T) {
+	os.Unsetenv("LC_ALL")
+	os.Unsetenv("LC_CTYPE")
+	t.Setenv("LANG", "en_US.UTF-8")
+	hydrateLocale()
+	if got := os.Getenv("LC_CTYPE"); got != "" {
+		t.Fatalf("LC_CTYPE = %q, want unset (LANG already set)", got)
+	}
+}

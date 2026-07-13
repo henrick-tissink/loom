@@ -21,6 +21,22 @@ func hydratePATH() {
 	os.Setenv("PATH", buildPATH(os.Getenv("PATH"), loginShellPATH(), home))
 }
 
+// hydrateLocale defaults LC_CTYPE to UTF-8 when the process has no locale
+// vars (empty counts as unset). Finder/Dock-launched bundles inherit no
+// LANG/LC_*, and everything loom spawns — the tmux server, claude sessions,
+// attach clients — misbehaves in a non-UTF-8 locale (tmux replaces multibyte
+// glyphs and even the \t separators in -F command output with '_'). The
+// tmux package also defends itself per-command; this covers every other
+// descendant process. An existing locale is left untouched.
+func hydrateLocale() {
+	for _, k := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		if os.Getenv(k) != "" {
+			return
+		}
+	}
+	os.Setenv("LC_CTYPE", "UTF-8")
+}
+
 // buildPATH merges the current PATH, the login-shell PATH, and well-known bin
 // dirs into a single deduplicated list, preserving first-seen order. Pure and
 // unit-testable.

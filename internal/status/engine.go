@@ -101,7 +101,15 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 		}
 		ps, err := e.tm.PaneStatus(s.Name)
 		if err != nil {
-			continue // raced a kill; next poll settles it
+			// list-sessions just said this session is alive; a failed pane
+			// probe (kill race, transient tmux hiccup) must still count it
+			// alive, or MarkLiveOrphansEnded below retires it — and when the
+			// probe fails across the board (e.g. mangled -F output), that
+			// retired EVERY session on every poll. Skip the dead/adopt logic
+			// (no pane info) and let the next poll settle it.
+			aliveNames = append(aliveNames, s.Name)
+			activity[s.Name] = s.Activity
+			continue
 		}
 		if row, ok, _ := e.st.Get(s.Name); !ok {
 			// adopt orphan BEFORE branching on Dead: a tmux session found on

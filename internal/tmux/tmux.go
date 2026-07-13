@@ -29,9 +29,29 @@ func isNoServerErr(out string) bool {
 	return strings.Contains(out, "no server running") || strings.Contains(out, "error connecting")
 }
 
+// ensureLocale returns env with LC_CTYPE defaulted to UTF-8 when no locale
+// var is set (empty values count as unset). A Finder-launched app bundle
+// inherits no LANG/LC_*, and tmux puts a locale-less client in non-UTF-8
+// mode: attach clients get every multibyte glyph replaced with '_', and —
+// worse — command output gets control characters sanitized the same way,
+// turning the \t separators in our -F formats into '_' and mangling every
+// parsed session name. Existing locales are left untouched.
+func ensureLocale(env []string) []string {
+	for _, e := range env {
+		for _, k := range []string{"LC_ALL=", "LC_CTYPE=", "LANG="} {
+			if strings.HasPrefix(e, k) && e != k {
+				return env
+			}
+		}
+	}
+	return append(env, "LC_CTYPE=UTF-8")
+}
+
 func (c *Client) run(args ...string) (string, error) {
 	full := append([]string{"-L", c.Socket}, args...)
-	out, err := exec.Command("tmux", full...).CombinedOutput()
+	cmd := exec.Command("tmux", full...)
+	cmd.Env = ensureLocale(os.Environ())
+	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
@@ -202,7 +222,6 @@ func (c *Client) AttachCmd(name string) *exec.Cmd {
 	cmd := exec.Command("tmux", "-L", c.Socket, "attach-session", "-t", target(name))
 	var env []string
 	hasTERM := false
-	hasLocale := false
 	for _, e := range os.Environ() {
 		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_PANE=") {
 			continue
@@ -210,19 +229,11 @@ func (c *Client) AttachCmd(name string) *exec.Cmd {
 		if strings.HasPrefix(e, "TERM=") && e != "TERM=" {
 			hasTERM = true
 		}
-		for _, k := range []string{"LC_ALL=", "LC_CTYPE=", "LANG="} {
-			if strings.HasPrefix(e, k) && e != k {
-				hasLocale = true
-			}
-		}
 		env = append(env, e)
 	}
 	if !hasTERM {
 		env = append(env, "TERM=xterm-256color")
 	}
-	if !hasLocale {
-		env = append(env, "LC_CTYPE=UTF-8")
-	}
-	cmd.Env = env
+	cmd.Env = ensureLocale(env)
 	return cmd
 }

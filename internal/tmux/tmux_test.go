@@ -103,6 +103,53 @@ func TestSendLiteralAndCapture(t *testing.T) {
 	}
 }
 
+// unsetLocale scrubs every locale var from the test process, mimicking a
+// Finder/Dock-launched app bundle (which inherits no LANG/LC_*). t.Setenv
+// snapshots each var so cleanup restores the original environment.
+func unsetLocale(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+}
+
+// A tmux client running without a locale is put in non-UTF-8 mode by the
+// server, which then vis()-sanitizes control characters in command output —
+// including the \t separators our -F formats rely on — into literal '_'.
+// That mangled every session name ("loom-<uuid>_1783938662"), which made
+// PaneStatus fail for every live session, which made the status engine
+// retire ALL sessions on every poll when the GUI was launched from the Dock.
+// Control commands must parse identically with and without a host locale.
+func TestListSessionsAndPaneStatusWithoutLocale(t *testing.T) {
+	unsetLocale(t)
+	c := testClient(t)
+	name := "loom-44444444-4444-4444-4444-444444444444"
+	if err := c.NewSession(name, t.TempDir(), "sleep 30", 80, 24); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	ss, err := c.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(ss) != 1 || ss[0].Name != name {
+		t.Fatalf("ListSessions = %+v, want one session named %q", ss, name)
+	}
+	if ss[0].Activity == 0 {
+		t.Fatalf("Activity = 0, want the session_activity timestamp (separator not parsed?)")
+	}
+	ps, err := c.PaneStatus(name)
+	if err != nil {
+		t.Fatalf("PaneStatus: %v", err)
+	}
+	if ps.Dead {
+		t.Fatalf("PaneStatus = %+v, want alive", ps)
+	}
+	if ps.CurrentPath == "" {
+		t.Fatalf("CurrentPath empty, want the session cwd (separator not parsed?)")
+	}
+}
+
 func TestAttachCmdStripsTMUX(t *testing.T) {
 	t.Setenv("TMUX", "/private/tmp/x,123,0")
 	c := &Client{Socket: "loomtest-env"}

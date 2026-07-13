@@ -240,6 +240,10 @@ function selectSession(name) {
     fontSize: 13,
     theme: xtermTheme,
     cursorBlink: true,
+    // Unicode11Addon registers via the proposed unicode API; without this
+    // flag loadAddon THROWS, selectSession dies mid-flight, and clicking a
+    // thread leaves a blank stage with no attach.
+    allowProposedApi: true,
   });
   // Match tmux and the Claude Code TUI, which measure emoji as 2 cells wide.
   // xterm.js defaults to Unicode v6, which measures several emoji as 1 cell —

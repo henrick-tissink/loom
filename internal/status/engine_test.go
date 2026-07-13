@@ -247,6 +247,43 @@ func TestPollResurrectsTerminalRowWithLiveTmux(t *testing.T) {
 	}
 }
 
+// A Finder/Dock-launched GUI has no locale vars, which used to make tmux
+// vis()-sanitize the \t separators in -F output to '_': every session name
+// came back mangled ("loom-<uuid>_1783938662"), every PaneStatus failed, and
+// MarkLiveOrphansEnded retired EVERY live session on EVERY poll — sessions
+// vanished from the rail, threads couldn't be opened, and needs-you
+// notifications re-fired in an endless loop as other processes resurrected
+// the rows. A poll in a locale-less environment must behave identically to
+// one with a locale.
+func TestPollWithoutLocaleKeepsLiveSessions(t *testing.T) {
+	for _, k := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	id := "ffffffff-ffff-ffff-ffff-ffffffffffff"
+	name := launchFake(t, tm, ccd, cwd, id)
+	// CreatedAt 1 is far older than the orphan grace window, so a mangled
+	// (empty) aliveNames list would retire this row immediately.
+	st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id, ProjectLabel: "p",
+		Cwd: cwd, CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "running"})
+
+	e := NewEngine(tm, st, ccd)
+	snap, err := e.Poll(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range snap.Live {
+		if r.Name == name {
+			return // still live, with its exact (unmangled) name
+		}
+	}
+	row, ok, _ := st.Get(name)
+	t.Fatalf("live tmux session retired by a locale-less poll: Live=%+v store row=%+v ok=%v",
+		snap.Live, row, ok)
+}
+
 // TestPollConcurrentSafe guards finding 1: Engine.Poll must be safe to call
 // concurrently (defense in depth — the UI's real fix is to never launch two
 // overlapping poll loops, but the engine itself must not crash if it

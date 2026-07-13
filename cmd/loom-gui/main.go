@@ -34,6 +34,7 @@ func run() error {
 	// GUI apps launched from Finder/Dock get a minimal PATH; make tmux/claude
 	// resolve the same as they do in a terminal before we check for them.
 	hydratePATH()
+	hydrateLocale()
 	if err := config.CheckBinaries(); err != nil {
 		return err
 	}
