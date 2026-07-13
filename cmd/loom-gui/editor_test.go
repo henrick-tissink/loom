@@ -46,6 +46,46 @@ func TestEditorArgv(t *testing.T) {
 	}
 }
 
+func TestEditorApp(t *testing.T) {
+	cases := map[string]string{
+		"cursor":   "Cursor",
+		"code":     "Visual Studio Code",
+		"zed":      "Zed",
+		"open":     "", // the `open` fallback already activates the default app
+		"whatever": "",
+	}
+	for bin, want := range cases {
+		if got := editorApp(bin); got != want {
+			t.Errorf("editorApp(%q) = %q, want %q", bin, got, want)
+		}
+	}
+}
+
+func TestEditorCommands(t *testing.T) {
+	// A GUI editor launched from another GUI app opens the file in the
+	// background; we must follow up with `open -a <App>` to bring it to the
+	// front. So cursor/code/zed yield TWO commands: open-at-line, then activate.
+	got := editorCommands("cursor", "/a/b.go", 88)
+	if len(got) != 2 {
+		t.Fatalf("cursor: want 2 commands (open + activate), got %v", got)
+	}
+	if got[0][0] != "cursor" || got[0][len(got[0])-1] != "/a/b.go:88" {
+		t.Errorf("cursor open cmd: %v", got[0])
+	}
+	if len(got[1]) != 3 || got[1][0] != "open" || got[1][1] != "-a" || got[1][2] != "Cursor" {
+		t.Errorf("cursor activate cmd: %v", got[1])
+	}
+
+	if got := editorCommands("code", "/a/b.go", 0); len(got) != 2 || got[1][2] != "Visual Studio Code" {
+		t.Errorf("code: want activate 'Visual Studio Code', got %v", got)
+	}
+
+	// The `open` fallback already raises the default app: a single command.
+	if got := editorCommands("open", "/a/b.go", 0); len(got) != 1 || got[0][0] != "open" {
+		t.Errorf("open fallback should be one command, got %v", got)
+	}
+}
+
 func TestPickEditor(t *testing.T) {
 	none := func(string) (string, error) { return "", errors.New("nope") }
 	if got := pickEditor(none); got != "open" {
