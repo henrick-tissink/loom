@@ -18,6 +18,15 @@ type Recipe struct {
 	Seed         string // optional initial prompt or /slash-command
 }
 
+// lightThemeSettings forces Claude's built-in light theme for every
+// loom-launched session. loom's embedded terminal is light (the Blush
+// palette), but Claude's TUI otherwise renders for a dark terminal and emits
+// near-white 256-color text (e.g. color 231) — xterm.js can only remap the 16
+// base ANSI colors, not the 256-color cube, so that text is invisible on the
+// light background. Passed via --settings, which merges over the user's global
+// config without mutating it, so only these sessions are affected.
+const lightThemeSettings = `{"theme":"light"}`
+
 func NewSessionID() string { return uuid.NewString() }
 
 const tmuxPrefix = "loom-"
@@ -34,7 +43,7 @@ func SessionIDFromTmuxName(name string) (string, bool) {
 }
 
 func (r Recipe) Argv(sessionID string) []string {
-	argv := []string{"claude", "--session-id", sessionID}
+	argv := []string{"claude", "--session-id", sessionID, "--settings", lightThemeSettings}
 	if r.Model != "" {
 		argv = append(argv, "--model", r.Model)
 	}
@@ -57,5 +66,5 @@ func (r Recipe) ShellCommand(sessionID string) string {
 }
 
 func ResumeShellCommand(claudeSessionID string) string {
-	return shellQuote([]string{"claude", "--resume", claudeSessionID})
+	return shellQuote([]string{"claude", "--resume", claudeSessionID, "--settings", lightThemeSettings})
 }

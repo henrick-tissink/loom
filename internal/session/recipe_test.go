@@ -26,15 +26,18 @@ func TestNewSessionIDAndTmuxName(t *testing.T) {
 
 func TestArgv(t *testing.T) {
 	id := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	// Every launch forces Claude's light theme so its TUI text is legible on
+	// loom's light terminal (see recipe.go).
+	base := []string{"claude", "--session-id", id, "--settings", `{"theme":"light"}`}
 	cases := []struct {
 		r    Recipe
 		want []string
 	}{
-		{Recipe{}, []string{"claude", "--session-id", id}},
-		{Recipe{Model: "opus"}, []string{"claude", "--session-id", id, "--model", "opus"}},
-		{Recipe{Mode: "plan"}, []string{"claude", "--session-id", id, "--permission-mode", "plan"}},
+		{Recipe{}, base},
+		{Recipe{Model: "opus"}, append(append([]string{}, base...), "--model", "opus")},
+		{Recipe{Mode: "plan"}, append(append([]string{}, base...), "--permission-mode", "plan")},
 		{Recipe{Model: "sonnet", Mode: "auto"},
-			[]string{"claude", "--session-id", id, "--model", "sonnet", "--permission-mode", "auto"}},
+			append(append([]string{}, base...), "--model", "sonnet", "--permission-mode", "auto")},
 	}
 	for _, c := range cases {
 		if got := c.r.Argv(id); !reflect.DeepEqual(got, c.want) {
@@ -46,11 +49,12 @@ func TestArgv(t *testing.T) {
 func TestShellCommand(t *testing.T) {
 	id := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	r := Recipe{Model: "opus", Mode: "plan"}
-	want := "'claude' '--session-id' '" + id + "' '--model' 'opus' '--permission-mode' 'plan'"
+	settings := `'--settings' '{"theme":"light"}'`
+	want := "'claude' '--session-id' '" + id + "' " + settings + " '--model' 'opus' '--permission-mode' 'plan'"
 	if got := r.ShellCommand(id); got != want {
 		t.Errorf("ShellCommand = %q, want %q", got, want)
 	}
-	if got := ResumeShellCommand(id); got != "'claude' '--resume' '"+id+"'" {
+	if got := ResumeShellCommand(id); got != "'claude' '--resume' '"+id+"' "+settings {
 		t.Errorf("ResumeShellCommand = %q", got)
 	}
 }
