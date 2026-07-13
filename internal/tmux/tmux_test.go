@@ -159,3 +159,35 @@ func TestAttachCmdPreservesExistingTERM(t *testing.T) {
 		t.Fatalf("TERM = %q, want tmux-256color", got)
 	}
 }
+
+// A Finder-launched app bundle inherits no locale vars. tmux then runs the
+// attach client in non-UTF-8 mode and replaces every multibyte glyph (block
+// elements, box drawing, ⚠, ’, the Claude logo) with a literal '_'. AttachCmd
+// must supply a UTF-8 LC_CTYPE so tmux streams real UTF-8 to the terminal.
+func TestAttachCmdDefaultsLocaleWhenUnset(t *testing.T) {
+	for _, k := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	c := &Client{Socket: "loomtest-env"}
+	cmd := c.AttachCmd("loom-x")
+	if got, _ := envValue(cmd.Env, "LC_CTYPE"); got != "UTF-8" {
+		t.Fatalf("LC_CTYPE = %q, want UTF-8", got)
+	}
+}
+
+// In the TUI hand-off the user's real terminal already has a UTF-8 locale.
+// AttachCmd must not clobber it with a forced LC_CTYPE.
+func TestAttachCmdPreservesExistingLocale(t *testing.T) {
+	os.Unsetenv("LC_ALL")
+	os.Unsetenv("LC_CTYPE")
+	t.Setenv("LANG", "en_US.UTF-8")
+	c := &Client{Socket: "loomtest-env"}
+	cmd := c.AttachCmd("loom-x")
+	if got, ok := envValue(cmd.Env, "LC_CTYPE"); ok {
+		t.Fatalf("LC_CTYPE = %q, want absent (LANG already UTF-8)", got)
+	}
+	if got, _ := envValue(cmd.Env, "LANG"); got != "en_US.UTF-8" {
+		t.Fatalf("LANG = %q, want en_US.UTF-8", got)
+	}
+}

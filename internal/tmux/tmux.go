@@ -191,10 +191,18 @@ func (c *Client) KillServer() error {
 // leaving the embedded xterm.js terminal blank. xterm.js emulates
 // xterm-256color, so that is the correct fallback. An existing TERM (the TUI
 // hand-off runs inside the user's real terminal) is left untouched.
+//
+// LC_CTYPE is defaulted to UTF-8 for the same reason: a Finder-launched bundle
+// inherits no locale, so tmux runs the attach client in non-UTF-8 mode (tmux
+// keys UTF-8 off LC_ALL/LC_CTYPE/LANG — the `-u` flag was removed in tmux 2.2)
+// and replaces every multibyte glyph — block elements, box drawing, ⚠, ’, the
+// Claude logo — with a literal '_'. An existing locale (the TUI hand-off) is
+// left untouched.
 func (c *Client) AttachCmd(name string) *exec.Cmd {
 	cmd := exec.Command("tmux", "-L", c.Socket, "attach-session", "-t", target(name))
 	var env []string
 	hasTERM := false
+	hasLocale := false
 	for _, e := range os.Environ() {
 		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_PANE=") {
 			continue
@@ -202,10 +210,18 @@ func (c *Client) AttachCmd(name string) *exec.Cmd {
 		if strings.HasPrefix(e, "TERM=") && e != "TERM=" {
 			hasTERM = true
 		}
+		for _, k := range []string{"LC_ALL=", "LC_CTYPE=", "LANG="} {
+			if strings.HasPrefix(e, k) && e != k {
+				hasLocale = true
+			}
+		}
 		env = append(env, e)
 	}
 	if !hasTERM {
 		env = append(env, "TERM=xterm-256color")
+	}
+	if !hasLocale {
+		env = append(env, "LC_CTYPE=UTF-8")
 	}
 	cmd.Env = env
 	return cmd
