@@ -282,11 +282,12 @@ function onResize() {
   window.go.main.App.ResizeSession(activeName, term.cols, term.rows);
 }
 
-// Detect file paths in terminal output and make them clickable. Matches a
+// Detect file paths in terminal output and make them ⌘-clickable. Matches a
 // path with a directory segment (…/file.ext) or a bare filename with a line
 // (file.ext:88) — both with optional :line[:col] — to avoid underlining every
-// word.ext token. Clicking resolves against the session cwd and opens the
-// editor (the backend no-ops if it isn't a real file).
+// word.ext token. ⌘-click resolves against the session cwd and opens the
+// editor (the backend no-ops if it isn't a real file); a plain click is left
+// to normal terminal text-selection, the iTerm2 / VS Code convention.
 const FILE_LINK_RE =
   /(?:\.{0,2}\/)?(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z][\w]{0,9}(?::\d+(?::\d+)?)?|[\w.@~+-]+\.[A-Za-z][\w]{0,9}:\d+(?::\d+)?/g;
 
@@ -304,7 +305,9 @@ function registerFileLinks(t) {
         links.push({
           text: token,
           range: { start: { x: m.index + 1, y }, end: { x: m.index + token.length, y } },
-          activate: () => openFileToken(token),
+          // Only ⌘-click opens; a plain click stays a normal terminal click so
+          // it doesn't fight text selection.
+          activate: (event) => { if (event && event.metaKey) openFileToken(token); },
         });
       }
       cb(links.length ? links : undefined);
