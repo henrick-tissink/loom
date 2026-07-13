@@ -3,6 +3,7 @@ import "@xterm/xterm/css/xterm.css";
 import { statusColor, statusWord, xtermTheme } from "./theme.js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 
 const threadsEl = document.getElementById("threads");
 const attnEl = document.getElementById("attn");
@@ -240,6 +241,11 @@ function selectSession(name) {
     theme: xtermTheme,
     cursorBlink: true,
   });
+  // Match tmux and the Claude Code TUI, which measure emoji as 2 cells wide.
+  // xterm.js defaults to Unicode v6, which measures several emoji as 1 cell —
+  // so color glyphs paint over the following text and line wrapping drifts.
+  term.loadAddon(new Unicode11Addon());
+  term.unicode.activeVersion = "11";
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(host);
