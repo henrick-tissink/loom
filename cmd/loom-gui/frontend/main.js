@@ -114,6 +114,13 @@ function actionBtn(pathInner, title, onClick, extraClass) {
 // survives the 1.5s poll rail rebuild (which discards the button node).
 const armedKills = new Set();
 
+// Finished sessions with an in-flight summarize, keyed by name so the
+// "Summarizing…" state survives poll rebuilds (same idea as armedKills).
+const summarizing = new Set();
+
+// One-line preview of a multi-section summary (collapse whitespace).
+function sumPreview(text) { return String(text).replace(/\s+/g, " ").trim(); }
+
 // killButton needs a two-step confirm so a stray click can't nuke an agent.
 function killButton(name) {
   const b = document.createElement("button");
@@ -168,11 +175,24 @@ function appendFinishedRow(s) {
   li.className = "thread finished";
   const color = statusColor(s.status);
   li.style.setProperty("--tc", color);
+  const busy = summarizing.has(s.name);
+  let sumLine = "";
+  if (busy) sumLine = `<span class="tsum tsum-busy">Summarizing…</span>`;
+  else if (s.summary) sumLine = `<span class="tsum" title="${esc(s.summary)}">${esc(sumPreview(s.summary))}</span>`;
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span></span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span>${sumLine}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(s.status)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
+  acts.appendChild(actionBtn('<path d="M12 3l1.6 5L19 9.6 13.6 11 12 16l-1.6-5L5 9.6 10.4 8z"/>', s.summary ? "Regenerate summary" : "Summarize", async () => {
+    if (summarizing.has(s.name)) return;
+    summarizing.add(s.name);
+    renderRail(latestSessions, latestRecent); // show "Summarizing…" at once
+    try { await window.go.main.App.SummarizeSession(s.name); }
+    catch (e) { console.error("summarize", e); }
+    summarizing.delete(s.name);
+    poll();
+  }));
   acts.appendChild(actionBtn('<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v5h5"/>', "Resume", async () => {
     try { const nn = await window.go.main.App.ResumeSession(s.name); if (nn) selectSession(nn); poll(); }
     catch (e) { console.error("resume", e); }
@@ -218,7 +238,7 @@ function renderStageHeader(name) {
 // ---- preferences ----
 async function openPrefs() {
   if (document.querySelector(".modal-backdrop")) return;
-  let prefs = { editor: "", notifications: true };
+  let prefs = { editor: "", notifications: true, autoSummarize: false };
   try { prefs = await window.go.main.App.GetPrefs(); } catch (e) { console.error("prefs", e); }
   const editors = [["", "Auto-detect"], ["cursor", "Cursor"], ["code", "VS Code"], ["zed", "Zed"]];
   const backdrop = document.createElement("div");
@@ -231,6 +251,7 @@ async function openPrefs() {
         <select id="pf-editor">${editors.map(([v, l]) => `<option value="${v}"${v === prefs.editor ? " selected" : ""}>${l}</option>`).join("")}</select>
       </div>
       <label class="pf-check"><input type="checkbox" id="pf-notif"${prefs.notifications ? " checked" : ""} /><span>Native notification when a session needs you</span></label>
+      <label class="pf-check"><input type="checkbox" id="pf-autosum"${prefs.autoSummarize ? " checked" : ""} /><span>Auto-summarize finished sessions <em>(uses a little Claude quota)</em></span></label>
       <div class="modal-actions">
         <button class="btn-ghost" id="pf-cancel">Cancel</button>
         <button class="btn-launch" id="pf-save">Save</button>
@@ -244,6 +265,7 @@ async function openPrefs() {
     const next = {
       editor: backdrop.querySelector("#pf-editor").value,
       notifications: backdrop.querySelector("#pf-notif").checked,
+      autoSummarize: backdrop.querySelector("#pf-autosum").checked,
     };
     try { await window.go.main.App.SetPrefs(next); } catch (e) { console.error("setprefs", e); }
     close();

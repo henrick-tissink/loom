@@ -44,20 +44,31 @@ func TestRecentToDTOs_filtersLiveAndDerivesStatus(t *testing.T) {
 		{Name: "b", ProjectLabel: "p", EndedAt: 200, ExitCode: 1},
 		{Name: "live", ProjectLabel: "p", EndedAt: -1, ExitCode: -1}, // still live → skipped
 	}
-	got := recentToDTOs(rows)
+	// summaryFor stubs the stored summary by claude session id.
+	sumFor := func(id string) string {
+		if id == "cs-a" {
+			return "Goal: x. Outcome: y."
+		}
+		return ""
+	}
+	rows[0].ClaudeSessionID = "cs-a"
+	got := recentToDTOs(rows, sumFor)
 	if len(got) != 2 {
 		t.Fatalf("want 2 (live excluded), got %d", len(got))
 	}
 	if got[0].Status != "done" || got[0].Title != "done one" {
 		t.Errorf("row a: %+v", got[0])
 	}
-	if got[1].Status != "error" {
-		t.Errorf("row b should be error: %+v", got[1])
+	if got[0].Summary != "Goal: x. Outcome: y." {
+		t.Errorf("row a summary not attached: %+v", got[0])
+	}
+	if got[1].Status != "error" || got[1].Summary != "" {
+		t.Errorf("row b should be error with no summary: %+v", got[1])
 	}
 }
 
 func TestRecentToDTOs_emptyIsNonNil(t *testing.T) {
-	if recentToDTOs(nil) == nil {
+	if recentToDTOs(nil, nil) == nil {
 		t.Fatal("want non-nil empty slice")
 	}
 }

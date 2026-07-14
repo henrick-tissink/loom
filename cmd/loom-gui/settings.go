@@ -13,9 +13,10 @@ import (
 type Settings struct {
 	Editor        string `json:"editor"`        // "" = auto-detect; else "cursor" | "code" | "zed"
 	Notifications bool   `json:"notifications"` // fire native needs-you notifications
+	AutoSummarize bool   `json:"autoSummarize"` // background-summarize finished sessions (uses claude quota)
 }
 
-func defaultSettings() Settings { return Settings{Editor: "", Notifications: true} }
+func defaultSettings() Settings { return Settings{Editor: "", Notifications: true, AutoSummarize: false} }
 
 // settingsStore is a concurrency-safe, file-backed view of Settings.
 type settingsStore struct {

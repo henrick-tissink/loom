@@ -40,11 +40,14 @@ type FinishedDTO struct {
 	Title   string `json:"title"`
 	Status  string `json:"status"` // done | error
 	EndedAt int64  `json:"endedAt"`
+	Summary string `json:"summary"` // stored LLM summary, or "" if none yet
 }
 
 // recentToDTOs maps store rows to FinishedDTOs, skipping still-live rows
-// (EndedAt < 0) and deriving done/error from the exit code. Non-nil slice.
-func recentToDTOs(rows []store.SessionRow) []FinishedDTO {
+// (EndedAt < 0) and deriving done/error from the exit code. summaryFor (may be
+// nil) supplies each row's stored LLM summary by claude session id. Non-nil
+// slice.
+func recentToDTOs(rows []store.SessionRow, summaryFor func(string) string) []FinishedDTO {
 	out := make([]FinishedDTO, 0, len(rows))
 	for _, r := range rows {
 		if r.EndedAt < 0 {
@@ -54,9 +57,13 @@ func recentToDTOs(rows []store.SessionRow) []FinishedDTO {
 		if r.ExitCode > 0 {
 			st = "error"
 		}
+		summary := ""
+		if summaryFor != nil {
+			summary = summaryFor(r.ClaudeSessionID)
+		}
 		out = append(out, FinishedDTO{
 			Name: r.Name, Project: r.ProjectLabel, Title: r.Title,
-			Status: st, EndedAt: r.EndedAt,
+			Status: st, EndedAt: r.EndedAt, Summary: summary,
 		})
 	}
 	return out

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -24,10 +26,18 @@ type App struct {
 	st       *store.Store
 	launcher *session.Launcher
 	projects []registry.Project
-	now      func() time.Time
-	reg      *ptyRegistry
-	notifier *notifier
-	settings *settingsStore
+	now        func() time.Time
+	reg        *ptyRegistry
+	notifier   *notifier
+	settings   *settingsStore
+	summarizer *memory.Summarizer
+
+	// auto-summarize guards: sumTried marks sessions already attempted this
+	// process (so a failed/empty summary isn't retried forever); sumBusy keeps
+	// at most one summarize running at a time.
+	sumMu    sync.Mutex
+	sumTried map[string]bool
+	sumBusy  bool
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, projects []registry.Project, now func() time.Time) *App {
@@ -134,7 +144,8 @@ func (a *App) ResizeSession(name string, cols, rows int) {
 }
 func (a *App) CloseSession(name string) { a.reg.close(name) }
 
-// ListRecent returns the most recent finished sessions for the Finished group.
+// ListRecent returns the most recent finished sessions for the Finished group,
+// each annotated with its stored LLM summary (when one exists).
 func (a *App) ListRecent() []FinishedDTO {
 	out := []FinishedDTO{}
 	defer func() { _ = recover() }()
@@ -145,7 +156,73 @@ func (a *App) ListRecent() []FinishedDTO {
 	if err != nil {
 		return out
 	}
-	return recentToDTOs(rows)
+	a.maybeAutoSummarize(rows)
+	return recentToDTOs(rows, a.summaryFor)
+}
+
+// summaryFor returns the stored LLM summary for a claude session id, or "".
+func (a *App) summaryFor(claudeSessionID string) string {
+	if a.st == nil || claudeSessionID == "" {
+		return ""
+	}
+	if t, ok, _ := a.st.GetTranscript(claudeSessionID); ok {
+		return t.LLMSummary
+	}
+	return ""
+}
+
+// SummarizeSession generates (or regenerates) the LLM summary for a session on
+// demand and returns it. Runs the hardened haiku summarizer over the session's
+// indexed docs; the result is persisted so the Finished list shows it.
+func (a *App) SummarizeSession(name string) (string, error) {
+	if a.summarizer == nil || a.st == nil {
+		return "", fmt.Errorf("summarizer unavailable")
+	}
+	row, ok, err := a.st.Get(name)
+	if err != nil {
+		return "", err
+	}
+	if !ok || row.ClaudeSessionID == "" {
+		return "", fmt.Errorf("session %q not found", name)
+	}
+	return a.summarizer.Summarize(row.ClaudeSessionID, a.now())
+}
+
+// maybeAutoSummarize, when the pref is on, summarizes one not-yet-summarized
+// finished session per call in the background — at most one at a time, each
+// session attempted once per process — so the Finished list fills in over
+// time without a burst of claude calls.
+func (a *App) maybeAutoSummarize(rows []store.SessionRow) {
+	if a.summarizer == nil || a.settings == nil || !a.settings.get().AutoSummarize {
+		return
+	}
+	a.sumMu.Lock()
+	defer a.sumMu.Unlock()
+	if a.sumBusy {
+		return
+	}
+	if a.sumTried == nil {
+		a.sumTried = map[string]bool{}
+	}
+	for _, r := range rows {
+		id := r.ClaudeSessionID
+		if id == "" || a.sumTried[id] || r.EndedAt < 0 {
+			continue // no id, already attempted, or still live
+		}
+		if a.summaryFor(id) != "" {
+			a.sumTried[id] = true // already summarized
+			continue
+		}
+		a.sumTried[id] = true
+		a.sumBusy = true
+		go func(id string) {
+			_, _ = a.summarizer.Summarize(id, a.now())
+			a.sumMu.Lock()
+			a.sumBusy = false
+			a.sumMu.Unlock()
+		}(id)
+		return // one per call
+	}
 }
 
 // KillSession terminates a live tmux session (a running/needs-you agent).

@@ -155,6 +155,12 @@ body {
 .tact-kill:hover, .tact-kill.armed { color: #fff; background: #C5604C; border-color: #C5604C; }
 .thread.finished { cursor: default; }
 .thread.finished .tname { color: var(--text-dim); }
+.tsum {
+  display: block; margin-top: 3px; font-size: 10.5px; color: var(--text-faint);
+  line-height: 1.35; max-height: 2.7em; overflow: hidden; text-overflow: ellipsis;
+}
+.tsum-busy { font-style: italic; color: var(--accent-ink); }
+.pf-check em { color: var(--text-faint); font-style: normal; font-size: 11px; }
 
 /* status icon chips (soft pastel bg, dark ink) */
 .i-needs_you { background: #F1AE96; color: #7a331e; }

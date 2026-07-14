@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/henricktissink/loom/internal/config"
+	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -65,9 +66,18 @@ func run() error {
 		ReadyTimeout:    60 * time.Second,
 		PollEvery:       500 * time.Millisecond,
 	}
+	// Keep the memory index fresh (search + summaries read it): sweep at
+	// startup and every 10 min, like the TUI. Without this a GUI-only user's
+	// index goes stale and freshly-finished sessions can't be summarized.
+	ix := memory.NewIndexer(st, cfg.ClaudeConfigDir)
+	ixCtx, cancelIx := context.WithCancel(context.Background())
+	defer cancelIx()
+	go ix.Run(ixCtx, 10*time.Minute)
+
 	engine := status.NewEngine(tm, st, cfg.ClaudeConfigDir)
 	app := newApp(engine, tm, st, launcher, projects, time.Now)
 	app.settings = newSettingsStore(cfg.LoomDir)
+	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
 
 	return wails.Run(&options.App{
 		Title:       "loom",
