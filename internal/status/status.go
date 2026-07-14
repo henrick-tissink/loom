@@ -21,6 +21,15 @@ func Fuse(t transcript.State, paneActive bool) Status {
 	case transcript.StateRunning:
 		return Running
 	case transcript.StateNeedsYou:
+		if paneActive {
+			// The turn ended in the JSONL, but the pane is still producing
+			// output — a background task (e.g. a background shell) is still
+			// running, or Claude is mid-render. The session isn't waiting on
+			// you yet; only assert needs_you once the pane goes quiet. Idle
+			// sessions at the prompt emit nothing, so this never suppresses a
+			// genuine needs_you — it just debounces it past the active window.
+			return Running
+		}
 		return NeedsYou
 	case transcript.StateIdle:
 		if paneActive {

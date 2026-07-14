@@ -15,7 +15,7 @@ func TestFuse(t *testing.T) {
 		{transcript.StateRunning, false, Running},
 		{transcript.StateRunning, true, Running},
 		{transcript.StateNeedsYou, false, NeedsYou},
-		{transcript.StateNeedsYou, true, NeedsYou},
+		{transcript.StateNeedsYou, true, Running}, // pane still emitting: a background task is running, not waiting on you
 		{transcript.StateIdle, true, Running}, // streaming: JSONL lags the pane
 		{transcript.StateIdle, false, Idle},
 		{transcript.StateUnknown, true, Running},
