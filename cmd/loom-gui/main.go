@@ -67,6 +67,7 @@ func run() error {
 	}
 	engine := status.NewEngine(tm, st, cfg.ClaudeConfigDir)
 	app := newApp(engine, tm, st, launcher, projects, time.Now)
+	app.settings = newSettingsStore(cfg.LoomDir)
 
 	return wails.Run(&options.App{
 		Title:       "loom",

@@ -34,6 +34,7 @@ syncFullscreen();
 
 document.getElementById("new-session").addEventListener("click", openLauncher);
 document.getElementById("search-btn").addEventListener("click", openSearch);
+document.getElementById("prefs-btn").addEventListener("click", openPrefs);
 document.addEventListener("keydown", (e) => {
   // ⌘K only (not Ctrl+K) — Ctrl+K is the terminal's readline "kill line".
   if (e.metaKey && (e.key === "k" || e.key === "K")) {
@@ -212,6 +213,41 @@ function renderStageHeader(name) {
     `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>`;
   const diffBtn = el.querySelector("#sh-diff");
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
+}
+
+// ---- preferences ----
+async function openPrefs() {
+  if (document.querySelector(".modal-backdrop")) return;
+  let prefs = { editor: "", notifications: true };
+  try { prefs = await window.go.main.App.GetPrefs(); } catch (e) { console.error("prefs", e); }
+  const editors = [["", "Auto-detect"], ["cursor", "Cursor"], ["code", "VS Code"], ["zed", "Zed"]];
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal prefs-modal" role="dialog" aria-label="Preferences">
+      <h2>Preferences</h2>
+      <div class="field">
+        <label for="pf-editor">Editor for opening files</label>
+        <select id="pf-editor">${editors.map(([v, l]) => `<option value="${v}"${v === prefs.editor ? " selected" : ""}>${l}</option>`).join("")}</select>
+      </div>
+      <label class="pf-check"><input type="checkbox" id="pf-notif"${prefs.notifications ? " checked" : ""} /><span>Native notification when a session needs you</span></label>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="pf-cancel">Cancel</button>
+        <button class="btn-launch" id="pf-save">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#pf-cancel").addEventListener("click", close);
+  backdrop.querySelector("#pf-save").addEventListener("click", async () => {
+    const next = {
+      editor: backdrop.querySelector("#pf-editor").value,
+      notifications: backdrop.querySelector("#pf-notif").checked,
+    };
+    try { await window.go.main.App.SetPrefs(next); } catch (e) { console.error("setprefs", e); }
+    close();
+  });
 }
 
 // ---- quick reply (triage without attaching) ----

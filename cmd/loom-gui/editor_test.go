@@ -88,16 +88,26 @@ func TestEditorCommands(t *testing.T) {
 
 func TestPickEditor(t *testing.T) {
 	none := func(string) (string, error) { return "", errors.New("nope") }
-	if got := pickEditor(none); got != "open" {
+	if got := pickEditor(none, ""); got != "open" {
 		t.Errorf("no editors → want open, got %q", got)
 	}
+	all := func(string) (string, error) { return "/usr/bin/x", nil }
+	// Auto: first of cursor/code/zed.
+	if got := pickEditor(all, ""); got != "cursor" {
+		t.Errorf("auto → want cursor, got %q", got)
+	}
+	// Preferred wins when installed.
+	if got := pickEditor(all, "zed"); got != "zed" {
+		t.Errorf("preferred zed → want zed, got %q", got)
+	}
+	// Preferred but NOT installed → fall back to auto.
 	onlyCode := func(b string) (string, error) {
 		if b == "code" {
 			return "/usr/bin/code", nil
 		}
 		return "", errors.New("nope")
 	}
-	if got := pickEditor(onlyCode); got != "code" {
-		t.Errorf("want code, got %q", got)
+	if got := pickEditor(onlyCode, "zed"); got != "code" {
+		t.Errorf("preferred zed missing → want code, got %q", got)
 	}
 }

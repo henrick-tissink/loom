@@ -24,9 +24,16 @@ func resolveFile(cwd, path string) string {
 	return ""
 }
 
-// pickEditor returns the first available GUI editor binary, or "open" (the
-// macOS default-application opener) as a fallback. look is injected for tests.
-func pickEditor(look func(string) (string, error)) string {
+// pickEditor returns the editor binary to use. A non-empty preferred binary
+// wins when it's installed; otherwise the first available GUI editor, or
+// "open" (the macOS default-application opener) as a fallback. look is injected
+// for tests.
+func pickEditor(look func(string) (string, error), preferred string) string {
+	if preferred != "" {
+		if _, err := look(preferred); err == nil {
+			return preferred
+		}
+	}
 	for _, bin := range []string{"cursor", "code", "zed"} {
 		if _, err := look(bin); err == nil {
 			return bin
@@ -96,11 +103,15 @@ func (a *App) OpenInEditor(sessionName, path string, line int) error {
 	if abs == "" {
 		return fmt.Errorf("file not found: %s", path)
 	}
+	preferred := ""
+	if a.settings != nil {
+		preferred = a.settings.get().Editor
+	}
 	// Fire and forget — the editor runs independently of loom — but reap each
 	// child (GUI editor CLIs fork-and-exit) so it doesn't linger as a zombie.
 	// The open-at-line command must start before the activate so the file is
 	// already loading when the window rises.
-	for _, argv := range editorCommands(pickEditor(exec.LookPath), abs, line) {
+	for _, argv := range editorCommands(pickEditor(exec.LookPath, preferred), abs, line) {
 		cmd := exec.Command(argv[0], argv[1:]...)
 		if err := cmd.Start(); err != nil {
 			return err

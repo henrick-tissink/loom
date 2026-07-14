@@ -27,6 +27,7 @@ type App struct {
 	now      func() time.Time
 	reg      *ptyRegistry
 	notifier *notifier
+	settings *settingsStore
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, projects []registry.Project, now func() time.Time) *App {
@@ -67,7 +68,7 @@ func (a *App) ListSessions() (out []SessionDTO) {
 // for sessions that just flipped to needs-you (once-only, from the engine),
 // and the window title reflecting the current needs-you count.
 func (a *App) onSnapshot(snap status.Snapshot, dtos []SessionDTO) {
-	if a.notifier != nil {
+	if a.notifier != nil && (a.settings == nil || a.settings.get().Notifications) {
 		a.notifier.needsYou(snap.NewlyNeedsYou)
 	}
 	if a.ctx == nil {
@@ -84,6 +85,8 @@ func (a *App) onSnapshot(snap status.Snapshot, dtos []SessionDTO) {
 		title = fmt.Sprintf("loom — %d need you", n)
 	}
 	wruntime.WindowSetTitle(a.ctx, title)
+	// Mirror the count on the Dock icon so it's visible with the window hidden.
+	setDockBadge(n)
 }
 
 // ListProjects returns the workspace projects discovered at startup.

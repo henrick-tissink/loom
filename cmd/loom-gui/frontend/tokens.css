@@ -65,13 +65,19 @@ body {
 #new-session svg { width: 13px; height: 13px; }
 
 .tb-right { --wails-draggable: no-drag; display: flex; align-items: center; gap: 10px; }
-#search-btn {
+#search-btn, #prefs-btn {
+  --wails-draggable: no-drag;
   display: inline-flex; align-items: center; justify-content: center;
   width: 30px; height: 28px; color: var(--text-dim);
   background: transparent; border: 1px solid var(--edge); border-radius: 8px; cursor: pointer;
 }
-#search-btn:hover { color: var(--text); border-color: var(--text-faint); }
-#search-btn svg { width: 14px; height: 14px; }
+#search-btn:hover, #prefs-btn:hover { color: var(--text); border-color: var(--text-faint); }
+#search-btn svg, #prefs-btn svg { width: 14px; height: 14px; }
+
+/* preferences */
+.prefs-modal { width: 440px; }
+.pf-check { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--text); cursor: pointer; }
+.pf-check input { width: 15px; height: 15px; accent-color: var(--accent); }
 
 /* search modal */
 .search-modal { width: 560px; gap: 12px; padding: 16px; }
