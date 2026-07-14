@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/henricktissink/loom/internal/registry"
@@ -109,6 +110,22 @@ func (a *App) AttachSession(name string) error {
 	return a.reg.attach(name)
 }
 func (a *App) SendInput(name, data string)     { _ = a.reg.send(name, data) }
+
+// SendReply types a line into a live session and presses Enter — triage from
+// the rail without full-screen attaching. Best-effort; only meaningful for a
+// live tmux session. Empty replies are rejected so a stray Enter can't fire.
+func (a *App) SendReply(name, text string) error {
+	if a.tm == nil {
+		return fmt.Errorf("tmux unavailable")
+	}
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("empty reply")
+	}
+	if err := a.tm.SendLiteral(name, text); err != nil {
+		return err
+	}
+	return a.tm.SendEnter(name)
+}
 func (a *App) ResizeSession(name string, cols, rows int) {
 	_ = a.reg.resize(name, uint16(cols), uint16(rows))
 }

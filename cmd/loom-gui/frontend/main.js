@@ -74,6 +74,18 @@ function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+// Context-window gauge: the last turn's approximate token footprint against a
+// 200k window. Warns as it fills so you know when to /compact. Empty when the
+// count is unknown (0).
+const CTX_WINDOW = 200000;
+function ctxGaugeHtml(tokens) {
+  if (!tokens || tokens <= 0) return "";
+  const pct = Math.min(100, Math.round((tokens / CTX_WINDOW) * 100));
+  const k = tokens >= 1000 ? Math.round(tokens / 1000) + "k" : String(tokens);
+  const cls = pct >= 90 ? " ctx-danger" : pct >= 75 ? " ctx-warn" : "";
+  return `<span class="ctxbar${cls}" title="~${k} / 200k context tokens (${pct}%)"><i style="width:${pct}%"></i></span>`;
+}
+
 // ---- rail (status-grouped, attention first) ----
 const GROUPS = [
   { key: "Needs you", match: (s) => s === "needs_you" },
@@ -141,9 +153,11 @@ function appendLiveRow(s) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span></span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span>${ctxGaugeHtml(s.ctxTokens)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}</span><span class="tactions"></span></span>`;
-  li.querySelector(".tactions").appendChild(killButton(s.name));
+  const acts = li.querySelector(".tactions");
+  acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
+  acts.appendChild(killButton(s.name));
   li.addEventListener("click", () => selectSession(s.name));
   threadsEl.appendChild(li);
 }
@@ -194,7 +208,93 @@ function renderStageHeader(name) {
   el.innerHTML =
     `<span class="sh-name">${esc(label)}</span>` +
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(project)}</span>` : "") +
-    `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}</span></span>`;
+    `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}</span></span>` +
+    `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>`;
+  const diffBtn = el.querySelector("#sh-diff");
+  if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
+}
+
+// ---- quick reply (triage without attaching) ----
+function openReply(name) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const s = latestSessions.find((x) => x.name === name);
+  const label = s ? displayName(s) : name;
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal reply-modal" role="dialog" aria-label="Quick reply">
+      <h2>Reply to ${esc(label)}</h2>
+      <input id="reply-input" class="search-input" type="text" placeholder="Type a message — Enter sends it to the session…" autocomplete="off" spellcheck="false" />
+      <div class="modal-actions">
+        <button class="btn-ghost" id="reply-cancel">Cancel</button>
+        <button class="btn-launch" id="reply-send">Send</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const input = backdrop.querySelector("#reply-input");
+  input.focus();
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#reply-cancel").addEventListener("click", close);
+  const send = async () => {
+    if (!input.value.trim()) return;
+    try { await window.go.main.App.SendReply(name, input.value); }
+    catch (e) { console.error("reply", e); }
+    close();
+    poll();
+  };
+  backdrop.querySelector("#reply-send").addEventListener("click", send);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); send(); }
+    else if (e.key === "Escape") { e.preventDefault(); close(); }
+  });
+}
+
+// ---- diff review ----
+function renderPatch(patch) {
+  return patch.split("\n").map((ln) => {
+    let cls = "";
+    if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("diff ") || ln.startsWith("index ")) cls = "d-meta";
+    else if (ln.startsWith("@@")) cls = "d-hunk";
+    else if (ln.startsWith("+")) cls = "d-add";
+    else if (ln.startsWith("-")) cls = "d-del";
+    return `<span class="dl ${cls}">${esc(ln)}</span>`;
+  }).join("\n");
+}
+
+async function openDiff(name) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal diff-modal" role="dialog" aria-label="Uncommitted changes">
+      <h2>Uncommitted changes</h2>
+      <div id="diff-body" class="diff-body">Loading…</div>
+      <div class="modal-actions"><button class="btn-ghost" id="diff-close">Close</button></div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#diff-close").addEventListener("click", close);
+
+  const body = backdrop.querySelector("#diff-body");
+  let d;
+  try { d = await window.go.main.App.SessionDiff(name); }
+  catch (e) { body.textContent = "diff failed: " + e; return; }
+  if (d.error) { body.innerHTML = `<div class="diff-empty">${esc(d.error)}</div>`; return; }
+  if (!d.dirty) { body.innerHTML = `<div class="diff-empty">No uncommitted changes.</div>`; return; }
+
+  let html = "";
+  if (d.stat) html += `<pre class="diff-stat">${esc(d.stat)}</pre>`;
+  if (d.untracked && d.untracked.length) {
+    html += `<div class="diff-untracked"><span class="du-head">new files</span>` +
+      d.untracked.map((f) => `<span class="du-file" data-path="${esc(f)}">${esc(f)}</span>`).join("") + `</div>`;
+  }
+  if (d.patch) html += `<pre class="diff-patch">${renderPatch(d.patch)}</pre>`;
+  body.innerHTML = html;
+  body.querySelectorAll(".du-file").forEach((el) => {
+    el.addEventListener("click", () => openFileToken(el.getAttribute("data-path")));
+  });
 }
 
 // ---- terminal ----

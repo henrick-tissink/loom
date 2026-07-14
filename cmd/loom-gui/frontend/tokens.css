@@ -210,3 +210,44 @@ body {
 .btn-ghost:hover { color: var(--text); border-color: var(--text-faint); }
 .btn-launch { background: var(--accent); color: #4a2417; border-color: var(--accent-line); font-weight: 600; }
 .btn-launch:disabled { opacity: 0.55; cursor: default; }
+
+/* ---- context-window gauge (rail) ---- */
+.ctxbar { display: block; height: 3px; margin-top: 5px; border-radius: 2px; background: var(--edge); overflow: hidden; }
+.ctxbar i { display: block; height: 100%; background: var(--accent-line); border-radius: 2px; }
+.ctxbar.ctx-warn i { background: #E0A24A; }
+.ctxbar.ctx-danger i { background: #C5604C; }
+
+/* ---- stage-header diff button ---- */
+.sh-btn {
+  --wails-draggable: no-drag; margin-left: auto;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--font-ui); font-size: 11px; color: var(--text-dim);
+  background: var(--stage); border: 1px solid var(--edge); border-radius: 8px;
+  padding: 4px 10px; cursor: pointer;
+}
+.sh-btn:hover { color: var(--text); border-color: var(--text-faint); }
+.sh-btn svg { width: 12px; height: 12px; }
+
+/* ---- diff modal ---- */
+.diff-modal { width: 780px; max-width: calc(100vw - 48px); }
+.diff-body { max-height: 62vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.diff-empty { color: var(--text-faint); font-size: 13px; padding: 8px 2px; }
+.diff-stat, .diff-patch {
+  font-family: var(--font-mono); margin: 0; padding: 10px 12px;
+  background: var(--bg); border: 1px solid var(--edge); border-radius: 8px;
+  overflow-x: auto; white-space: pre;
+}
+.diff-stat { font-size: 11.5px; color: var(--text-dim); }
+.diff-patch { font-size: 11.5px; line-height: 1.5; color: var(--text); }
+.diff-untracked { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.du-head { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-faint); }
+.du-file {
+  font-family: var(--font-mono); font-size: 11px; color: var(--accent-ink);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: 6px; padding: 2px 7px; cursor: pointer;
+}
+.du-file:hover { filter: brightness(0.97); }
+.d-add { color: #2f7d4f; }
+.d-del { color: #b23b2c; }
+.d-hunk { color: #3e7f8c; }
+.d-meta { color: var(--text-faint); }
