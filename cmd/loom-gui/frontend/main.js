@@ -236,6 +236,59 @@ function renderStageHeader(name) {
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
 }
 
+// ---- fan-out (same prompt across many projects) ----
+async function openFanout() {
+  if (document.querySelector(".modal-backdrop")) return;
+  let projects = [];
+  try { projects = await window.go.main.App.ListProjects(); } catch (e) { console.error("projects", e); }
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal fan-modal" role="dialog" aria-label="Fan out">
+      <h2>Fan out — one prompt, many projects</h2>
+      <div class="field">
+        <label>Projects</label>
+        <div id="fan-projects" class="fan-projects">${projects.map((p) => `<label class="pf-check"><input type="checkbox" data-path="${esc(p.path)}" /><span>${esc(p.label)}</span></label>`).join("")}</div>
+      </div>
+      <div class="fan-row">
+        <div class="field"><label for="fan-model">Model</label><select id="fan-model">${optionsHtml(MODELS)}</select></div>
+        <div class="field"><label for="fan-mode">Permission mode</label><select id="fan-mode">${optionsHtml(MODES)}</select></div>
+      </div>
+      <div class="field"><label for="fan-seed">Seed prompt</label><textarea id="fan-seed" placeholder="Sent to every selected project"></textarea></div>
+      <div class="modal-error" id="fan-error"></div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="fan-cancel">Cancel</button>
+        <button class="btn-launch" id="fan-launch" disabled>Launch</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#fan-cancel").addEventListener("click", close);
+
+  const launchBtn = backdrop.querySelector("#fan-launch");
+  const selected = () => [...backdrop.querySelectorAll("#fan-projects input:checked")].map((c) => c.getAttribute("data-path"));
+  const updateCount = () => { const n = selected().length; launchBtn.textContent = n ? `Launch ${n}` : "Launch"; launchBtn.disabled = n === 0; };
+  backdrop.querySelector("#fan-projects").addEventListener("change", updateCount);
+  updateCount();
+
+  launchBtn.addEventListener("click", async () => {
+    const paths = selected();
+    if (!paths.length) return;
+    const model = backdrop.querySelector("#fan-model").value;
+    const mode = backdrop.querySelector("#fan-mode").value;
+    const seed = backdrop.querySelector("#fan-seed").value;
+    launchBtn.disabled = true;
+    let res;
+    try { res = await window.go.main.App.Fanout(paths, model, mode, seed); }
+    catch (e) { backdrop.querySelector("#fan-error").textContent = "Fan-out failed: " + e; launchBtn.disabled = false; return; }
+    if (res.error) { backdrop.querySelector("#fan-error").textContent = res.error; launchBtn.disabled = false; return; }
+    close();
+    if (res.first) selectSession(res.first);
+    poll();
+  });
+}
+
 // ---- workflows ----
 function openWorkflows() {
   if (document.querySelector(".modal-backdrop")) return;
@@ -731,6 +784,8 @@ async function openLauncher() {
 function buildPaletteItems() {
   const items = [
     { label: "New session", hint: "launch", run: () => openLauncher() },
+    { label: "Fan out to projects", hint: "one prompt · many repos", run: () => openFanout() },
+    { label: "Workflows", hint: "runs & definitions", run: () => openWorkflows() },
     { label: "Search history", hint: "find past work", run: () => openSearch() },
   ];
   for (const s of latestSessions) {
