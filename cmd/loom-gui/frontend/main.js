@@ -35,6 +35,7 @@ syncFullscreen();
 document.getElementById("new-session").addEventListener("click", openLauncher);
 document.getElementById("search-btn").addEventListener("click", openSearch);
 document.getElementById("prefs-btn").addEventListener("click", openPrefs);
+document.getElementById("wf-btn").addEventListener("click", openWorkflows);
 document.addEventListener("keydown", (e) => {
   // ⌘K only (not Ctrl+K) — Ctrl+K is the terminal's readline "kill line".
   if (e.metaKey && (e.key === "k" || e.key === "K")) {
@@ -233,6 +234,150 @@ function renderStageHeader(name) {
     `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>`;
   const diffBtn = el.querySelector("#sh-diff");
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
+}
+
+// ---- workflows ----
+function openWorkflows() {
+  if (document.querySelector(".modal-backdrop")) return;
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal wf-modal" role="dialog" aria-label="Workflows">
+      <h2>Workflows</h2>
+      <div id="wf-body" class="wf-body">Loading…</div>
+      <div class="modal-actions"><button class="btn-ghost" id="wf-close">Close</button></div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#wf-close").addEventListener("click", close);
+  renderWF(backdrop.querySelector("#wf-body"), close);
+}
+
+function wfRunHtml(r) {
+  const marks = [];
+  if (r.pendingSeed) marks.push(`<span class="wf-mark">seed pending</span>`);
+  if (r.seedFailed) marks.push(`<span class="wf-mark wf-bad">seed FAILED</span>`);
+  return `<li class="wf-item${r.defErr ? " wf-err" : ""}" data-run="${r.id}">
+    <div class="wf-main">
+      <span class="wf-name">${esc(r.name)}#${r.id}</span>
+      <span class="wf-sub">${esc(r.stepLabel)} · ${esc(r.status)}</span>
+      ${marks.join("")}
+    </div>
+    <div class="wf-acts">
+      ${r.pendingSeed ? `<button class="tact wf-retry" title="Retry seed">retry</button>` : ""}
+      ${r.live ? `<button class="tact wf-attach" title="Attach session">attach</button>` : ""}
+      <button class="tact wf-adv" title="Advance a step">n ▸</button>
+      <button class="tact wf-abandon" title="Abandon run">✕</button>
+    </div></li>`;
+}
+
+function wfDefHtml(d, i) {
+  return `<li class="wf-item wf-def" data-def="${i}">
+    <div class="wf-main">
+      <span class="wf-name">${esc(d.name)}</span>
+      <span class="wf-sub">${d.steps} step${d.steps === 1 ? "" : "s"}${d.project ? " · " + esc(d.project) : ""}</span>
+    </div>
+    <div class="wf-acts"><button class="tact wf-start" title="Start workflow">start ▸</button></div></li>`;
+}
+
+function wfErrHtml(e) {
+  const base = String(e.path).split("/").pop();
+  return `<li class="wf-item wf-err"><div class="wf-main"><span class="wf-name">${esc(base)}</span><span class="wf-sub">${esc(e.err)}</span></div></li>`;
+}
+
+async function renderWF(body, close) {
+  body.textContent = "Loading…";
+  let runs = [], wf = { defs: [], errors: [] };
+  try {
+    [runs, wf] = await Promise.all([
+      window.go.main.App.ListRuns(),
+      window.go.main.App.ListWorkflows(),
+    ]);
+  } catch (e) { console.error("workflows", e); }
+
+  const errs = wf.errors || [];
+  const runsHtml = runs.length ? `<ul class="wf-list">${runs.map(wfRunHtml).join("")}</ul>` : `<div class="wf-empty">No active runs.</div>`;
+  const defsHtml = (wf.defs.length || errs.length)
+    ? `<ul class="wf-list">${wf.defs.map(wfDefHtml).join("") + errs.map(wfErrHtml).join("")}</ul>`
+    : `<div class="wf-empty">No workflow files in ~/.loom/workflows.</div>`;
+  body.innerHTML = `<div class="wf-sec">Runs</div>${runsHtml}<div class="wf-sec">Workflows</div>${defsHtml}`;
+
+  runs.forEach((r) => {
+    const li = body.querySelector(`[data-run="${r.id}"]`);
+    if (!li) return;
+    const on = (sel, fn) => { const el = li.querySelector(sel); if (el) el.addEventListener("click", fn); };
+    on(".wf-attach", async () => { try { const n = await window.go.main.App.AttachRun(r.id); if (n) { close(); selectSession(n); } } catch (e) { console.error("attach", e); } });
+    on(".wf-adv", () => wfAdvance(body, close, r));
+    on(".wf-abandon", () => wfAbandon(body, close, r));
+    on(".wf-retry", async () => { try { await window.go.main.App.RetryRunSeed(r.id); } catch (e) { console.error("retry", e); } renderWF(body, close); });
+  });
+  wf.defs.forEach((d, i) => {
+    const li = body.querySelector(`[data-def="${i}"]`);
+    if (li) li.querySelector(".wf-start").addEventListener("click", async () => {
+      try { await window.go.main.App.StartWorkflow(d.path); } catch (e) { console.error("start", e); }
+      renderWF(body, close);
+    });
+  });
+}
+
+async function wfAdvance(body, close, r) {
+  let p;
+  try { p = await window.go.main.App.PreviewAdvance(r.id); }
+  catch (e) { console.error("preview", e); renderWF(body, close); return; }
+  const finish = p.finish;
+  const rel = finish ? "" :
+    `<div class="wf-crow">relation <b>${esc(p.relation)}</b>${p.relation === "continue" ? " — sends into the current session" : " — launches a new session"}</div>`;
+  const seed = (!finish && p.seed) ? `<div class="wf-seed">${esc(p.seed.slice(0, 240))}${p.seed.length > 240 ? "…" : ""}</div>` : "";
+  const warn = p.unavailable ? `<div class="wf-warn">some {{prev.*}} tokens were unavailable</div>` : "";
+  body.innerHTML = `
+    <div class="wf-confirm">
+      <div class="wf-ctitle">${finish ? "Finish this run?" : "Advance to “" + esc(p.label) + "”"}</div>
+      ${rel}${seed}${warn}
+      <div class="wf-cerr" id="wf-cerr"></div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="wf-cancel">Cancel</button>
+        <button class="btn-launch" id="wf-go">${finish ? "Finish" : "Advance"}</button>
+      </div>
+    </div>`;
+  body.querySelector("#wf-cancel").addEventListener("click", () => renderWF(body, close));
+  body.querySelector("#wf-go").addEventListener("click", async () => {
+    if (finish) {
+      try { await window.go.main.App.FinishRun(r.id); } catch (e) { console.error("finish", e); }
+      renderWF(body, close); return;
+    }
+    let res;
+    try { res = await window.go.main.App.AdvanceRun(r.id, false); }
+    catch (e) { body.querySelector("#wf-cerr").textContent = String(e); return; }
+    if (res.continueDead) {
+      const errEl = body.querySelector("#wf-cerr");
+      errEl.innerHTML = `The continue target session is gone. <button class="tact" id="wf-fork">Fork instead</button>`;
+      body.querySelector("#wf-fork").addEventListener("click", async () => {
+        try { await window.go.main.App.AdvanceRun(r.id, true); } catch (e) { console.error("fork", e); }
+        renderWF(body, close);
+      });
+      return;
+    }
+    if (res.error) { body.querySelector("#wf-cerr").textContent = res.error; return; }
+    renderWF(body, close); // advanced or stale → refresh
+  });
+}
+
+function wfAbandon(body, close, r) {
+  body.innerHTML = `
+    <div class="wf-confirm">
+      <div class="wf-ctitle">Abandon ${esc(r.name)}#${r.id}?</div>
+      <div class="wf-crow">The run is marked abandoned. Its session keeps running (not killed).</div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="wf-cancel">Cancel</button>
+        <button class="btn-launch" id="wf-go">Abandon</button>
+      </div>
+    </div>`;
+  body.querySelector("#wf-cancel").addEventListener("click", () => renderWF(body, close));
+  body.querySelector("#wf-go").addEventListener("click", async () => {
+    try { await window.go.main.App.AbandonRun(r.id); } catch (e) { console.error("abandon", e); }
+    renderWF(body, close);
+  });
 }
 
 // ---- preferences ----

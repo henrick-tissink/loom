@@ -14,6 +14,7 @@ import (
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/workflow"
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -29,8 +30,10 @@ type App struct {
 	now        func() time.Time
 	reg        *ptyRegistry
 	notifier   *notifier
-	settings   *settingsStore
-	summarizer *memory.Summarizer
+	settings     *settingsStore
+	summarizer   *memory.Summarizer
+	runner       *workflow.Runner
+	workflowsDir string
 
 	// auto-summarize guards: sumTried marks sessions already attempted this
 	// process (so a failed/empty summary isn't retried forever); sumBusy keeps

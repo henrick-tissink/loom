@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/henricktissink/loom/internal/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/workflow"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -74,10 +76,17 @@ func run() error {
 	defer cancelIx()
 	go ix.Run(ixCtx, 10*time.Minute)
 
+	workflowsDir := filepath.Join(cfg.LoomDir, "workflows")
+	if err := os.MkdirAll(workflowsDir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", workflowsDir, err)
+	}
+
 	engine := status.NewEngine(tm, st, cfg.ClaudeConfigDir)
 	app := newApp(engine, tm, st, launcher, projects, time.Now)
 	app.settings = newSettingsStore(cfg.LoomDir)
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
+	app.runner = &workflow.Runner{Store: st, Launcher: launcher, ClaudeConfigDir: cfg.ClaudeConfigDir}
+	app.workflowsDir = workflowsDir
 
 	return wails.Run(&options.App{
 		Title:       "loom",
