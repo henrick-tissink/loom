@@ -649,6 +649,10 @@ function onResize() {
 const FILE_LINK_RE =
   /(?:\.{0,2}\/)?(?:[\w.@~+-]+\/)+[\w.@~+-]*\.[A-Za-z][\w]{0,9}(?::\d+(?::\d+)?)?|[\w.@~+-]*\.[A-Za-z][\w]{0,9}:\d+(?::\d+)?/g;
 
+// http(s) URLs. Stops at whitespace, quotes, and closing brackets; trailing
+// sentence punctuation is stripped in the handler below.
+const URL_RE = /\bhttps?:\/\/[^\s)\]}'"<>]+/g;
+
 function registerFileLinks(t) {
   t.registerLinkProvider({
     provideLinks(y, cb) {
@@ -656,17 +660,32 @@ function registerFileLinks(t) {
       if (!bufLine) { cb(undefined); return; }
       const text = bufLine.translateToString(true);
       const links = [];
+      const urlSpans = [];
       let m;
+      // ⌘-clickable, like file paths — a plain click stays terminal text
+      // selection so it doesn't fight the app's own mouse handling.
+      const link = (start, len, activate) => ({
+        text: text.substr(start, len),
+        range: { start: { x: start + 1, y }, end: { x: start + len, y } },
+        activate,
+      });
+
+      // URLs first, so a URL's :port isn't misread as a file:line.
+      URL_RE.lastIndex = 0;
+      while ((m = URL_RE.exec(text)) !== null) {
+        const url = m[0].replace(/[.,;:!?]+$/, ""); // drop trailing sentence punctuation
+        if (!url) continue;
+        urlSpans.push([m.index, m.index + url.length]);
+        links.push(link(m.index, url.length, (e) => { if (e && e.metaKey) openURLToken(url); }));
+      }
+
+      // File paths, skipping any that overlap a matched URL.
       FILE_LINK_RE.lastIndex = 0;
       while ((m = FILE_LINK_RE.exec(text)) !== null) {
+        const s = m.index, e = m.index + m[0].length;
+        if (urlSpans.some(([a, b]) => s < b && e > a)) continue;
         const token = m[0];
-        links.push({
-          text: token,
-          range: { start: { x: m.index + 1, y }, end: { x: m.index + token.length, y } },
-          // Only ⌘-click opens; a plain click stays a normal terminal click so
-          // it doesn't fight text selection.
-          activate: (event) => { if (event && event.metaKey) openFileToken(token); },
-        });
+        links.push(link(s, m[0].length, (ev) => { if (ev && ev.metaKey) openFileToken(token); }));
       }
       cb(links.length ? links : undefined);
     },
@@ -680,6 +699,10 @@ function openFileToken(token) {
   const cm = token.match(/^(.+?):(\d+)(?::\d+)?$/);
   if (cm) { path = cm[1]; line = parseInt(cm[2], 10); }
   window.go.main.App.OpenInEditor(activeName, path, line).catch((e) => console.error("open", e));
+}
+
+function openURLToken(url) {
+  window.go.main.App.OpenURL(url).catch((e) => console.error("openurl", e));
 }
 
 // ---- poll ----
