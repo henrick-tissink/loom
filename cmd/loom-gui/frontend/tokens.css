@@ -229,6 +229,14 @@ body {
 
 #terminal { flex: 1; min-height: 0; padding: 12px 14px; background: #FCF7F5; box-shadow: inset 0 6px 12px -8px rgba(0, 0, 0, 0.10); }
 
+/* "⌘-click to open" hint shown while hovering a terminal link */
+.link-tip {
+  position: fixed; z-index: 60; display: none; pointer-events: none;
+  font-family: var(--font-ui); font-size: 11px; font-weight: 500; color: #FBEDEA;
+  background: #463842; border-radius: 6px; padding: 3px 8px; white-space: nowrap;
+  box-shadow: 0 4px 12px -4px rgba(70, 46, 66, 0.5);
+}
+
 /* ---- modal (light) ---- */
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(70, 56, 66, 0.28);

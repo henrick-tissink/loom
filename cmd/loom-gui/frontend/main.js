@@ -668,6 +668,10 @@ function registerFileLinks(t) {
         text: text.substr(start, len),
         range: { start: { x: start + 1, y }, end: { x: start + len, y } },
         activate,
+        // Teach the ⌘-click gesture — links underline on hover but only open on
+        // ⌘-click, which isn't obvious (people try a plain click first).
+        hover: (e) => showLinkTip(e),
+        leave: hideLinkTip,
       });
 
       // URLs first, so a URL's :port isn't misread as a file:line.
@@ -704,6 +708,22 @@ function openFileToken(token) {
 function openURLToken(url) {
   window.go.main.App.OpenURL(url).catch((e) => console.error("openurl", e));
 }
+
+// A small "⌘-click to open" tooltip shown while hovering a terminal link, so
+// the ⌘-click gesture is discoverable.
+let linkTip = null;
+function showLinkTip(e) {
+  if (!linkTip) {
+    linkTip = document.createElement("div");
+    linkTip.className = "link-tip";
+    linkTip.textContent = "⌘-click to open";
+    document.body.appendChild(linkTip);
+  }
+  linkTip.style.left = (e.clientX + 12) + "px";
+  linkTip.style.top = (e.clientY - 28) + "px";
+  linkTip.style.display = "block";
+}
+function hideLinkTip() { if (linkTip) linkTip.style.display = "none"; }
 
 // ---- poll ----
 async function poll() {
