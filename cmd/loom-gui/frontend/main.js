@@ -588,11 +588,13 @@ function onResize() {
 // Detect file paths in terminal output and make them ⌘-clickable. Matches a
 // path with a directory segment (…/file.ext) or a bare filename with a line
 // (file.ext:88) — both with optional :line[:col] — to avoid underlining every
-// word.ext token. ⌘-click resolves against the session cwd and opens the
-// editor (the backend no-ops if it isn't a real file); a plain click is left
-// to normal terminal text-selection, the iTerm2 / VS Code convention.
+// word.ext token. The name before the extension may be empty so dotfiles like
+// .env / .gitignore linkify too (…/​.env:1 or .env:1). ⌘-click resolves against
+// the session cwd and opens the editor (the backend no-ops if it isn't a real
+// file); a plain click is left to normal terminal text-selection, the iTerm2 /
+// VS Code convention.
 const FILE_LINK_RE =
-  /(?:\.{0,2}\/)?(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z][\w]{0,9}(?::\d+(?::\d+)?)?|[\w.@~+-]+\.[A-Za-z][\w]{0,9}:\d+(?::\d+)?/g;
+  /(?:\.{0,2}\/)?(?:[\w.@~+-]+\/)+[\w.@~+-]*\.[A-Za-z][\w]{0,9}(?::\d+(?::\d+)?)?|[\w.@~+-]*\.[A-Za-z][\w]{0,9}:\d+(?::\d+)?/g;
 
 function registerFileLinks(t) {
   t.registerLinkProvider({
