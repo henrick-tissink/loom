@@ -1,6 +1,6 @@
 import "./tokens.css";
 import "@xterm/xterm/css/xterm.css";
-import { statusColor, statusWord, xtermTheme } from "./theme.js";
+import { statusColor, statusWord, xtermThemeFor } from "./theme.js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -10,6 +10,22 @@ const attnEl = document.getElementById("attn");
 let activeName = null;
 let latestSessions = [];
 let latestRecent = [];
+let termThemeMode = "light"; // "light" | "dark", from preferences
+
+// Reflect the terminal theme on the DOM (the #terminal pane background) and,
+// live, on any open terminal.
+function applyTermTheme(mode) {
+  termThemeMode = mode === "dark" ? "dark" : "light";
+  document.documentElement.setAttribute("data-term-theme", termThemeMode);
+  if (term) term.options.theme = xtermThemeFor(termThemeMode);
+}
+
+// Load the persisted terminal theme before the first session is opened.
+// Guarded: the Wails binding may not be injected yet at module-eval time.
+const _getPrefs = window.go && window.go.main && window.go.main.App && window.go.main.App.GetPrefs;
+if (_getPrefs) {
+  _getPrefs().then((p) => applyTermTheme(p && p.terminalTheme)).catch(() => {});
+}
 
 function renderAttention(sessions) {
   const n = sessions.filter((s) => s.status === "needs_you").length;
@@ -436,9 +452,10 @@ function wfAbandon(body, close, r) {
 // ---- preferences ----
 async function openPrefs() {
   if (document.querySelector(".modal-backdrop")) return;
-  let prefs = { editor: "", notifications: true, autoSummarize: false };
+  let prefs = { editor: "", notifications: true, autoSummarize: false, terminalTheme: "light" };
   try { prefs = await window.go.main.App.GetPrefs(); } catch (e) { console.error("prefs", e); }
   const editors = [["", "Auto-detect"], ["cursor", "Cursor"], ["code", "VS Code"], ["zed", "Zed"]];
+  const themes = [["light", "Light (Blush)"], ["dark", "Dark"]];
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
@@ -447,6 +464,10 @@ async function openPrefs() {
       <div class="field">
         <label for="pf-editor">Editor for opening files</label>
         <select id="pf-editor">${editors.map(([v, l]) => `<option value="${v}"${v === prefs.editor ? " selected" : ""}>${l}</option>`).join("")}</select>
+      </div>
+      <div class="field">
+        <label for="pf-term">Terminal theme</label>
+        <select id="pf-term">${themes.map(([v, l]) => `<option value="${v}"${v === (prefs.terminalTheme || "light") ? " selected" : ""}>${l}</option>`).join("")}</select>
       </div>
       <label class="pf-check"><input type="checkbox" id="pf-notif"${prefs.notifications ? " checked" : ""} /><span>Native notification when a session needs you</span></label>
       <label class="pf-check"><input type="checkbox" id="pf-autosum"${prefs.autoSummarize ? " checked" : ""} /><span>Auto-summarize finished sessions <em>(uses a little Claude quota)</em></span></label>
@@ -464,8 +485,10 @@ async function openPrefs() {
       editor: backdrop.querySelector("#pf-editor").value,
       notifications: backdrop.querySelector("#pf-notif").checked,
       autoSummarize: backdrop.querySelector("#pf-autosum").checked,
+      terminalTheme: backdrop.querySelector("#pf-term").value,
     };
     try { await window.go.main.App.SetPrefs(next); } catch (e) { console.error("setprefs", e); }
+    applyTermTheme(next.terminalTheme); // recolor the open terminal + pane at once
     close();
   });
 }
@@ -621,7 +644,7 @@ function selectSession(name) {
   term = new Terminal({
     fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--font-mono"),
     fontSize: 13,
-    theme: xtermTheme,
+    theme: xtermThemeFor(termThemeMode),
     cursorBlink: true,
     // Unicode11Addon registers via the proposed unicode API; without this
     // flag loadAddon THROWS, selectSession dies mid-flight, and clicking a

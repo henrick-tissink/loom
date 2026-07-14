@@ -84,6 +84,7 @@ func run() error {
 	engine := status.NewEngine(tm, st, cfg.ClaudeConfigDir)
 	app := newApp(engine, tm, st, launcher, projects, time.Now)
 	app.settings = newSettingsStore(cfg.LoomDir)
+	session.SetClaudeTheme(app.settings.get().TerminalTheme) // match Claude's theme to the terminal
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
 	app.runner = &workflow.Runner{Store: st, Launcher: launcher, ClaudeConfigDir: cfg.ClaudeConfigDir}
 	app.workflowsDir = workflowsDir

@@ -4,6 +4,7 @@ package session
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 )
@@ -18,14 +19,35 @@ type Recipe struct {
 	Seed         string // optional initial prompt or /slash-command
 }
 
-// lightThemeSettings forces Claude's built-in light theme for every
-// loom-launched session. loom's embedded terminal is light (the Blush
-// palette), but Claude's TUI otherwise renders for a dark terminal and emits
-// near-white 256-color text (e.g. color 231) — xterm.js can only remap the 16
-// base ANSI colors, not the 256-color cube, so that text is invisible on the
-// light background. Passed via --settings, which merges over the user's global
-// config without mutating it, so only these sessions are affected.
-const lightThemeSettings = `{"theme":"light"}`
+// Claude's TUI must match loom's embedded terminal theme, or its 256-color
+// text (which xterm.js can't remap) is illegible — near-white text on the
+// light Blush terminal, or dark text on a dark terminal. We inject the
+// matching theme via --settings (merged over the user's global config, not
+// mutating it). Default light; the GUI calls SetClaudeTheme when the user
+// picks a dark terminal. Guarded so a launch reading the setting can't race a
+// pref change.
+var (
+	themeMu      sync.RWMutex
+	themeSetting = `{"theme":"light"}`
+)
+
+// SetClaudeTheme sets the theme injected into launched and resumed sessions.
+// "dark" selects the dark theme; anything else selects light.
+func SetClaudeTheme(theme string) {
+	themeMu.Lock()
+	defer themeMu.Unlock()
+	if theme == "dark" {
+		themeSetting = `{"theme":"dark"}`
+	} else {
+		themeSetting = `{"theme":"light"}`
+	}
+}
+
+func currentThemeSetting() string {
+	themeMu.RLock()
+	defer themeMu.RUnlock()
+	return themeSetting
+}
 
 func NewSessionID() string { return uuid.NewString() }
 
@@ -43,7 +65,7 @@ func SessionIDFromTmuxName(name string) (string, bool) {
 }
 
 func (r Recipe) Argv(sessionID string) []string {
-	argv := []string{"claude", "--session-id", sessionID, "--settings", lightThemeSettings}
+	argv := []string{"claude", "--session-id", sessionID, "--settings", currentThemeSetting()}
 	if r.Model != "" {
 		argv = append(argv, "--model", r.Model)
 	}
@@ -66,5 +88,5 @@ func (r Recipe) ShellCommand(sessionID string) string {
 }
 
 func ResumeShellCommand(claudeSessionID string) string {
-	return shellQuote([]string{"claude", "--resume", claudeSessionID, "--settings", lightThemeSettings})
+	return shellQuote([]string{"claude", "--resume", claudeSessionID, "--settings", currentThemeSetting()})
 }

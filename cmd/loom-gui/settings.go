@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/henricktissink/loom/internal/session"
 )
 
 // Settings are user preferences persisted to ~/.loom/settings.json. Kept small
@@ -14,9 +16,12 @@ type Settings struct {
 	Editor        string `json:"editor"`        // "" = auto-detect; else "cursor" | "code" | "zed"
 	Notifications bool   `json:"notifications"` // fire native needs-you notifications
 	AutoSummarize bool   `json:"autoSummarize"` // background-summarize finished sessions (uses claude quota)
+	TerminalTheme string `json:"terminalTheme"` // "light" (default) | "dark"
 }
 
-func defaultSettings() Settings { return Settings{Editor: "", Notifications: true, AutoSummarize: false} }
+func defaultSettings() Settings {
+	return Settings{Editor: "", Notifications: true, AutoSummarize: false, TerminalTheme: "light"}
+}
 
 // settingsStore is a concurrency-safe, file-backed view of Settings.
 type settingsStore struct {
@@ -71,12 +76,15 @@ func (s *settingsStore) set(v Settings) error {
 	return os.Rename(tmp, s.path)
 }
 
-// normalize clamps the editor to a known value ("" means auto-detect).
+// normalize clamps the editor and terminal theme to known values.
 func normalize(v Settings) Settings {
 	switch v.Editor {
 	case "cursor", "code", "zed":
 	default:
 		v.Editor = ""
+	}
+	if v.TerminalTheme != "dark" {
+		v.TerminalTheme = "light"
 	}
 	return v
 }
@@ -90,10 +98,15 @@ func (a *App) GetPrefs() Settings {
 	return a.settings.get()
 }
 
-// SetPrefs persists the given settings and returns any write error.
+// SetPrefs persists the given settings, applies the Claude theme so newly
+// launched/resumed sessions match, and returns any write error.
 func (a *App) SetPrefs(s Settings) error {
 	if a.settings == nil {
 		return nil
 	}
-	return a.settings.set(s)
+	if err := a.settings.set(s); err != nil {
+		return err
+	}
+	session.SetClaudeTheme(a.settings.get().TerminalTheme)
+	return nil
 }

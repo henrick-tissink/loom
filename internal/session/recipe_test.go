@@ -3,8 +3,28 @@ package session
 import (
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
+
+func TestSetClaudeTheme(t *testing.T) {
+	defer SetClaudeTheme("light") // restore the default for the other tests
+	id := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	argvStr := func() string { return strings.Join(Recipe{}.Argv(id), " ") }
+
+	SetClaudeTheme("dark")
+	if !strings.Contains(argvStr(), `{"theme":"dark"}`) {
+		t.Errorf("dark theme not injected: %s", argvStr())
+	}
+	SetClaudeTheme("light")
+	if !strings.Contains(argvStr(), `{"theme":"light"}`) {
+		t.Errorf("light theme not injected: %s", argvStr())
+	}
+	SetClaudeTheme("weird") // unknown → light
+	if !strings.Contains(argvStr(), `{"theme":"light"}`) {
+		t.Errorf("unknown theme should fall back to light: %s", argvStr())
+	}
+}
 
 func TestNewSessionIDAndTmuxName(t *testing.T) {
 	id := NewSessionID()

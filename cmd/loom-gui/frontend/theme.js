@@ -22,7 +22,7 @@ export function statusWord(status) {
 
 // Light terminal tuned for the Blush base — ANSI colors chosen for contrast on
 // the warm ivory background, cursor in the peach accent.
-export const xtermTheme = {
+export const xtermThemeLight = {
   background: "#FCF7F5",
   foreground: "#50454B",
   cursor: "#EE9E86",
@@ -34,3 +34,25 @@ export const xtermTheme = {
   brightYellow: "#B8863C", brightBlue: "#5B7FB8", brightMagenta: "#9A79B8",
   brightCyan: "#3E93A0", brightWhite: "#50454B",
 };
+
+// Warm-dark terminal (a dark cousin of Blush) — soft plum base, peach cursor,
+// ANSI colors lifted for contrast on the dark ground.
+export const xtermThemeDark = {
+  background: "#241E22",
+  foreground: "#E7DADE",
+  cursor: "#EE9E86",
+  cursorAccent: "#241E22",
+  selectionBackground: "rgba(238,158,134,0.28)",
+  black: "#3A3238", red: "#E8897A", green: "#7FC79E", yellow: "#D8B36A",
+  blue: "#8FB0E0", magenta: "#C39AD8", cyan: "#6FC0CC", white: "#E7DADE",
+  brightBlack: "#6E626A", brightRed: "#E8897A", brightGreen: "#7FC79E",
+  brightYellow: "#D8B36A", brightBlue: "#8FB0E0", brightMagenta: "#C39AD8",
+  brightCyan: "#6FC0CC", brightWhite: "#FBF5F3",
+};
+
+export function xtermThemeFor(mode) {
+  return mode === "dark" ? xtermThemeDark : xtermThemeLight;
+}
+
+// Terminal-pane background (the padding area around xterm) per theme.
+export const terminalBg = { light: "#FCF7F5", dark: "#241E22" };
