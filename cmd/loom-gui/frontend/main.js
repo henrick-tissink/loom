@@ -507,6 +507,27 @@ function openReply(name) {
 }
 
 // ---- diff review ----
+// Split a unified diff into per-file chunks (each starts with "diff --git"),
+// pulling the file path from the header for the collapsible section title.
+function splitPatchByFile(patch) {
+  if (!patch || !patch.trim()) return [];
+  return patch.split(/\n(?=diff --git )/).filter((c) => c.trim()).map((body) => {
+    const first = body.split("\n", 1)[0];
+    const mm = first.match(/^diff --git a\/(.+?) b\/(.+)$/);
+    return { file: mm ? mm[2] : first, body };
+  });
+}
+
+// Count added/removed lines in a file chunk (excluding the +++/--- headers).
+function patchCounts(body) {
+  let add = 0, del = 0;
+  for (const ln of body.split("\n")) {
+    if (ln.startsWith("+") && !ln.startsWith("+++")) add++;
+    else if (ln.startsWith("-") && !ln.startsWith("---")) del++;
+  }
+  return { add, del };
+}
+
 function renderPatch(patch) {
   return patch.split("\n").map((ln) => {
     let cls = "";
@@ -546,7 +567,13 @@ async function openDiff(name) {
     html += `<div class="diff-untracked"><span class="du-head">new files</span>` +
       d.untracked.map((f) => `<span class="du-file" data-path="${esc(f)}">${esc(f)}</span>`).join("") + `</div>`;
   }
-  if (d.patch) html += `<pre class="diff-patch">${renderPatch(d.patch)}</pre>`;
+  for (const f of splitPatchByFile(d.patch)) {
+    const c = patchCounts(f.body);
+    html += `<details class="diff-file" open>
+      <summary><span class="df-name">${esc(f.file)}</span><span class="df-counts"><span class="df-add">+${c.add}</span> <span class="df-del">−${c.del}</span></span></summary>
+      <pre class="diff-patch">${renderPatch(f.body)}</pre>
+    </details>`;
+  }
   body.innerHTML = html;
   body.querySelectorAll(".du-file").forEach((el) => {
     el.addEventListener("click", () => openFileToken(el.getAttribute("data-path")));
@@ -653,6 +680,14 @@ const FILE_LINK_RE =
 // sentence punctuation is stripped in the handler below.
 const URL_RE = /\bhttps?:\/\/[^\s)\]}'"<>]+/g;
 
+// Well-known extension-less files (Makefile, Dockerfile, …). Matched only with
+// a directory segment or a :line so bare words in prose don't linkify; the
+// (?![\w.@~+-]) / (?<![\w.@~+-]) guards stop partial matches like READMEISH.
+const EXTLESS_NAMES = "Makefile|Dockerfile|Containerfile|Jenkinsfile|Procfile|Rakefile|Gemfile|Justfile|Vagrantfile|Brewfile|Caddyfile|Taskfile|Gruntfile|Podfile|LICENSE|README|CHANGELOG|CODEOWNERS|NOTICE|AUTHORS";
+const EXTLESS_RE = new RegExp(
+  "(?:\\.{0,2}\\/)?(?:[\\w.@~+-]+\\/)+(?:" + EXTLESS_NAMES + ")(?![\\w.@~+-])(?::\\d+(?::\\d+)?)?" +
+  "|(?<![\\w.@~+-])(?:" + EXTLESS_NAMES + ")(?![\\w.@~+-]):\\d+(?::\\d+)?", "g");
+
 function registerFileLinks(t) {
   t.registerLinkProvider({
     provideLinks(y, cb) {
@@ -683,13 +718,17 @@ function registerFileLinks(t) {
         links.push(link(m.index, url.length, (e) => { if (e && e.metaKey) openURLToken(url); }));
       }
 
-      // File paths, skipping any that overlap a matched URL.
-      FILE_LINK_RE.lastIndex = 0;
-      while ((m = FILE_LINK_RE.exec(text)) !== null) {
-        const s = m.index, e = m.index + m[0].length;
-        if (urlSpans.some(([a, b]) => s < b && e > a)) continue;
-        const token = m[0];
-        links.push(link(s, m[0].length, (ev) => { if (ev && ev.metaKey) openFileToken(token); }));
+      // File paths (with an extension) and well-known extension-less files,
+      // skipping any that overlap a matched URL.
+      const notInURL = (s, e) => !urlSpans.some(([a, b]) => s < b && e > a);
+      for (const re of [FILE_LINK_RE, EXTLESS_RE]) {
+        re.lastIndex = 0;
+        while ((m = re.exec(text)) !== null) {
+          const s = m.index, e = m.index + m[0].length;
+          if (!notInURL(s, e)) continue;
+          const token = m[0];
+          links.push(link(s, m[0].length, (ev) => { if (ev && ev.metaKey) openFileToken(token); }));
+        }
       }
       cb(links.length ? links : undefined);
     },
