@@ -6,6 +6,10 @@ launch, monitor, and return to real `claude` sessions across a whole workspace.
 **📖 New here? Read [the Loom Manual](docs/MANUAL.md)** — the complete guide to
 flying the cockpit. The sections below are per-phase feature notes.
 
+**🛠 Working on Loom? Read [the Architecture doc](docs/ARCHITECTURE.md)** — the
+engineering model: invariants, data model, control flows, and the reasons
+behind the non-obvious choices.
+
 ## Phase 1 — Cockpit Core
 
 - Real `claude` sessions on a dedicated `tmux -L loom` server — they survive
