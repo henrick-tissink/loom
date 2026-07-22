@@ -10,6 +10,7 @@ import (
 
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/transcript"
 )
 
 // fakeClaudeScript prints a trust dialog for 1s — including the "❯ 1. Yes,
@@ -62,7 +63,14 @@ func testLauncher(t *testing.T) (*Launcher, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	dir := t.TempDir()
+	// Physical path: Launch/Resume store the symlink-resolved cwd (physicalDir),
+	// and on macOS t.TempDir() sits under /var, itself a symlink to /private/var.
+	// Resolving here lets assertions compare against `dir` directly instead of
+	// every test re-deriving the resolved form.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	l := &Launcher{
 		Tmux: tm, Store: st,
 		ClaudeConfigDir: t.TempDir(),
@@ -269,9 +277,14 @@ func TestWaitReadyBoundsTrustPendingWait(t *testing.T) {
 
 	id := NewSessionID()
 	name := TmuxName(id)
-	// A pane that shows the trust dialog and never advances past it.
+	// A pane that shows the trust dialog and never advances past it. The text
+	// is taken from l.TrustMarker rather than hardcoded: this fixture was
+	// pinned to "Do you trust the files in this folder?" and silently stopped
+	// exercising the trust path when the real dialog wording turned out to be
+	// different (docs/spikes/2026-07-22-add-dir-spike.md). Deriving it from the
+	// configured marker means the test cannot go stale that way again.
 	if err := l.Tmux.NewSession(name, dir,
-		`sh -c 'echo "Do you trust the files in this folder?"; sleep 60'`, 80, 24); err != nil {
+		fmt.Sprintf(`sh -c 'echo %q; sleep 60'`, l.TrustMarker), 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.Store.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id,
@@ -498,5 +511,51 @@ func TestWaitReadyHoldsForANonTrustDialog(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("waitReady never returned: the dialog-pending wait is unbounded")
+	}
+}
+
+// TestLaunchStoresPhysicalCwd pins the finding from
+// docs/spikes/2026-07-22-add-dir-spike.md: claude derives its transcript
+// DIRECTORY from the physical cwd (getcwd() resolves symlinks), so a stored
+// unresolved cwd makes transcript.Path() look somewhere claude never wrote —
+// the session then sits at `unknown` forever with no title and no context
+// gauge. Against the pre-fix code this fails with the /symlink/ form.
+func TestLaunchStoresPhysicalCwd(t *testing.T) {
+	l, dir := testLauncher(t)
+
+	real := filepath.Join(dir, "real")
+	sibReal := filepath.Join(dir, "sibreal")
+	for _, d := range []string{real, sibReal} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link, sibLink := filepath.Join(dir, "link"), filepath.Join(dir, "siblink")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sibReal, sibLink); err != nil {
+		t.Fatal(err)
+	}
+
+	name, err := l.Launch(Recipe{ProjectLabel: "p", Cwd: link, AddDirs: []string{sibLink}}, 80, 24, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, ok, _ := l.Store.Get(name)
+	if !ok {
+		t.Fatal("no row")
+	}
+	if row.Cwd != real {
+		t.Errorf("row.Cwd = %q, want the physical path %q", row.Cwd, real)
+	}
+	if want := `["` + sibReal + `"]`; row.AddDirs != want {
+		t.Errorf("row.AddDirs = %q, want %q", row.AddDirs, want)
+	}
+
+	// The point of resolving: the transcript path Loom will poll must be the
+	// one claude actually writes, which is derived from the physical cwd.
+	if got, want := transcript.ProjectDirName(row.Cwd), transcript.ProjectDirName(real); got != want {
+		t.Errorf("ProjectDirName(row.Cwd) = %q, want %q", got, want)
 	}
 }

@@ -99,7 +99,15 @@ func TestRecallE2E(t *testing.T) {
 	realSessionsBefore, _ := realTm.ListSessions()
 
 	// --- scratch HOME / CLAUDE_CONFIG_DIR -----------------------------------
-	scratchHome := t.TempDir()
+	// Physical path: Launcher.Launch stores the symlink-resolved cwd
+	// (session.physicalDir — see docs/spikes/2026-07-22-add-dir-spike.md), and
+	// on macOS t.TempDir() sits under /var, itself a symlink to /private/var.
+	// Without resolving here the workspace paths this test builds would never
+	// equal the cwd the launched row actually carries.
+	scratchHome, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", scratchHome)
 	scratchCCD := filepath.Join(scratchHome, "claude-config")
 	t.Setenv("CLAUDE_CONFIG_DIR", scratchCCD)

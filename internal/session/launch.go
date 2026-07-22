@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -22,13 +23,22 @@ import (
 // own — waitReady MUST test TrustMarker before ReadyMarker on every poll
 // iteration (see below), or a still-open trust dialog gets misread as ready
 // and the seed fires into it, mashing "1" or worse into the trust prompt.
-// DefaultTrustMarker could not be triggered in the spike's environment
-// (trust is inherited from an already-trusted ancestor directory) and
-// remains a defensive, unverified candidate; ordering it first is still the
-// safe choice even though it wasn't observed live.
+// DefaultTrustMarker was an unverified candidate for two versions because the
+// original spike could not trigger the dialog (trust was inherited from an
+// already-trusted ancestor). docs/spikes/2026-07-22-add-dir-spike.md finally
+// triggered it against claude 2.1.217 by constructing a genuinely untrusted
+// directory — and the candidate was WRONG: the real wording is "Quick safety
+// check: Is this a project you created or one you trust?", so the marker
+// below never matched and the seed's only protection was luck.
+//
+// The lesson is not "use a better string" — the wording changed once and will
+// change again. selectCursorPattern is the version-independent defence and is
+// what actually guards the seed now; this marker is kept purely as
+// belt-and-braces for a half-drawn capture where the question is on screen but
+// the option list is not yet rendered.
 const (
 	DefaultReadyMarker = "❯"
-	DefaultTrustMarker = "Do you trust the files in this folder?"
+	DefaultTrustMarker = "Is this a project you created or one you trust?"
 )
 
 // selectCursorPattern builds the generic dialog-pending test spec §5 requires:
@@ -80,6 +90,43 @@ func dirUsable(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
+// physicalDir resolves symlinks in path, falling back to path unchanged when
+// resolution fails (a path that validateDirs already accepted can still fail
+// EvalSymlinks on e.g. a permission error — degrade, never block a launch).
+//
+// This is load-bearing for status, NOT cosmetic. Verified by
+// docs/spikes/2026-07-22-add-dir-spike.md: a process's getcwd() returns the
+// PHYSICAL path, so claude records `/private/tmp/x` in its transcript — and
+// derives its transcript DIRECTORY name from that — even when tmux was given
+// `-c /tmp/x`. Storing the unresolved form makes transcript.Path() compute
+// `-tmp-x` while claude wrote `-private-tmp-x`, so the reader finds nothing:
+// the session sits at `unknown` forever with no title and no context gauge,
+// and workflow {{prev.*}} extraction silently yields empty.
+//
+// Note this contradicts the projects-foundation spec §4's original "never
+// EvalSymlinks a stored cwd" rule, which reasoned that resolving would break
+// transcript lookup. The spike showed the opposite: NOT resolving is what
+// breaks it. status.Engine already stores the resolved form when it adopts an
+// orphan (#{pane_current_path} is physical), so resolving here also makes the
+// launch path and the adopt path agree instead of disagreeing by symlink.
+func physicalDir(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
+func physicalDirs(paths []string) []string {
+	if len(paths) == 0 {
+		return paths
+	}
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = physicalDir(p)
+	}
+	return out
+}
+
 // validateDirs checks cwd and every add-dir BEFORE the tmux session exists, so
 // a bad path yields an error and no half-made session to clean up.
 func validateDirs(cwd string, addDirs []string) error {
@@ -107,13 +154,18 @@ func (l *Launcher) Launch(r Recipe, w, h int, now time.Time) (string, error) {
 	}
 	id := NewSessionID()
 	name := TmuxName(id)
-	if err := l.Tmux.NewSession(name, r.Cwd, r.ShellCommand(id), w, h); err != nil {
+	// Resolve AFTER validation (so the error names the path the user gave) and
+	// BEFORE both tmux and the store, so the recorded cwd matches the one
+	// claude will record — see physicalDir.
+	cwd, addDirs := physicalDir(r.Cwd), physicalDirs(r.AddDirs)
+	r.Cwd, r.AddDirs = cwd, addDirs
+	if err := l.Tmux.NewSession(name, cwd, r.ShellCommand(id), w, h); err != nil {
 		return "", err
 	}
 	if err := l.Store.Upsert(store.SessionRow{
 		Name: name, ClaudeSessionID: id, ProjectLabel: r.ProjectLabel,
-		Cwd: r.Cwd, Model: r.Model, Mode: r.Mode, Seed: r.Seed,
-		AddDirs:   EncodeAddDirs(r.AddDirs),
+		Cwd: cwd, Model: r.Model, Mode: r.Mode, Seed: r.Seed,
+		AddDirs:   EncodeAddDirs(addDirs),
 		CreatedAt: now.Unix(), EndedAt: -1, ExitCode: -1,
 		LastStatus: "unknown",
 	}); err != nil {
@@ -144,12 +196,16 @@ func (l *Launcher) Resume(old store.SessionRow, w, h int, now time.Time) (string
 	}
 	id := NewSessionID() // for the tmux name only
 	name := TmuxName(id)
-	if err := l.Tmux.NewSession(name, old.Cwd, ResumeShellCommand(old.ClaudeSessionID, dirs), w, h); err != nil {
+	// Idempotent for rows launched after the physicalDir fix; repairs older
+	// rows that stored an unresolved cwd and were therefore never matched to
+	// their transcript.
+	cwd, dirs := physicalDir(old.Cwd), physicalDirs(dirs)
+	if err := l.Tmux.NewSession(name, cwd, ResumeShellCommand(old.ClaudeSessionID, dirs), w, h); err != nil {
 		return "", err
 	}
 	if err := l.Store.Upsert(store.SessionRow{
 		Name: name, ClaudeSessionID: old.ClaudeSessionID,
-		ProjectLabel: old.ProjectLabel, Cwd: old.Cwd,
+		ProjectLabel: old.ProjectLabel, Cwd: cwd,
 		Model: old.Model, Mode: old.Mode, Tags: old.Tags,
 		AddDirs:   EncodeAddDirs(dirs),
 		CreatedAt: now.Unix(), EndedAt: -1, ExitCode: -1,
