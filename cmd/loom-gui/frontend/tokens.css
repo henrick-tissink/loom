@@ -329,6 +329,110 @@ body {
 .d-hunk { color: #3e7f8c; }
 .d-meta { color: var(--text-faint); }
 
+/* ---- rail: project sections (§8) ---- */
+.rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#new-project {
+  font-family: var(--font-ui); font-size: 10px; letter-spacing: 0.04em; text-transform: none;
+  color: var(--text-dim); background: transparent; border: 1px solid var(--edge);
+  border-radius: 7px; padding: 2px 7px; cursor: pointer;
+}
+#new-project:hover { color: var(--accent-ink); border-color: var(--accent-line); background: var(--accent-soft); }
+
+.psec {
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+  margin: 6px 8px 1px; padding: 5px 8px; border-radius: 8px;
+  border-bottom: 1px solid var(--edge);
+}
+.psec:hover { background: var(--sel); }
+.psec-caret {
+  background: transparent; border: 0; padding: 0; cursor: pointer;
+  color: var(--text-faint); font-size: 10px; line-height: 1; width: 12px;
+}
+.psec-name { font-size: 11.5px; font-weight: 600; color: var(--text); letter-spacing: 0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.psec-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--needs-you, #C56A4A); box-shadow: 0 0 6px rgba(197, 106, 74, 0.55); flex-shrink: 0; }
+.psec-count { margin-left: auto; font-size: 10px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.psec.urgent .psec-name { color: var(--accent-ink); }
+.psec-index .psec-name { color: var(--text-dim); font-weight: 500; }
+.prow {
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+  margin: 1px 8px; padding: 5px 10px 5px 22px; border-radius: var(--radius);
+}
+.prow:hover { background: var(--sel); }
+.prow-name { font-size: 11.5px; color: var(--text-dim); }
+.prow.missing .prow-name { color: var(--text-faint); }
+.prow-tag { font-size: 9.5px; color: var(--text-faint); }
+
+/* ---- hide/solo chip (§6.4) ---- */
+.hidechip {
+  --wails-draggable: no-drag;
+  font-family: var(--font-ui); font-size: 11px; color: var(--text-dim);
+  background: var(--stage); border: 1px solid var(--edge); border-radius: 999px;
+  padding: 3px 10px; cursor: pointer; max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hidechip:empty { display: none; }
+.hidechip.solo { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent-line); }
+.hidechip.warn { color: #7a2018; background: #F3D9D3; border-color: #E7B3A9; }
+.hidechip.armed { color: #fff; background: #C5604C; border-color: #C5604C; }
+
+/* ---- project overview (§8) ---- */
+.po-head { flex-wrap: wrap; }
+.po-acts { margin-left: auto; display: flex; gap: 6px; }
+.po-acts .sh-btn { margin-left: 0; }
+.po-acts .sh-btn:disabled { opacity: 0.45; cursor: default; }
+.po { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 20px; display: flex; flex-direction: column; gap: 16px; }
+.po-block { display: flex; flex-direction: column; gap: 8px; }
+.po-bhead { display: flex; align-items: center; gap: 10px; }
+.po-block h3 { margin: 0; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-faint); font-weight: 700; }
+.po-bhead .sh-btn { margin-left: auto; }
+.po-sub { font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); margin-top: 6px; }
+.po-empty { font-size: 12px; color: var(--text-faint); padding: 2px 0; }
+.po-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.po-repo, .po-sess {
+  display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+  border: 1px solid var(--edge); border-radius: 9px; background: var(--surface);
+}
+.po-sess { cursor: pointer; }
+.po-sess:hover { background: var(--sel); }
+.po-repo.missing { opacity: 0.55; }
+.po-rlabel { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+.po-rpath { font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.po-racts { margin-left: auto; display: flex; gap: 5px; flex-shrink: 0; }
+.po-racts .tact { padding: 0 8px; }
+.po-racts .tact:disabled { opacity: 0.45; cursor: default; }
+.po-tag { font-size: 10px; color: var(--text-dim); background: var(--bg); border: 1px solid var(--edge); border-radius: 999px; padding: 1px 8px; }
+.po-tag-solo { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent-line); }
+.po-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.po-sname { font-family: var(--font-mono); font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.po-sstatus { margin-left: auto; font-size: 10.5px; color: var(--text-faint); }
+.po-warns { display: flex; flex-direction: column; gap: 4px; }
+.po-warn { font-size: 11.5px; color: #a5453a; background: #F7E4E0; border: 1px solid #E7B3A9; border-radius: 8px; padding: 6px 10px; }
+
+/* ---- prompt / create-project modals ---- */
+.pm-row { display: flex; gap: 8px; align-items: center; }
+.pm-row .search-input { flex: 1; min-width: 0; }
+.pm-row .btn-ghost { flex-shrink: 0; font-size: 12px; padding: 7px 12px; border-radius: 8px; background: transparent; border: 1px solid var(--edge); color: var(--text-dim); cursor: pointer; }
+.pm-row .btn-ghost:hover { color: var(--text); border-color: var(--text-faint); }
+.cp-modal { width: 520px; max-width: calc(100vw - 48px); }
+
+/* ---- launcher target picker (§5) ---- */
+.seg { display: inline-flex; border: 1px solid var(--edge); border-radius: 8px; overflow: hidden; align-self: flex-start; }
+.seg-b {
+  font-family: var(--font-ui); font-size: 11.5px; color: var(--text-dim);
+  background: transparent; border: 0; padding: 5px 12px; cursor: pointer;
+}
+.seg-b + .seg-b { border-left: 1px solid var(--edge); }
+.seg-b.active { color: var(--accent-ink); background: var(--accent-soft); }
+.f-primary { float: right; text-transform: none; letter-spacing: 0; font-family: var(--font-mono); font-size: 10.5px; color: var(--accent-ink); }
+.pf-check.dimmed { opacity: 0.5; }
+
+/* ---- sectioned diff (§8) ---- */
+.diff-repo { display: flex; flex-direction: column; gap: 8px; }
+.dr-head { display: flex; align-items: baseline; gap: 10px; padding-top: 4px; border-top: 1px solid var(--edge); }
+.diff-repo:first-child .dr-head { border-top: 0; padding-top: 0; }
+.dr-label { font-family: var(--font-mono); font-size: 12px; color: var(--accent-ink); }
+.dr-path { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ------------------------------------------------------------------ */
 /* Polish — quiet motion, focus, scrollbars, selection. Precision over  */
 /* decoration: one signature (the wave), everything else disciplined.   */

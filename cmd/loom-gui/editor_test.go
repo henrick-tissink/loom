@@ -31,6 +31,39 @@ func TestResolveFile(t *testing.T) {
 	}
 }
 
+// TestResolveFileIn covers the multi-repo case (§5): a scoped session prints
+// paths relative to whichever repo the agent was working in, so resolving
+// against cwd alone loses every link into an add-dir sibling.
+func TestResolveFileIn(t *testing.T) {
+	primary, sibling := t.TempDir(), t.TempDir()
+	only := filepath.Join(sibling, "only.go")
+	for _, f := range []string{filepath.Join(primary, "both.go"), filepath.Join(sibling, "both.go"), only} {
+		if err := os.WriteFile(f, []byte("package x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bases := []string{primary, sibling}
+
+	if got, want := resolveFileIn(bases, "only.go"), only; got != want {
+		t.Errorf("add-dir file: got %q want %q", got, want)
+	}
+	// cwd first: a same-named file in two repos resolves to the primary. This
+	// is deterministic rather than right — the exact callers pass absolutes.
+	if got, want := resolveFileIn(bases, "both.go"), filepath.Join(primary, "both.go"); got != want {
+		t.Errorf("ambiguous file: got %q want %q", got, want)
+	}
+	if got := resolveFileIn(bases, "nope.go"); got != "" {
+		t.Errorf("missing in every base should be empty, got %q", got)
+	}
+	// No session row (empty base set) must still open an absolute path.
+	if got := resolveFileIn(nil, only); got != only {
+		t.Errorf("no bases, absolute path: got %q want %q", got, only)
+	}
+	if got := resolveFileIn(nil, "only.go"); got != "" {
+		t.Errorf("no bases, relative path: got %q want empty", got)
+	}
+}
+
 func TestEditorArgv(t *testing.T) {
 	if got := editorArgv("code", "/a/b.go", 88); len(got) != 3 || got[1] != "-g" || got[2] != "/a/b.go:88" {
 		t.Errorf("code: %v", got)

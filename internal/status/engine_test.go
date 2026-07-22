@@ -80,9 +80,16 @@ func TestPollThreadsTitleCtxAndBellsOnce(t *testing.T) {
 	if persisted.Title != "probe the flux" {
 		t.Fatalf("title not persisted: %+v", persisted)
 	}
-	// bell fires exactly once: running → needs_you
-	if len(snap.NewlyNeedsYou) != 1 || snap.NewlyNeedsYou[0] != "parallax · probe the flux" {
+	// bell fires exactly once: running → needs_you. The payload is the
+	// session name (the store PK), not a rendered label — consumers join
+	// against snap.Live for the label (spec §4).
+	if len(snap.NewlyNeedsYou) != 1 || snap.NewlyNeedsYou[0] != name {
 		t.Fatalf("NewlyNeedsYou = %v", snap.NewlyNeedsYou)
+	}
+	// and the join is possible: the name resolves to the Live row carrying
+	// both label and cwd.
+	if snap.Live[0].Name != snap.NewlyNeedsYou[0] || snap.Live[0].ProjectLabel != "parallax" {
+		t.Fatalf("NewlyNeedsYou name does not join to Live: %+v", snap.Live[0])
 	}
 	snap2, _ := e.Poll(time.Now().Add(time.Hour))
 	if len(snap2.NewlyNeedsYou) != 0 {
@@ -113,6 +120,67 @@ func TestPollLiveNeedsYou(t *testing.T) {
 	}
 	if snap.Live[0].Activity <= 0 {
 		t.Fatalf("Activity not threaded: %d", snap.Live[0].Activity)
+	}
+}
+
+// TestNewlyNeedsYouDistinguishesSameBasenameCwds pins the reason
+// NewlyNeedsYou carries names instead of labels (spec §4). Two repos named
+// `checkout` under different parents both render ProjectLabel "checkout" —
+// routine once one project owns several repos — so the old pre-rendered
+// payload emitted two identical strings and no consumer could tell which
+// session (or which project) each belonged to. With names, both entries are
+// distinct and each joins back to a Live row carrying its own cwd.
+func TestNewlyNeedsYouDistinguishesSameBasenameCwds(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	root := t.TempDir()
+
+	cases := []struct{ parent, id string }{
+		{"alpha", "cccccccc-cccc-cccc-cccc-cccccccccc01"},
+		{"beta", "cccccccc-cccc-cccc-cccc-cccccccccc02"},
+	}
+	wantCwds := map[string]string{} // session name → cwd
+	for _, c := range cases {
+		cwd := filepath.Join(root, c.parent, "checkout")
+		if err := os.MkdirAll(cwd, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		name := launchFake(t, tm, ccd, cwd, c.id)
+		// same ProjectLabel for both: filepath.Base(cwd), exactly what orphan
+		// adoption stores.
+		st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: c.id,
+			ProjectLabel: filepath.Base(cwd), Cwd: cwd, CreatedAt: 1,
+			EndedAt: -1, ExitCode: -1, LastStatus: "running"})
+		wantCwds[name] = cwd
+	}
+
+	e := NewEngine(tm, st, ccd)
+	snap, err := e.Poll(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.NewlyNeedsYou) != 2 {
+		t.Fatalf("NewlyNeedsYou = %v, want 2 entries", snap.NewlyNeedsYou)
+	}
+	byName := map[string]Row{}
+	for _, r := range snap.Live {
+		byName[r.Name] = r
+	}
+	seen := map[string]bool{}
+	for _, n := range snap.NewlyNeedsYou {
+		if seen[n] {
+			t.Fatalf("duplicate identity in NewlyNeedsYou: %v", snap.NewlyNeedsYou)
+		}
+		seen[n] = true
+		row, ok := byName[n]
+		if !ok {
+			t.Fatalf("%q does not join to snap.Live: %v", n, snap.NewlyNeedsYou)
+		}
+		if row.Cwd != wantCwds[n] {
+			t.Fatalf("%q joined to cwd %q, want %q", n, row.Cwd, wantCwds[n])
+		}
+		if row.ProjectLabel != "checkout" {
+			t.Fatalf("%q label = %q, want the colliding basename", n, row.ProjectLabel)
+		}
 	}
 }
 

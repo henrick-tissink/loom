@@ -10,20 +10,20 @@ import (
 )
 
 // fanoutForm is fan-out's OWN form (spec §2.1) — NOT launcher reuse: a
-// multi-select project checklist cannot live in launcherForm's 4-line cycle
+// multi-select repo checklist cannot live in launcherForm's 4-line cycle
 // shape. Only modelOptions/modeOptions/optLabel/cycle (launcher.go) and a
 // fresh seed textinput are shared with launcherForm; everything else here —
 // the checklist, its own cursor, the toggle set — is independent state.
 //
 // Focus zones (spec §2.1): 0 checklist, 1 model, 2 mode, 3 seed. tab/
 // shift-tab cycle the 4 zones, wrapping. Within the checklist, ↓/↑ scroll it
-// internally and space toggles the hovered project; on fields 1-3, ↓/↑ are
+// internally and space toggles the hovered repo; on fields 1-3, ↓/↑ are
 // no-ops (tab is the only field-nav there — one dialect per zone, spec-
 // stated). space on the seed field TYPES a space (launcherForm precedent,
 // tested).
 type fanoutForm struct {
-	projects []registry.Project
-	checked  map[int]bool // project index -> selected
+	repos    []registry.Repo
+	checked  map[int]bool // repo index -> selected
 	listCur  int          // checklist cursor
 	modelIdx int
 	modeIdx  int
@@ -39,11 +39,11 @@ type fanoutForm struct {
 	hint string
 }
 
-func newFanoutForm(projects []registry.Project) fanoutForm {
+func newFanoutForm(repos []registry.Repo) fanoutForm {
 	ti := textinput.New()
 	ti.Placeholder = "optional seed prompt or /slash-command"
 	ti.CharLimit = 500
-	return fanoutForm{projects: projects, checked: map[int]bool{}, seed: ti}
+	return fanoutForm{repos: repos, checked: map[int]bool{}, seed: ti}
 }
 
 func (f *fanoutForm) setFocus(n int) {
@@ -55,24 +55,24 @@ func (f *fanoutForm) setFocus(n int) {
 	}
 }
 
-// selectedProjects returns the checked projects in checklist (registry)
+// selectedRepos returns the checked repos in checklist (registry)
 // order — stable, independent of toggle order.
-func (f *fanoutForm) selectedProjects() []registry.Project {
-	var out []registry.Project
-	for i, p := range f.projects {
+func (f *fanoutForm) selectedRepos() []registry.Repo {
+	var out []registry.Repo
+	for i, r := range f.repos {
 		if f.checked[i] {
-			out = append(out, p)
+			out = append(out, r)
 		}
 	}
 	return out
 }
 
-// recipeFor builds the recipe for project p using the form's SHARED
-// model/mode/seed (spec §6: "uniform recipes — no per-project seed").
-func (f *fanoutForm) recipeFor(p registry.Project) session.Recipe {
+// recipeFor builds the recipe for repo r using the form's SHARED
+// model/mode/seed (spec §6: "uniform recipes — no per-repo seed").
+func (f *fanoutForm) recipeFor(r registry.Repo) session.Recipe {
 	return session.Recipe{
-		ProjectLabel: p.Label,
-		Cwd:          p.Path,
+		ProjectLabel: r.Label,
+		Cwd:          r.Path,
 		Model:        modelOptions[f.modelIdx],
 		Mode:         modeOptions[f.modeIdx],
 		Seed:         f.seed.Value(),
@@ -94,7 +94,7 @@ func (f *fanoutForm) update(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case tea.KeyDown:
 		if f.focus == 0 {
-			if n := len(f.projects); n > 0 && f.listCur < n-1 {
+			if n := len(f.repos); n > 0 && f.listCur < n-1 {
 				f.listCur++
 			}
 		}
@@ -118,7 +118,7 @@ func (f *fanoutForm) update(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	if f.focus == 0 && msg.String() == " " {
-		if len(f.projects) > 0 {
+		if len(f.repos) > 0 {
 			f.checked[f.listCur] = !f.checked[f.listCur]
 			f.hint = ""
 		}
@@ -145,10 +145,10 @@ func (f *fanoutForm) view(inner int) []string {
 	}
 
 	body = append(body, "projects (space toggle):")
-	if len(f.projects) == 0 {
+	if len(f.repos) == 0 {
 		body = append(body, styHelp.Render("  (no projects found)"))
 	}
-	for i, p := range f.projects {
+	for i, p := range f.repos {
 		box := "[ ]"
 		if f.checked[i] {
 			box = "[x]"

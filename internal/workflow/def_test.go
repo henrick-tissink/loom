@@ -17,8 +17,8 @@ func writeDef(t *testing.T, dir, name, body string) string {
 	return p
 }
 
-func testProjects() []registry.Project {
-	return []registry.Project{
+func testRepos() []registry.Repo {
+	return []registry.Repo{
 		{Label: "parallax", Path: "/w/parallax"},
 		{Label: "loom", Path: "/w/loom"},
 	}
@@ -35,7 +35,7 @@ func TestLoadAllValidDefinitionResolvesProjectPathAndBakesAllSteps(t *testing.T)
 		]
 	}`)
 
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(errs) != 0 {
 		t.Fatalf("errs = %+v, want none", errs)
 	}
@@ -64,7 +64,7 @@ func TestLoadAllValidDefinitionResolvesProjectPathAndBakesAllSteps(t *testing.T)
 func TestLoadAllNameMustMatchFilenameStem(t *testing.T) {
 	dir := t.TempDir()
 	writeDef(t, dir, "foo", `{"name":"bar","steps":[{"label":"a","project":"loom","relation":"fresh","seed":"x"}]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err", defs, errs)
 	}
@@ -73,7 +73,7 @@ func TestLoadAllNameMustMatchFilenameStem(t *testing.T) {
 func TestLoadAllZeroStepsRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeDef(t, dir, "empty", `{"name":"empty","steps":[]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err", defs, errs)
 	}
@@ -82,7 +82,7 @@ func TestLoadAllZeroStepsRejected(t *testing.T) {
 func TestLoadAllStep1MissingProjectRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeDef(t, dir, "noproj", `{"name":"noproj","steps":[{"label":"a","relation":"fresh","seed":"x"}]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err", defs, errs)
 	}
@@ -91,7 +91,7 @@ func TestLoadAllStep1MissingProjectRejected(t *testing.T) {
 func TestLoadAllStep1UnknownProjectRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeDef(t, dir, "badproj", `{"name":"badproj","steps":[{"label":"a","project":"nonexistent","relation":"fresh","seed":"x"}]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err", defs, errs)
 	}
@@ -100,7 +100,7 @@ func TestLoadAllStep1UnknownProjectRejected(t *testing.T) {
 func TestLoadAllUnknownModelRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeDef(t, dir, "badmodel", `{"name":"badmodel","steps":[{"label":"a","project":"loom","model":"gpt5","relation":"fresh","seed":"x"}]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err", defs, errs)
 	}
@@ -109,7 +109,7 @@ func TestLoadAllUnknownModelRejected(t *testing.T) {
 func TestLoadAllUnknownModeRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeDef(t, dir, "badmode", `{"name":"badmode","steps":[{"label":"a","project":"loom","mode":"yolo","relation":"fresh","seed":"x"}]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err", defs, errs)
 	}
@@ -121,7 +121,7 @@ func TestLoadAllStep2EmptyOrUnknownRelationRejected(t *testing.T) {
 		{"label":"a","project":"loom","relation":"fresh","seed":"x"},
 		{"label":"b","seed":"y"}
 	]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err (missing step-2 relation)", defs, errs)
 	}
@@ -131,7 +131,7 @@ func TestLoadAllStep2EmptyOrUnknownRelationRejected(t *testing.T) {
 		{"label":"a","project":"loom","relation":"fresh","seed":"x"},
 		{"label":"b","relation":"teleport","seed":"y"}
 	]}`)
-	defs2, errs2 := LoadAll(dir2, testProjects())
+	defs2, errs2 := LoadAll(dir2, testRepos())
 	if len(defs2) != 0 || len(errs2) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err (bad step-2 relation)", defs2, errs2)
 	}
@@ -143,7 +143,7 @@ func TestLoadAllTemplateTokenTypoRejected(t *testing.T) {
 		{"label":"a","project":"loom","relation":"fresh","seed":"x"},
 		{"label":"b","relation":"fork","seed":"Prior said: {{prev.result}}"}
 	]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err (unwhitelisted template token)", defs, errs)
 	}
@@ -155,7 +155,7 @@ func TestLoadAllTemplateWhitelistedTokensAccepted(t *testing.T) {
 		{"label":"a","project":"loom","relation":"fresh","seed":"x"},
 		{"label":"b","relation":"fork","seed":"{{prev.outcome}} {{prev.title}} {{prev.ask}}"}
 	]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(errs) != 0 || len(defs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 1 def 0 errs", defs, errs)
 	}
@@ -172,7 +172,7 @@ func TestLoadAllMultilineSeedNormalizedToSingleLine(t *testing.T) {
 	writeDef(t, dir, "multiline", `{"name":"multiline","steps":[
 		{"label":"a","project":"loom","relation":"fresh","seed":"line one\nline two\r\nline three\t\tend"}
 	]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(errs) != 0 || len(defs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 1 def 0 errs", defs, errs)
 	}
@@ -185,7 +185,7 @@ func TestLoadAllMultilineSeedNormalizedToSingleLine(t *testing.T) {
 func TestLoadAllMalformedJSONRejectedNotPanicked(t *testing.T) {
 	dir := t.TempDir()
 	writeDef(t, dir, "broken", `{not valid json`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err", defs, errs)
 	}
@@ -200,7 +200,7 @@ func TestLoadAllIgnoresNonJSONFilesAndSubdirs(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "subdir.json"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(errs) != 0 {
 		t.Fatalf("errs = %+v, want none (non-.json and dirs ignored)", errs)
 	}
@@ -210,7 +210,7 @@ func TestLoadAllIgnoresNonJSONFilesAndSubdirs(t *testing.T) {
 }
 
 func TestLoadAllMissingDirReturnsEmptyNotError(t *testing.T) {
-	defs, errs := LoadAll(filepath.Join(t.TempDir(), "nope"), testProjects())
+	defs, errs := LoadAll(filepath.Join(t.TempDir(), "nope"), testRepos())
 	if defs != nil || errs != nil {
 		t.Fatalf("defs=%+v errs=%+v, want nil, nil for a missing dir", defs, errs)
 	}
@@ -223,7 +223,7 @@ func TestLoadAllSortedByNameAndErrorsByPath(t *testing.T) {
 	writeDef(t, dir, "zbad", `{not json`)
 	writeDef(t, dir, "abad", `{also not json`)
 
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 2 || defs[0].Name != "aaa" || defs[1].Name != "zzz" {
 		t.Fatalf("defs = %+v, want [aaa, zzz]", defs)
 	}
@@ -235,7 +235,7 @@ func TestLoadAllSortedByNameAndErrorsByPath(t *testing.T) {
 func TestLoadAllStep1MissingLabelRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeDef(t, dir, "nolabel", `{"name":"nolabel","steps":[{"project":"loom","relation":"fresh","seed":"x"}]}`)
-	defs, errs := LoadAll(dir, testProjects())
+	defs, errs := LoadAll(dir, testRepos())
 	if len(defs) != 0 || len(errs) != 1 {
 		t.Fatalf("defs=%+v errs=%+v, want 0 defs 1 err", defs, errs)
 	}

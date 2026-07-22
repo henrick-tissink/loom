@@ -154,12 +154,13 @@ func TestRecallE2E(t *testing.T) {
 	}
 
 	// --- real registry discovery ---------------------------------------------
-	projs, err := registry.Discover(cfg.WorkspaceRoot, cfg.ClaudeConfigDir)
+	projects, err := registry.Discover(cfg.WorkspaceRoot, cfg.ClaudeConfigDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	projs := registry.Repos(projects)
 	if len(projs) != 2 || projs[0].Label != "proja" || projs[1].Label != "projb" {
-		t.Fatalf("registry.Discover = %+v, want [proja projb] (alphabetical)", projs)
+		t.Fatalf("registry.Repos(Discover) = %+v, want [proja projb] (alphabetical)", projs)
 	}
 
 	// --- isolated throwaway tmux socket + PATH-injected fake claude ---------
@@ -193,7 +194,7 @@ func TestRecallE2E(t *testing.T) {
 	}
 
 	deps := Deps{
-		Launcher: launcher, Projects: projs, Tmux: tm, Store: st,
+		Launcher: launcher, Repos: projs, Tmux: tm, Store: st,
 		IndexerStatus: func() memory.Status { return ix.Status() },
 	}
 	a := NewApp(deps)
@@ -208,8 +209,8 @@ func TestRecallE2E(t *testing.T) {
 	if a.view != viewLauncher {
 		t.Fatalf("view = %v, want viewLauncher", a.view)
 	}
-	if a.form.projects[a.form.projIdx].Label != "proja" {
-		t.Fatalf("default project = %q, want proja", a.form.projects[a.form.projIdx].Label)
+	if a.form.repos[a.form.repoIdx].Label != "proja" {
+		t.Fatalf("default project = %q, want proja", a.form.repos[a.form.repoIdx].Label)
 	}
 
 	// --- type seed ------------------------------------------------------------
@@ -300,7 +301,7 @@ func TestRecallE2E(t *testing.T) {
 	// Compute the expected assembled seed independently (pure function,
 	// same inputs launch() itself uses) BEFORE firing the launch, so timing
 	// of the async Launch call can't affect what we compare against.
-	wantSeed, warned := buildSeedWithRecall(a.form.seed.Value(), a.includeSnapshot(), a.deps.Projects)
+	wantSeed, warned := buildSeedWithRecall(a.form.seed.Value(), a.includeSnapshot(), a.deps.Repos)
 	if warned {
 		t.Fatal("buildSeedWithRecall warned on a non-slash seed")
 	}

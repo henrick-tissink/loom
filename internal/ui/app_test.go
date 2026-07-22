@@ -271,7 +271,7 @@ func TestLaunchAndResumeCmdsEmitPollNowNotTick(t *testing.T) {
 	l := &session.Launcher{Tmux: tm, Store: st,
 		ReadyTimeout: 200 * time.Millisecond, PollEvery: 50 * time.Millisecond}
 
-	a := NewApp(Deps{Launcher: l, Projects: []registry.Project{{Label: "p", Path: dir}}, Tmux: tm})
+	a := NewApp(Deps{Launcher: l, Repos: []registry.Repo{{Label: "p", Path: dir}}, Tmux: tm})
 	a.width, a.height = 80, 24
 
 	// launch: 'n' opens the launcher form; enter submits the (no-seed) default recipe.
@@ -491,11 +491,33 @@ func TestPeekShowsError(t *testing.T) {
 	}
 }
 
+// The engine reports session names (spec §4); the label is joined back from
+// the same snapshot's Live rows before the banner is raised.
 func TestSnapMsgWithTransitionsEmitsNotify(t *testing.T) {
 	a := fixtureApp()
-	_, cmd := a.Update(snapMsg(status.Snapshot{NewlyNeedsYou: []string{"tavli · fix race"}}))
+	snap := status.Snapshot{
+		NewlyNeedsYou: []string{"loom-1"},
+		Live: []status.Row{{
+			SessionRow: store.SessionRow{Name: "loom-1", ProjectLabel: "tavli", Cwd: "/w/tavli"},
+			Title:      "fix race",
+		}},
+	}
+	_, cmd := a.Update(snapMsg(snap))
 	if cmd == nil {
 		t.Fatal("expected a notify command for transitions")
+	}
+	if got := needsYouLabels(snap); len(got) != 1 || got[0] != "tavli · fix race" {
+		t.Fatalf("needsYouLabels = %q", got)
+	}
+}
+
+// A name that resolves to no Live row cannot come from a real poll; it must
+// not raise a banner with an empty body.
+func TestSnapMsgUnjoinableTransitionDoesNotNotify(t *testing.T) {
+	a := fixtureApp()
+	_, cmd := a.Update(snapMsg(status.Snapshot{NewlyNeedsYou: []string{"loom-gone"}}))
+	if cmd != nil {
+		t.Fatal("notified for a name with no Live row")
 	}
 }
 
@@ -1890,7 +1912,7 @@ func wfE2EDeps(t *testing.T) Deps {
 	}
 
 	return Deps{Runner: runner, WorkflowsDir: wfDir,
-		Projects: []registry.Project{{Label: "p", Path: projDir}}, Tmux: tm}
+		Repos: []registry.Repo{{Label: "p", Path: projDir}}, Tmux: tm}
 }
 
 // TestWFStartFlowRunAppearsAndStaysInView drives the full start flow
@@ -1955,8 +1977,8 @@ func TestWFStartFlowRunAppearsAndStaysInView(t *testing.T) {
 // ≥2 content terms ("card","monitoring") with its indexed doc; projB has one
 // session, existing purely so project-field / staleness-key tests have a
 // second project to switch to. Returns the App (ready to open the launcher)
-// plus both registry.Project values.
-func recallLauncherFixture(t *testing.T) (a *App, projA, projB registry.Project) {
+// plus both registry.Repo values.
+func recallLauncherFixture(t *testing.T) (a *App, projA, projB registry.Repo) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
 	if err != nil {
@@ -1966,8 +1988,8 @@ func recallLauncherFixture(t *testing.T) (a *App, projA, projB registry.Project)
 
 	dirA := filepath.Join(t.TempDir(), "alpha")
 	dirB := filepath.Join(t.TempDir(), "beta")
-	projA = registry.Project{Label: "alpha", Path: dirA}
-	projB = registry.Project{Label: "beta", Path: dirB}
+	projA = registry.Repo{Label: "alpha", Path: dirA}
+	projB = registry.Repo{Label: "beta", Path: dirB}
 	pdA := transcript.ProjectDirName(dirA)
 	pdB := transcript.ProjectDirName(dirB)
 
@@ -1994,7 +2016,7 @@ func recallLauncherFixture(t *testing.T) (a *App, projA, projB registry.Project)
 	seed("s4", pdB, dirB, "beta session", "beta ask", "beta outcome", "", 100)
 
 	l := &session.Launcher{Store: st}
-	a = NewApp(Deps{Store: st, Projects: []registry.Project{projA, projB}, Launcher: l})
+	a = NewApp(Deps{Store: st, Repos: []registry.Repo{projA, projB}, Launcher: l})
 	a.width, a.height = 100, 30
 	return a, projA, projB
 }
@@ -2324,7 +2346,7 @@ func TestLauncherSlashSeedWarningBlocksDroppedAtLaunch(t *testing.T) {
 		t.Fatalf("warning not rendered:\n%s", out)
 	}
 
-	seed, warned := buildSeedWithRecall(a.form.seed.Value(), a.includeSnapshot(), a.deps.Projects)
+	seed, warned := buildSeedWithRecall(a.form.seed.Value(), a.includeSnapshot(), a.deps.Repos)
 	if !warned || seed != "/deploy" {
 		t.Fatalf("buildSeedWithRecall(%q, includes) = (%q,%v), want (\"/deploy\",true) — blocks dropped",
 			a.form.seed.Value(), seed, warned)
@@ -2442,13 +2464,13 @@ func TestBuildSeedWithRecallNeverPanicsOnPathologicalInput(t *testing.T) {
 // --- §6 M3: registry reverse-match else basename(cwd) ---------------------
 
 func TestRelatedLabelRegistryReverseMatchElseBasenameCwd(t *testing.T) {
-	proj := registry.Project{Label: "alpha-custom-label", Path: "/Users/h/Sauce/alpha"}
+	proj := registry.Repo{Label: "alpha-custom-label", Path: "/Users/h/Sauce/alpha"}
 	t1 := store.Transcript{ProjectDir: transcript.ProjectDirName(proj.Path), Cwd: ""} // cwd empty on purpose
-	if got := relatedLabel([]registry.Project{proj}, t1); got != "alpha-custom-label" {
+	if got := relatedLabel([]registry.Repo{proj}, t1); got != "alpha-custom-label" {
 		t.Fatalf("reverse-match label = %q, want alpha-custom-label", got)
 	}
 	t2 := store.Transcript{ProjectDir: "no-match", Cwd: "/Users/h/Sauce/other"}
-	if got := relatedLabel([]registry.Project{proj}, t2); got != "other" {
+	if got := relatedLabel([]registry.Repo{proj}, t2); got != "other" {
 		t.Fatalf("fallback label = %q, want other (basename cwd)", got)
 	}
 }
@@ -2459,7 +2481,7 @@ func TestLauncherDetailRoundTripPreservesAllStateAndHidesResume(t *testing.T) {
 	a, _, _ := recallLauncherFixture(t)
 	openLauncherAndDrain(a)
 
-	a.form.projIdx = 1
+	a.form.repoIdx = 1
 	a.form.modeIdx = 2
 	a.form.setFocus(3)
 	a.form.seed.SetValue("some seed text")
@@ -2473,7 +2495,7 @@ func TestLauncherDetailRoundTripPreservesAllStateAndHidesResume(t *testing.T) {
 	wantHits := len(a.panelHits)
 	wantSeed := a.form.seed.Value()
 	wantModeIdx := a.form.modeIdx
-	wantProjIdx := a.form.projIdx
+	wantProjIdx := a.form.repoIdx
 
 	a.Update(tea.KeyMsg{Type: tea.KeyEnter}) // panel-focused -> detail
 	if a.view != viewDetail {
@@ -2511,8 +2533,8 @@ func TestLauncherDetailRoundTripPreservesAllStateAndHidesResume(t *testing.T) {
 	if a.form.seed.Value() != wantSeed {
 		t.Fatalf("seed lost: %q, want %q", a.form.seed.Value(), wantSeed)
 	}
-	if a.form.modeIdx != wantModeIdx || a.form.projIdx != wantProjIdx {
-		t.Fatalf("form fields lost: mode=%d proj=%d, want %d/%d", a.form.modeIdx, a.form.projIdx, wantModeIdx, wantProjIdx)
+	if a.form.modeIdx != wantModeIdx || a.form.repoIdx != wantProjIdx {
+		t.Fatalf("form fields lost: mode=%d proj=%d, want %d/%d", a.form.modeIdx, a.form.repoIdx, wantModeIdx, wantProjIdx)
 	}
 }
 
@@ -2720,8 +2742,8 @@ func TestPanelQueryCmdNilWhenStoreOrProjectDirEmpty(t *testing.T) {
 
 // --- Fan-out (`N`) — spec §2, plan Task 1 ----------------------------------
 
-func fanoutProjects() []registry.Project {
-	return []registry.Project{{Label: "alpha", Path: "/tmp/alpha"}, {Label: "beta", Path: "/tmp/beta"}}
+func fanoutRepos() []registry.Repo {
+	return []registry.Repo{{Label: "alpha", Path: "/tmp/alpha"}, {Label: "beta", Path: "/tmp/beta"}}
 }
 
 func TestNKeyOpensFanoutAndEscCloses(t *testing.T) {
@@ -2739,7 +2761,7 @@ func TestNKeyOpensFanoutAndEscCloses(t *testing.T) {
 // TestFanoutFocusTabCyclesFourZonesWrapping guards spec §2.1: tab/shift-tab
 // cycle the 4 focus zones (0 checklist .. 3 seed), wrapping both directions.
 func TestFanoutFocusTabCyclesFourZonesWrapping(t *testing.T) {
-	a := NewApp(Deps{Projects: fanoutProjects()})
+	a := NewApp(Deps{Repos: fanoutRepos()})
 	a.width, a.height = 100, 30
 	a.Update(key("N"))
 	if a.fanForm.focus != 0 {
@@ -2765,7 +2787,7 @@ func TestFanoutFocusTabCyclesFourZonesWrapping(t *testing.T) {
 // checklist is focused, ↓/↑ move its own cursor (no wrap) and space toggles
 // the hovered project.
 func TestFanoutChecklistDownUpScrollsAndSpaceToggles(t *testing.T) {
-	a := NewApp(Deps{Projects: fanoutProjects()})
+	a := NewApp(Deps{Repos: fanoutRepos()})
 	a.width, a.height = 100, 30
 	a.Update(key("N"))
 
@@ -2797,7 +2819,7 @@ func TestFanoutChecklistDownUpScrollsAndSpaceToggles(t *testing.T) {
 // TestFanoutDownUpNoopOnModelModeFields guards spec §2.1: "on fields 1-3,
 // ↓/↑ do nothing (tab is field-nav — one dialect per zone, stated)".
 func TestFanoutDownUpNoopOnModelModeFields(t *testing.T) {
-	a := NewApp(Deps{Projects: fanoutProjects()})
+	a := NewApp(Deps{Repos: fanoutRepos()})
 	a.width, a.height = 100, 30
 	a.Update(key("N"))
 	a.Update(tea.KeyMsg{Type: tea.KeyTab}) // -> focus 1 (model)
@@ -2814,7 +2836,7 @@ func TestFanoutDownUpNoopOnModelModeFields(t *testing.T) {
 // TestFanoutSpaceInSeedTypesASpace guards spec §2.1: "space on seed TYPES a
 // space (launcher precedent, tested)".
 func TestFanoutSpaceInSeedTypesASpace(t *testing.T) {
-	a := NewApp(Deps{Projects: fanoutProjects()})
+	a := NewApp(Deps{Repos: fanoutRepos()})
 	a.width, a.height = 100, 30
 	a.Update(key("N"))
 	for i := 0; i < 3; i++ {
@@ -2834,7 +2856,7 @@ func TestFanoutSpaceInSeedTypesASpace(t *testing.T) {
 // TestFanoutEnterEmptySelectionNoop guards spec §2.1: "↵ ... empty selection
 // -> no-op with inline hint".
 func TestFanoutEnterEmptySelectionNoop(t *testing.T) {
-	a := NewApp(Deps{Projects: fanoutProjects(), Launcher: &session.Launcher{}})
+	a := NewApp(Deps{Repos: fanoutRepos(), Launcher: &session.Launcher{}})
 	a.width, a.height = 100, 30
 	a.Update(key("N"))
 	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -2875,9 +2897,9 @@ func fanoutTestHarness(t *testing.T) (*session.Launcher, *store.Store, *tmux.Cli
 func TestFanoutLaunchTagsEverySelectedProject(t *testing.T) {
 	l, st, _ := fanoutTestHarness(t)
 	dirA, dirB := t.TempDir(), t.TempDir()
-	projects := []registry.Project{{Label: "alpha", Path: dirA}, {Label: "beta", Path: dirB}}
+	projects := []registry.Repo{{Label: "alpha", Path: dirA}, {Label: "beta", Path: dirB}}
 
-	a := NewApp(Deps{Launcher: l, Projects: projects})
+	a := NewApp(Deps{Launcher: l, Repos: projects})
 	a.width, a.height = 80, 24
 	a.Update(key("N"))
 	a.Update(key(" "))                      // toggle alpha (listCur 0)
@@ -2958,9 +2980,9 @@ func TestFanoutLaunchTagsEverySelectedProject(t *testing.T) {
 func TestFanoutPartialFailureCountedFailedOthersSucceed(t *testing.T) {
 	l, st, _ := fanoutTestHarness(t)
 	goodDir := t.TempDir()
-	projects := []registry.Project{{Label: "good", Path: goodDir}, {Label: "bad", Path: t.TempDir()}}
+	projects := []registry.Repo{{Label: "good", Path: goodDir}, {Label: "bad", Path: t.TempDir()}}
 
-	a := NewApp(Deps{Launcher: l, Projects: projects})
+	a := NewApp(Deps{Launcher: l, Repos: projects})
 	a.width, a.height = 80, 24
 
 	badCwdErr := errors.New("bad cwd")
@@ -2972,7 +2994,7 @@ func TestFanoutPartialFailureCountedFailedOthersSucceed(t *testing.T) {
 	}
 	items := make([]fanLaunchItem, len(projects))
 	for i, p := range projects {
-		items[i] = fanLaunchItem{Project: p, Recipe: a.fanForm.recipeFor(p)}
+		items[i] = fanLaunchItem{Repo: p, Recipe: a.fanForm.recipeFor(p)}
 	}
 	cmd := a.fanLaunchCmdWith(stub, items, a.width, a.height)
 	if cmd == nil {
@@ -3055,8 +3077,8 @@ func TestFanoutHintSurvivesSnapMsgClearedOnDashKeypress(t *testing.T) {
 // while a launch group is still in flight is a no-op.
 func TestFanoutDoubleEnterInFlightGuardNoops(t *testing.T) {
 	l, _, _ := fanoutTestHarness(t)
-	projects := []registry.Project{{Label: "alpha", Path: t.TempDir()}}
-	a := NewApp(Deps{Launcher: l, Projects: projects})
+	projects := []registry.Repo{{Label: "alpha", Path: t.TempDir()}}
+	a := NewApp(Deps{Launcher: l, Repos: projects})
 	a.width, a.height = 80, 24
 	a.Update(key("N"))
 	a.Update(key(" "))
@@ -3137,7 +3159,7 @@ func TestFanoutKeybarNEntryElisionTier(t *testing.T) {
 // TestViewNarrowNoPanic, added separately since existing tests stay
 // unmodified).
 func TestFanoutViewFrameInvariant(t *testing.T) {
-	a := NewApp(Deps{Projects: fanoutProjects()})
+	a := NewApp(Deps{Repos: fanoutRepos()})
 	for _, w := range []int{40, 80, 100} {
 		a.width, a.height = w, 24
 		a.Update(key("N"))
@@ -3173,9 +3195,9 @@ func TestFanoutViewFrameInvariant(t *testing.T) {
 func TestFanoutLaunchSnapshotsRecipeAgainstConcurrentFormMutation(t *testing.T) {
 	l, st, _ := fanoutTestHarness(t)
 	dirA, dirB := t.TempDir(), t.TempDir()
-	projects := []registry.Project{{Label: "alpha", Path: dirA}, {Label: "beta", Path: dirB}}
+	projects := []registry.Repo{{Label: "alpha", Path: dirA}, {Label: "beta", Path: dirB}}
 
-	a := NewApp(Deps{Launcher: l, Projects: projects})
+	a := NewApp(Deps{Launcher: l, Repos: projects})
 	a.width, a.height = 80, 24
 	a.Update(key("N"))
 	a.Update(key(" "))                       // toggle alpha (listCur 0)
@@ -3245,7 +3267,7 @@ func TestFanoutLaunchSnapshotsRecipeAgainstConcurrentFormMutation(t *testing.T) 
 // except esc/ctrl+c must no-op against fanForm — none of its fields may
 // change, including a second ↵.
 func TestFanoutFormFrozenWhileInFlight(t *testing.T) {
-	a := NewApp(Deps{Projects: fanoutProjects()})
+	a := NewApp(Deps{Repos: fanoutRepos()})
 	a.width, a.height = 80, 24
 	a.Update(key("N"))
 	a.Update(key(" ")) // select alpha, so there's non-zero state to protect
@@ -3288,8 +3310,8 @@ func TestFanoutFormFrozenWhileInFlight(t *testing.T) {
 // it completes, even though the view has already moved on.
 func TestFanoutEscWhileInFlightReturnsToDashButLaunchContinues(t *testing.T) {
 	l, _, _ := fanoutTestHarness(t)
-	projects := []registry.Project{{Label: "alpha", Path: t.TempDir()}}
-	a := NewApp(Deps{Launcher: l, Projects: projects})
+	projects := []registry.Repo{{Label: "alpha", Path: t.TempDir()}}
+	a := NewApp(Deps{Launcher: l, Repos: projects})
 	a.width, a.height = 80, 24
 	a.Update(key("N"))
 	a.Update(key(" "))
@@ -3345,8 +3367,8 @@ func TestFanoutHintRenderedInViewAfterResultLands(t *testing.T) {
 // including focus 3 (seed), not just the checklist default.
 func TestFanoutEnterFromSeedFocusLaunches(t *testing.T) {
 	l, _, _ := fanoutTestHarness(t)
-	projects := []registry.Project{{Label: "alpha", Path: t.TempDir()}}
-	a := NewApp(Deps{Launcher: l, Projects: projects})
+	projects := []registry.Repo{{Label: "alpha", Path: t.TempDir()}}
+	a := NewApp(Deps{Launcher: l, Repos: projects})
 	a.width, a.height = 80, 24
 	a.Update(key("N"))
 	a.Update(key(" ")) // select alpha

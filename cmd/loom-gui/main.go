@@ -11,6 +11,7 @@ import (
 
 	"github.com/henricktissink/loom/internal/config"
 	"github.com/henricktissink/loom/internal/memory"
+	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -55,9 +56,18 @@ func run() error {
 	}
 	defer st.Close()
 
-	projects, err := registry.Discover(cfg.WorkspaceRoot, cfg.ClaudeConfigDir)
-	if err != nil {
-		return fmt.Errorf("discover projects in %s: %w", cfg.WorkspaceRoot, err)
+	// loom.db is the runtime source of truth for launch targets (§7), so a
+	// failed workspace scan is no longer fatal: every project already
+	// reconciled into the store stays launchable, and the sweep still runs.
+	// Refusing to start because one directory became unreadable would be a
+	// strictly worse outcome than starting with a stale target set.
+	svc := projects.New(st)
+	discovered, derr := registry.Discover(cfg.WorkspaceRoot, cfg.ClaudeConfigDir)
+	if derr != nil {
+		fmt.Fprintf(os.Stderr, "loom-gui: discover repos in %s: %v\n", cfg.WorkspaceRoot, derr)
+	}
+	if rerr := svc.Reconcile(discovered); rerr != nil {
+		fmt.Fprintln(os.Stderr, "loom-gui: reconcile projects:", rerr)
 	}
 	launcher := &session.Launcher{
 		Tmux: tm, Store: st,
@@ -82,7 +92,7 @@ func run() error {
 	}
 
 	engine := status.NewEngine(tm, st, cfg.ClaudeConfigDir)
-	app := newApp(engine, tm, st, launcher, projects, time.Now)
+	app := newApp(engine, tm, st, launcher, svc, time.Now)
 	app.settings = newSettingsStore(cfg.LoomDir)
 	session.SetClaudeTheme(app.settings.get().TerminalTheme) // match Claude's theme to the terminal
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}

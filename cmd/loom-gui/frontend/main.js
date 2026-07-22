@@ -7,10 +7,29 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 
 const threadsEl = document.getElementById("threads");
 const attnEl = document.getElementById("attn");
+const chipEl = document.getElementById("hidechip");
 let activeName = null;
 let latestSessions = [];
 let latestRecent = [];
+// Project rows (ListProjectDetails) — UNFILTERED by §6 on purpose: this is the
+// list the hide/solo toggles live on, and a project that vanished from its own
+// settings screen the moment it was hidden could never be unhidden.
+let latestProjects = [];
+// What the stage is showing: a session terminal, or a project overview. Held
+// so the 1.5s poll can refresh the overview's session lists without stomping
+// on a rename the user is mid-way through typing.
+let stageView = { kind: "none" };
 let termThemeMode = "light"; // "light" | "dark", from preferences
+
+// bound resolves a Wails-bound method by name, or null. Two callers need this:
+// the bindings injected after module-eval (GetPrefs already did this dance),
+// and the handful of project affordances whose Go side lands after this
+// frontend — an unbound method degrades to a typed path instead of a crash,
+// per the house rule that failures degrade rather than take the window down.
+function bound(name) {
+  const app = window.go && window.go.main && window.go.main.App;
+  return app && typeof app[name] === "function" ? app[name].bind(app) : null;
+}
 
 // Reflect the terminal theme on the DOM (the #terminal pane background) and,
 // live, on any open terminal.
@@ -48,7 +67,9 @@ async function syncFullscreen() {
 window.addEventListener("resize", syncFullscreen);
 syncFullscreen();
 
-document.getElementById("new-session").addEventListener("click", openLauncher);
+// Wrapped rather than passed directly: openLauncher's first argument is a
+// preselected target path, and a raw listener would hand it a MouseEvent.
+document.getElementById("new-session").addEventListener("click", () => openLauncher());
 document.getElementById("search-btn").addEventListener("click", openSearch);
 document.getElementById("prefs-btn").addEventListener("click", openPrefs);
 document.getElementById("wf-btn").addEventListener("click", openWorkflows);
@@ -220,18 +241,158 @@ function appendFinishedRow(s) {
   threadsEl.appendChild(li);
 }
 
+// ---- rail sections (§8) ----
+// Sections are per PROJECT; today's status ordering is preserved INSIDE each
+// one. Ordering across sections is one total order (§7): needs-you projects by
+// name → Ungrouped if it holds a needs-you session → remaining projects by
+// name → Ungrouped.
+//
+// Deliberately NOT strict project-then-status nesting: that buries an urgent
+// session inside a collapsed group, and attention-first is what loom is for.
+// The same reasoning is why a collapsed header still carries the needs-you dot.
+const UNGROUPED_NAME = "Ungrouped";
+
+// §6.1's predicate, in the frontend's own terms. The DTO lists arriving from
+// the Go side are already filtered, but the PROJECT list is not — it is what
+// the hide/solo toggles live on — so every surface that renders project names
+// from it (the rail's index, the palette) must re-apply the rule or it becomes
+// the leak the feature exists to prevent. A soloed project whose root is
+// missing degrades to "nothing hidden", matching the Go resolver exactly.
+function projectVisible(p) {
+  const solo = latestProjects.find((x) => x.solo && !x.missing);
+  if (solo) return p.root === solo.root;
+  return !p.hidden;
+}
+
+// Roots whose rail section is collapsed. §8 puts this in loom.db beside the
+// other project flags rather than a third store; until that binding exists the
+// set is mirrored to localStorage so the state at least survives a reload, and
+// the server's value wins the moment ListProjectDetails carries one.
+const collapsedRoots = new Set();
+const COLLAPSE_KEY = "loom.rail.collapsed";
+try {
+  for (const r of JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "[]")) collapsedRoots.add(r);
+} catch { /* corrupt or unavailable storage — start expanded */ }
+
+// syncCollapseFromServer lets the Go side be the authority as soon as it
+// carries the flag: a DTO without `collapsed` leaves the local mirror alone,
+// so this is safe both before and after that binding lands.
+function syncCollapseFromServer(projects) {
+  if (!projects.some((p) => typeof p.collapsed === "boolean")) return;
+  collapsedRoots.clear();
+  for (const p of projects) if (p.collapsed) collapsedRoots.add(p.root);
+}
+
+function setCollapsed(root, on) {
+  if (on) collapsedRoots.add(root); else collapsedRoots.delete(root);
+  const persist = bound("SetProjectCollapsed");
+  if (persist) persist(root, on).catch((e) => console.error("collapse", e));
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsedRoots])); }
+  catch { /* storage full or disabled — collapse is then session-only */ }
+}
+
+// railSections buckets the (already §6-filtered) DTOs by project root and puts
+// the buckets in §7's total order. Ungrouped is keyed by root "" — the store's
+// reserved row — so no surface needs a second branch for "no project".
+function railSections(sessions, recent) {
+  const byRoot = new Map();
+  const bucket = (root, name) => {
+    let b = byRoot.get(root);
+    if (!b) {
+      b = { root, name: name || (root === "" ? UNGROUPED_NAME : root.split("/").pop()), live: [], finished: [] };
+      byRoot.set(root, b);
+    }
+    return b;
+  };
+  for (const s of sessions) bucket(s.projectRoot || "", s.projectName).live.push(s);
+  for (const s of recent || []) bucket(s.projectRoot || "", s.projectName).finished.push(s);
+
+  const urgent = (b) => b.live.some((s) => s.status === "needs_you");
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const named = [...byRoot.values()].filter((b) => b.root !== "");
+  const ung = byRoot.get("");
+  return [
+    ...named.filter(urgent).sort(byName),
+    ...(ung && urgent(ung) ? [ung] : []),
+    ...named.filter((b) => !urgent(b)).sort(byName),
+    ...(ung && !urgent(ung) ? [ung] : []),
+  ];
+}
+
+function appendSectionHead(sec) {
+  const li = document.createElement("li");
+  const isCollapsed = collapsedRoots.has(sec.root);
+  const urgent = sec.live.filter((s) => s.status === "needs_you").length;
+  li.className = "psec" + (isCollapsed ? " collapsed" : "") + (urgent ? " urgent" : "");
+  li.innerHTML =
+    `<button class="psec-caret" title="${isCollapsed ? "Expand" : "Collapse"}">${isCollapsed ? "▸" : "▾"}</button>` +
+    `<span class="psec-name">${esc(sec.name)}</span>` +
+    // The dot survives collapse on purpose: collapsing a section must never be
+    // the reason an urgent session goes unnoticed.
+    (urgent ? `<span class="psec-dot" title="${urgent} need you"></span>` : "") +
+    `<span class="psec-count">${sec.live.length || ""}</span>`;
+  li.querySelector(".psec-caret").addEventListener("click", (e) => {
+    e.stopPropagation();
+    setCollapsed(sec.root, !collapsedRoots.has(sec.root));
+    renderRail(latestSessions, latestRecent);
+  });
+  // Clicking the header itself is §8's "replace the stage with the overview".
+  li.addEventListener("click", () => openProject(sec.root));
+  threadsEl.appendChild(li);
+}
+
+// The rail's tail: every visible project with no sessions right now, as a
+// quiet index. Without it a freshly created (or simply idle) project would
+// have no route to its overview — and the overview is where hide/solo,
+// re-point and membership live.
+function appendProjectIndex(shownRoots) {
+  const rest = latestProjects
+    .filter((p) => !p.ungrouped && !shownRoots.has(p.root) && projectVisible(p))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (!rest.length) return;
+  const key = " index"; // not a real root, so it can never collide
+  const isCollapsed = collapsedRoots.has(key);
+  const head = document.createElement("li");
+  head.className = "psec psec-index" + (isCollapsed ? " collapsed" : "");
+  head.innerHTML =
+    `<button class="psec-caret">${isCollapsed ? "▸" : "▾"}</button>` +
+    `<span class="psec-name">Projects</span><span class="psec-count">${rest.length}</span>`;
+  head.addEventListener("click", () => {
+    setCollapsed(key, !collapsedRoots.has(key));
+    renderRail(latestSessions, latestRecent);
+  });
+  threadsEl.appendChild(head);
+  if (isCollapsed) return;
+  for (const p of rest) {
+    const li = document.createElement("li");
+    li.className = "prow" + (p.missing ? " missing" : "");
+    li.innerHTML = `<span class="prow-name">${esc(p.name)}</span>` +
+      (p.missing ? `<span class="prow-tag">missing</span>` : "");
+    li.addEventListener("click", () => openProject(p.root));
+    threadsEl.appendChild(li);
+  }
+}
+
 function renderRail(sessions, recent) {
   threadsEl.replaceChildren();
-  for (const g of GROUPS) {
-    const rows = sessions.filter((s) => g.match(s.status));
-    if (!rows.length) continue;
-    appendGroup(g.key);
-    for (const s of rows) appendLiveRow(s);
+  const sections = railSections(sessions, recent);
+  const shown = new Set();
+  for (const sec of sections) {
+    shown.add(sec.root);
+    appendSectionHead(sec);
+    if (collapsedRoots.has(sec.root)) continue;
+    for (const g of GROUPS) {
+      const rows = sec.live.filter((s) => g.match(s.status));
+      if (!rows.length) continue;
+      appendGroup(g.key);
+      for (const s of rows) appendLiveRow(s);
+    }
+    if (sec.finished.length) {
+      appendGroup("Finished");
+      for (const s of sec.finished) appendFinishedRow(s);
+    }
   }
-  if (recent && recent.length) {
-    appendGroup("Finished");
-    for (const s of recent) appendFinishedRow(s);
-  }
+  appendProjectIndex(shown);
 }
 
 function renderStageHeader(name) {
@@ -252,6 +413,429 @@ function renderStageHeader(name) {
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
 }
 
+// ---- hide/solo chip (§6.4) ----
+// Permanent, in the titlebar, and NEVER an identity-bearing needs-you count:
+// "3 need you" over a two-session demo re-leaks exactly what hiding concealed.
+// Restore is armed-confirm (the killButton idiom) so one stray click mid
+// screen-share cannot undo it.
+let chipArmed = false;
+let chipTimer = null;
+
+function renderHideChip() {
+  if (!chipEl) return;
+  if (chipArmed) return; // don't overwrite the armed label under the user
+  const solo = latestProjects.find((p) => p.solo);
+  const hidden = latestProjects.filter((p) => p.hidden).length;
+  let text = "", cls = "hidechip";
+  if (solo && !solo.missing) {
+    text = "solo: " + solo.name;
+    cls += " solo";
+  } else if (solo && solo.missing) {
+    // The resolver degrades a missing solo root to "nothing hidden" rather
+    // than to "everything hidden". Say so: silently believing a demo is
+    // protected when it is not is the failure mode this whole feature exists
+    // to avoid.
+    text = "solo: " + solo.name + " — unavailable";
+    cls += " warn";
+  } else if (hidden > 0) {
+    text = hidden + " hidden";
+  }
+  chipEl.className = cls;
+  chipEl.textContent = text;
+  chipEl.title = text ? "Click twice to restore everything" : "";
+}
+
+function disarmChip() {
+  chipArmed = false;
+  clearTimeout(chipTimer);
+  renderHideChip();
+}
+
+if (chipEl) {
+  chipEl.addEventListener("click", async () => {
+    if (!chipEl.textContent) return;
+    if (!chipArmed) {
+      chipArmed = true;
+      chipEl.classList.add("armed");
+      chipEl.textContent = "Restore?";
+      chipTimer = setTimeout(disarmChip, 2500);
+      return;
+    }
+    disarmChip();
+    const solo = bound("SetProjectSolo"), hide = bound("SetProjectHidden");
+    for (const p of latestProjects) {
+      if (p.solo && solo) await solo(p.root, false).catch((e) => console.error("solo", e));
+      if (p.hidden && hide) await hide(p.root, false).catch((e) => console.error("hide", e));
+    }
+    poll();
+  });
+}
+
+// ---- small prompt modal (rename / re-point / add repo) ----
+// Directory input is a typed path plus a "Choose…" button, and the button only
+// appears when the picker binding is present — the Go side owns the native
+// dialog, so an unbound picker degrades to typing rather than to a dead modal.
+function promptModal({ title, label, value = "", placeholder = "", dir = false, okText = "Save" }) {
+  if (document.querySelector(".modal-backdrop")) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const picker = dir ? bound("OpenDirectoryDialog") : null;
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" role="dialog" aria-label="${esc(title)}">
+        <h2>${esc(title)}</h2>
+        <div class="field">
+          <label for="pm-input">${esc(label)}</label>
+          <div class="pm-row">
+            <input id="pm-input" class="search-input" type="text" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false" />
+            ${picker ? `<button class="btn-ghost" id="pm-pick">Choose…</button>` : ""}
+          </div>
+        </div>
+        <div class="modal-error" id="pm-error"></div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="pm-cancel">Cancel</button>
+          <button class="btn-launch" id="pm-ok">${esc(okText)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    const input = backdrop.querySelector("#pm-input");
+    input.focus();
+    input.select();
+    // The global Escape handler removes any open backdrop. Without resolving
+    // here, that path would leave the caller awaiting a promise forever — so
+    // the modal owns its own Escape and settles before the node goes.
+    const onEsc = (e) => { if (e.key === "Escape") done(null); };
+    document.addEventListener("keydown", onEsc, true);
+    const done = (v) => {
+      document.removeEventListener("keydown", onEsc, true);
+      backdrop.remove();
+      resolve(v);
+    };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) done(null); });
+    backdrop.querySelector("#pm-cancel").addEventListener("click", () => done(null));
+    if (picker) backdrop.querySelector("#pm-pick").addEventListener("click", async () => {
+      try { const p = await picker(title); if (p) input.value = p; }
+      catch (e) { backdrop.querySelector("#pm-error").textContent = String(e); }
+    });
+    const ok = () => { const v = input.value.trim(); if (v) done(v); };
+    backdrop.querySelector("#pm-ok").addEventListener("click", ok);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); ok(); }
+      else if (e.key === "Escape") { e.preventDefault(); done(null); }
+    });
+  });
+}
+
+// ---- project overview (§8) ----
+// Clicking a rail section header replaces the stage with this. Deliberately a
+// shell: slice 2 renders an architecture view into the #po-arch slot, and
+// nothing above it reads that node, so the seam stays clean.
+function projectByRoot(root) {
+  return latestProjects.find((p) => p.root === root) || null;
+}
+
+function openProject(root) {
+  teardownTerminal();
+  activeName = null;
+  stageView = { kind: "project", root };
+  renderProject();
+  renderRail(latestSessions, latestRecent); // drop the active-session highlight
+}
+
+async function projectAction(fn) {
+  try { await fn(); } catch (e) { console.error("project", e); flashProjectError(String(e)); return; }
+  await poll();
+  if (stageView.kind === "project") renderProject();
+}
+
+function flashProjectError(msg) {
+  const el = document.getElementById("po-error");
+  if (el) el.textContent = msg;
+}
+
+function projectSessionsHtml(root) {
+  const live = latestSessions.filter((s) => (s.projectRoot || "") === root);
+  const fin = latestRecent.filter((s) => (s.projectRoot || "") === root);
+  const row = (s, kind) =>
+    `<li class="po-sess" data-name="${esc(s.name)}" data-kind="${kind}">
+       <span class="po-dot" style="background:${statusColor(s.status)}"></span>
+       <span class="po-sname">${esc(displayName(s))}</span>
+       <span class="po-sstatus">${esc(kind === "live" ? statusWord(s.status) : s.status)}</span>
+     </li>`;
+  const block = (title, rows) =>
+    `<div class="po-sub">${title}</div>` +
+    (rows.length ? `<ul class="po-list">${rows.join("")}</ul>` : `<div class="po-empty">none</div>`);
+  return block("Live", live.map((s) => row(s, "live"))) +
+    block("Finished", fin.map((s) => row(s, "finished")));
+}
+
+function wireProjectSessions(host) {
+  host.querySelectorAll(".po-sess").forEach((li) => {
+    const name = li.getAttribute("data-name");
+    if (li.getAttribute("data-kind") === "live") {
+      li.addEventListener("click", () => selectSession(name));
+    } else {
+      li.addEventListener("click", async () => {
+        try { const nn = await window.go.main.App.ResumeSession(name); if (nn) selectSession(nn); poll(); }
+        catch (e) { console.error("resume", e); }
+      });
+    }
+  });
+}
+
+function refreshProjectSessions() {
+  const host = document.getElementById("po-sessions");
+  if (!host) return;
+  host.innerHTML = projectSessionsHtml(stageView.root);
+  wireProjectSessions(host);
+}
+
+function renderProject() {
+  const stage = document.getElementById("stage");
+  const p = projectByRoot(stageView.root);
+  stage.replaceChildren();
+  if (!p) {
+    stage.innerHTML = `<div id="stage-empty">This project is no longer in loom.db.</div>`;
+    return;
+  }
+  const repoRow = (r) => `
+    <li class="po-repo${r.missing ? " missing" : ""}" data-path="${esc(r.path)}">
+      <span class="po-rlabel">${esc(r.label)}</span>
+      <span class="po-rpath">${esc(r.path)}</span>
+      ${r.missing ? `<span class="po-tag">missing</span>` : ""}
+      <span class="po-racts">
+        <button class="tact po-launch"${r.missing ? " disabled" : ""} title="${r.missing ? "Directory is gone — re-point the project first" : "New session here"}">launch</button>
+        <button class="tact po-remove" title="Move this repo to a project of its own">remove</button>
+      </span>
+    </li>`;
+
+  stage.innerHTML = `
+    <div id="stage-header" class="stage-head po-head">
+      <span class="sh-name">${esc(p.name)}</span>
+      ${p.hidden ? `<span class="po-tag">hidden</span>` : ""}
+      ${p.solo ? `<span class="po-tag po-tag-solo">solo</span>` : ""}
+      ${p.missing ? `<span class="po-tag">missing</span>` : ""}
+      <span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(p.root || "no directory")}</span>
+      <span class="po-acts">
+        <button class="sh-btn" id="po-hide">${p.hidden ? "Show" : "Hide"}</button>
+        <button class="sh-btn" id="po-solo">${p.solo ? "Leave solo" : "Solo"}</button>
+        <button class="sh-btn" id="po-rename">Rename</button>
+        <button class="sh-btn" id="po-repoint">Re-point</button>
+      </span>
+    </div>
+    <div class="po">
+      <div class="modal-error" id="po-error"></div>
+      <div id="po-warnings"></div>
+      <section class="po-block">
+        <div class="po-bhead"><h3>Repos</h3><button class="sh-btn" id="po-addrepo">Add repo</button></div>
+        ${(p.repos || []).length ? `<ul class="po-list">${p.repos.map(repoRow).join("")}</ul>` : `<div class="po-empty">No repos — the project root is the launch target.</div>`}
+      </section>
+      <section class="po-block">
+        <div class="po-bhead"><h3>Sessions</h3></div>
+        <div id="po-sessions"></div>
+      </section>
+      <!-- Seam for slice 2's architecture view. Nothing above reads this node;
+           it is left empty (and unstyled-empty is invisible) on purpose. -->
+      <section class="po-block po-arch" id="po-arch" data-slot="architecture"></section>
+    </div>`;
+
+  refreshProjectSessions();
+
+  const ungrouped = p.ungrouped;
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
+  // Ungrouped is a real row in the model, but it owns no directory: renaming,
+  // re-pointing or adding repos to it is meaningless, and soloing it is
+  // explicitly suppressed by §6.1.
+  for (const id of ["po-solo", "po-rename", "po-repoint", "po-addrepo"]) {
+    const el = document.getElementById(id);
+    if (el && ungrouped) el.disabled = true;
+  }
+  on("po-hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !p.hidden)));
+  on("po-solo", () => projectAction(() => window.go.main.App.SetProjectSolo(p.root, !p.solo)));
+  on("po-rename", async () => {
+    const name = await promptModal({ title: "Rename project", label: "Name", value: p.name });
+    if (name) projectAction(() => window.go.main.App.RenameProject(p.root, name));
+  });
+  on("po-repoint", async () => {
+    const dir = await promptModal({
+      title: "Re-point project", label: "New root directory", value: p.root, dir: true, okText: "Re-point",
+    });
+    if (dir) projectAction(() => window.go.main.App.RepointProject(p.root, dir));
+  });
+  on("po-addrepo", async () => {
+    const dir = await promptModal({ title: "Add repo", label: "Repo directory", dir: true, okText: "Add" });
+    if (dir) projectAction(() => window.go.main.App.AddProjectRepo(p.root, dir));
+  });
+  stage.querySelectorAll(".po-repo").forEach((li) => {
+    const path = li.getAttribute("data-path");
+    const launch = li.querySelector(".po-launch");
+    if (launch && !launch.disabled) launch.addEventListener("click", () => openLauncher(path));
+    li.querySelector(".po-remove").addEventListener("click", () =>
+      projectAction(() => window.go.main.App.RemoveProjectRepo(path)));
+  });
+  renderProjectWarnings();
+}
+
+// Warnings are the only place a repo skipped by reconciliation (a label
+// collision, §2) becomes visible — discovery is never fatal, so without this
+// the repo is simply absent from the launcher with no explanation anywhere.
+async function renderProjectWarnings() {
+  const host = document.getElementById("po-warnings");
+  const list = bound("ProjectWarnings");
+  if (!host || !list) return;
+  let ws = [];
+  try { ws = await list(); } catch { return; }
+  if (!ws.length || !host.isConnected) return;
+  host.innerHTML = `<div class="po-warns">${ws.map((w) => `<div class="po-warn">${esc(w)}</div>`).join("")}</div>`;
+}
+
+// ---- create project (§8) ----
+async function openCreateProject() {
+  if (document.querySelector(".modal-backdrop")) return;
+  const picker = bound("OpenDirectoryDialog");
+  const suggest = bound("SuggestRepos");
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal cp-modal" role="dialog" aria-label="New project">
+      <h2>New project</h2>
+      <div class="field">
+        <label for="cp-root">Root directory</label>
+        <div class="pm-row">
+          <input id="cp-root" class="search-input" type="text" placeholder="/Users/you/Sauce/Innostream" autocomplete="off" spellcheck="false" />
+          ${picker ? `<button class="btn-ghost" id="cp-pick">Choose…</button>` : ""}
+        </div>
+      </div>
+      <div class="field">
+        <label for="cp-name">Name</label>
+        <input id="cp-name" class="search-input" type="text" placeholder="Innostream" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label>Repos</label>
+        <div id="cp-repos" class="fan-projects"><div class="po-empty">Pick a root to list its repos.</div></div>
+      </div>
+      <div class="field">
+        <label for="cp-extra">Add a repo outside the root</label>
+        <div class="pm-row">
+          <input id="cp-extra" class="search-input" type="text" placeholder="/Users/you/other/repo" autocomplete="off" spellcheck="false" />
+          ${picker ? `<button class="btn-ghost" id="cp-extra-pick">Choose…</button>` : ""}
+          <button class="btn-ghost" id="cp-extra-add">Add</button>
+        </div>
+      </div>
+      <div class="modal-error" id="cp-error"></div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="cp-cancel">Cancel</button>
+        <button class="btn-launch" id="cp-create">Create</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#cp-cancel").addEventListener("click", close);
+
+  const rootEl = backdrop.querySelector("#cp-root");
+  const nameEl = backdrop.querySelector("#cp-name");
+  const reposEl = backdrop.querySelector("#cp-repos");
+  const errEl = backdrop.querySelector("#cp-error");
+  const base = (p) => String(p).replace(/\/+$/, "").split("/").pop();
+
+  const addCandidate = (path, checked) => {
+    if (reposEl.querySelector(`input[data-path="${CSS.escape(path)}"]`)) return;
+    const empty = reposEl.querySelector(".po-empty");
+    if (empty) empty.remove();
+    const l = document.createElement("label");
+    l.className = "pf-check";
+    l.innerHTML = `<input type="checkbox" data-path="${esc(path)}"${checked ? " checked" : ""} /><span>${esc(path)}</span>`;
+    reposEl.appendChild(l);
+  };
+
+  // The checklist is PREFILLED from the root's children (§8). When the Go side
+  // cannot enumerate them the root itself is still offered, so the modal is
+  // never a dead end — a project of one is a legitimate shape (§2).
+  const fillFor = async (root) => {
+    reposEl.replaceChildren();
+    let kids = [];
+    if (suggest) { try { kids = (await suggest(root)) || []; } catch (e) { console.error("suggest", e); } }
+    for (const k of kids) addCandidate(typeof k === "string" ? k : k.path, true);
+    addCandidate(root, kids.length === 0);
+  };
+
+  rootEl.addEventListener("change", () => {
+    const r = rootEl.value.trim();
+    if (!r) return;
+    if (!nameEl.value.trim()) nameEl.value = base(r);
+    fillFor(r);
+  });
+  if (picker) backdrop.querySelector("#cp-pick").addEventListener("click", async () => {
+    try {
+      const p = await picker("Project root");
+      if (!p) return;
+      rootEl.value = p;
+      if (!nameEl.value.trim()) nameEl.value = base(p);
+      fillFor(p);
+    } catch (e) { errEl.textContent = String(e); }
+  });
+  if (picker) backdrop.querySelector("#cp-extra-pick").addEventListener("click", async () => {
+    try { const p = await picker("Repo outside the root"); if (p) backdrop.querySelector("#cp-extra").value = p; }
+    catch (e) { errEl.textContent = String(e); }
+  });
+  backdrop.querySelector("#cp-extra-add").addEventListener("click", () => {
+    const extra = backdrop.querySelector("#cp-extra");
+    const v = extra.value.trim();
+    if (!v) return;
+    addCandidate(v, true);
+    extra.value = "";
+  });
+
+  const createBtn = backdrop.querySelector("#cp-create");
+  createBtn.addEventListener("click", async () => {
+    const root = rootEl.value.trim();
+    if (!root) { errEl.textContent = "Pick a root directory."; return; }
+    const repos = [...reposEl.querySelectorAll("input:checked")].map((c) => c.getAttribute("data-path"));
+    createBtn.disabled = true;
+    try { await window.go.main.App.CreateProject(root, nameEl.value.trim() || base(root), repos); }
+    catch (e) { errEl.textContent = String(e); createBtn.disabled = false; return; }
+    close();
+    await poll();
+    openProject(root);
+  });
+}
+
+// Hidden projects live behind an explicit gesture, never an ambient list: the
+// point of §6 is that a client's name is not on screen unless you asked for
+// it. Restoring one is a deliberate two-step (open this, then Show), which is
+// the same reasoning as the chip's armed confirm.
+function openHiddenProjects() {
+  if (document.querySelector(".modal-backdrop")) return;
+  const hidden = latestProjects.filter((p) => p.hidden);
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal" role="dialog" aria-label="Hidden projects">
+      <h2>Hidden projects</h2>
+      <ul class="po-list">${hidden.map((p) =>
+        `<li class="po-repo" data-root="${esc(p.root)}"><span class="po-rlabel">${esc(p.name)}</span>` +
+        `<span class="po-rpath">${esc(p.root)}</span>` +
+        `<span class="po-racts"><button class="tact po-show">show</button></span></li>`).join("")}</ul>
+      <div class="modal-actions"><button class="btn-ghost" id="hp-close">Close</button></div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#hp-close").addEventListener("click", close);
+  backdrop.querySelectorAll(".po-repo").forEach((li) => {
+    li.querySelector(".po-show").addEventListener("click", async () => {
+      try { await window.go.main.App.SetProjectHidden(li.getAttribute("data-root"), false); }
+      catch (e) { console.error("show", e); }
+      close();
+      poll();
+    });
+  });
+}
+
+const newProjectBtn = document.getElementById("new-project");
+if (newProjectBtn) newProjectBtn.addEventListener("click", openCreateProject);
+
 // ---- fan-out (same prompt across many projects) ----
 async function openFanout() {
   if (document.querySelector(".modal-backdrop")) return;
@@ -264,7 +848,7 @@ async function openFanout() {
       <h2>Fan out — one prompt, many projects</h2>
       <div class="field">
         <label>Projects</label>
-        <div id="fan-projects" class="fan-projects">${projects.map((p) => `<label class="pf-check"><input type="checkbox" data-path="${esc(p.path)}" /><span>${esc(p.label)}</span></label>`).join("")}</div>
+        <div id="fan-projects" class="fan-projects">${projects.map((p) => `<label class="pf-check${p.missing ? " dimmed" : ""}"><input type="checkbox" data-path="${esc(p.path)}"${p.missing ? " disabled" : ""} /><span>${esc(p.label)}${p.isRoot ? " · project root" : ""}${p.missing ? " · missing" : ""}</span></label>`).join("")}</div>
       </div>
       <div class="fan-row">
         <div class="field"><label for="fan-model">Model</label><select id="fan-model">${optionsHtml(MODELS)}</select></div>
@@ -581,21 +1165,47 @@ async function openDiff(name) {
   let d;
   try { d = await window.go.main.App.SessionDiff(name); }
   catch (e) { body.textContent = "diff failed: " + e; return; }
-  if (d.error) { body.innerHTML = `<div class="diff-empty">${esc(d.error)}</div>`; return; }
-  if (!d.dirty) { body.innerHTML = `<div class="diff-empty">No uncommitted changes.</div>`; return; }
 
-  let html = "";
-  if (d.stat) html += `<pre class="diff-stat">${esc(d.stat)}</pre>`;
-  if (d.untracked && d.untracked.length) {
-    html += `<div class="diff-untracked"><span class="du-head">new files</span>` +
-      d.untracked.map((f) => `<span class="du-file" data-path="${esc(f)}">${esc(f)}</span>`).join("") + `</div>`;
+  const repos = (d && d.repos) || [];
+  if (!repos.length) { body.innerHTML = `<div class="diff-empty">No working directory for this session.</div>`; return; }
+  if (!repos.some((r) => r.dirty || r.error)) {
+    body.innerHTML = `<div class="diff-empty">No uncommitted changes.</div>`;
+    return;
   }
-  for (const f of splitPatchByFile(d.patch)) {
-    const c = patchCounts(f.body);
-    html += `<details class="diff-file" open>
-      <summary><span class="df-name">${esc(f.file)}</span><span class="df-counts"><span class="df-add">+${c.add}</span> <span class="df-del">−${c.del}</span></span></summary>
-      <pre class="diff-patch">${renderPatch(f.body)}</pre>
-    </details>`;
+
+  // One section per repo (§8). The diff is sectioned rather than concatenated
+  // precisely so this splitter keeps working: an injected "── repo ──" header
+  // between two patches would be parsed as part of the preceding file's hunk.
+  // Single-repo sessions get the same markup with the heading suppressed, so
+  // the common case reads exactly as it did before.
+  const solo = repos.length === 1;
+  let html = "";
+  for (const r of repos) {
+    let inner = "";
+    if (r.error) {
+      inner = `<div class="diff-empty">${esc(r.error)}</div>`;
+    } else if (!r.dirty) {
+      inner = `<div class="diff-empty">No uncommitted changes.</div>`;
+    } else {
+      if (r.stat) inner += `<pre class="diff-stat">${esc(r.stat)}</pre>`;
+      if (r.untracked && r.untracked.length) {
+        // git reports untracked paths relative to THEIR repo, while the editor
+        // binding resolves a relative path against the session cwd — which is
+        // the wrong base for every section but the primary. Absolutise here.
+        inner += `<div class="diff-untracked"><span class="du-head">new files</span>` +
+          r.untracked.map((f) => `<span class="du-file" data-path="${esc(r.path ? r.path + "/" + f : f)}">${esc(f)}</span>`).join("") + `</div>`;
+      }
+      for (const f of splitPatchByFile(r.patch)) {
+        const c = patchCounts(f.body);
+        inner += `<details class="diff-file" open>
+          <summary><span class="df-name">${esc(f.file)}</span><span class="df-counts"><span class="df-add">+${c.add}</span> <span class="df-del">−${c.del}</span></span></summary>
+          <pre class="diff-patch">${renderPatch(f.body)}</pre>
+        </details>`;
+      }
+    }
+    html += solo ? inner : `<section class="diff-repo">
+      <div class="dr-head"><span class="dr-label">${esc(r.label || r.path)}</span><span class="dr-path">${esc(r.path)}</span></div>
+      ${inner}</section>`;
   }
   body.innerHTML = html;
   body.querySelectorAll(".du-file").forEach((el) => {
@@ -628,6 +1238,7 @@ function teardownTerminal() {
 function selectSession(name) {
   teardownTerminal();
   activeName = name;
+  stageView = { kind: "session", name };
   const gen = ++attachGen;
 
   const stage = document.getElementById("stage");
@@ -790,15 +1401,24 @@ function hideLinkTip() { if (linkTip) linkTip.style.display = "none"; }
 // ---- poll ----
 async function poll() {
   try {
-    const [sessions, recent] = await Promise.all([
+    const listProjects = bound("ListProjectDetails");
+    const [sessions, recent, projects] = await Promise.all([
       window.go.main.App.ListSessions(),
       window.go.main.App.ListRecent(),
+      listProjects ? listProjects().catch(() => latestProjects) : Promise.resolve(latestProjects),
     ]);
     latestSessions = sessions;
     latestRecent = recent;
+    latestProjects = projects || [];
+    syncCollapseFromServer(latestProjects);
     renderRail(sessions, recent);
     renderAttention(sessions);
+    renderHideChip();
     if (activeName) renderStageHeader(activeName);
+    // The overview refreshes only its session lists: re-rendering the whole
+    // pane every 1.5s would blow away a name the user is mid-way through
+    // typing into the rename field.
+    if (stageView.kind === "project") refreshProjectSessions();
   } catch (e) {
     console.error("poll failed", e);
   }
@@ -816,7 +1436,12 @@ function optionsHtml(pairs) {
   return pairs.map(([v, t]) => `<option value="${v}">${t}</option>`).join("");
 }
 
-async function openLauncher() {
+// The launcher's target picker (§5): a project root, a single repo, or a
+// multi-repo selection. In multi mode the PRIMARY is the topmost checked repo
+// in LIST order, not the first one clicked — the same rule internal/ui's
+// fan-out documents, so the two frontends cannot disagree about which repo a
+// selection means.
+async function openLauncher(preselect) {
   if (document.querySelector(".modal-backdrop")) return; // don't stack modals
   // Append the backdrop synchronously BEFORE any await, so a second rapid click
   // sees it via the guard above and can't stack a duplicate during the load.
@@ -826,8 +1451,19 @@ async function openLauncher() {
     <div class="modal" role="dialog" aria-label="New session">
       <h2>New session</h2>
       <div class="field">
-        <label for="f-project">Project</label>
+        <label>Target</label>
+        <div class="seg" id="f-seg">
+          <button class="seg-b active" data-mode="single">One target</button>
+          <button class="seg-b" data-mode="multi">Several repos</button>
+        </div>
+      </div>
+      <div class="field" id="f-single-field">
+        <label for="f-project">Project or repo</label>
         <select id="f-project"></select>
+      </div>
+      <div class="field" id="f-multi-field" hidden>
+        <label>Repos <span class="f-primary" id="f-primary"></span></label>
+        <div id="f-multi" class="fan-projects"></div>
       </div>
       <div class="field">
         <label for="f-model">Model</label>
@@ -853,28 +1489,72 @@ async function openLauncher() {
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
   backdrop.querySelector("#f-cancel").addEventListener("click", close);
 
-  // Load projects and fill the (already-mounted) select.
-  let projects = [];
+  // Load targets and fill the (already-mounted) controls. The list is ordered
+  // by the Go side; both the select and the checklist keep that order, which
+  // is what makes "topmost checked" a stable, predictable rule.
+  let targets = [];
   try {
-    projects = await window.go.main.App.ListProjects();
+    targets = await window.go.main.App.ListProjects();
   } catch (e) {
     console.error("ListProjects failed", e);
   }
-  backdrop.querySelector("#f-project").innerHTML =
-    projects.map((p) => `<option value="${esc(p.path)}">${esc(p.label)}</option>`).join("");
+  const optLabel = (t) => t.label + (t.isRoot ? " · project root" : "") + (t.missing ? " · missing" : "");
+  backdrop.querySelector("#f-project").innerHTML = targets
+    .map((t) => `<option value="${esc(t.path)}"${t.missing ? " disabled" : ""}${t.path === preselect ? " selected" : ""}>${esc(optLabel(t))}</option>`)
+    .join("");
+  // Missing targets stay listed but non-launchable (§7): they are dimmed here
+  // for the same reason they stay in the rail — so the user can see what to
+  // re-point instead of wondering where a repo went.
+  backdrop.querySelector("#f-multi").innerHTML = targets
+    .map((t) => `<label class="pf-check${t.missing ? " dimmed" : ""}"><input type="checkbox" data-path="${esc(t.path)}"${t.missing ? " disabled" : ""}${t.path === preselect ? " checked" : ""} /><span>${esc(optLabel(t))}</span></label>`)
+    .join("");
+
+  const singleField = backdrop.querySelector("#f-single-field");
+  const multiField = backdrop.querySelector("#f-multi-field");
+  const primaryEl = backdrop.querySelector("#f-primary");
+  let picker = "single";
+
+  // querySelectorAll is document order, so checked[0] IS the topmost checked
+  // row — independent of the order the boxes were toggled in.
+  const checkedPaths = () =>
+    [...backdrop.querySelectorAll("#f-multi input:checked")].map((c) => c.getAttribute("data-path"));
+  const labelFor = (p) => (targets.find((t) => t.path === p) || {}).label || p;
+  const syncPrimary = () => {
+    const c = checkedPaths();
+    primaryEl.textContent = c.length ? `primary: ${labelFor(c[0])}` : "";
+  };
+  backdrop.querySelector("#f-multi").addEventListener("change", syncPrimary);
+  syncPrimary();
+
+  backdrop.querySelector("#f-seg").addEventListener("click", (e) => {
+    const b = e.target.closest(".seg-b");
+    if (!b) return;
+    picker = b.getAttribute("data-mode");
+    backdrop.querySelectorAll(".seg-b").forEach((x) => x.classList.toggle("active", x === b));
+    singleField.hidden = picker !== "single";
+    multiField.hidden = picker !== "multi";
+  });
 
   const launchBtn = backdrop.querySelector("#f-launch");
   launchBtn.addEventListener("click", async () => {
-    const path = backdrop.querySelector("#f-project").value;
     const model = backdrop.querySelector("#f-model").value;
     const mode = backdrop.querySelector("#f-mode").value;
     const seed = backdrop.querySelector("#f-seed").value;
     const errEl = backdrop.querySelector("#f-error");
+    let path, addDirs = [];
+    if (picker === "multi") {
+      const c = checkedPaths();
+      if (!c.length) { errEl.textContent = "Check at least one repo."; return; }
+      path = c[0];
+      addDirs = c.slice(1);
+    } else {
+      path = backdrop.querySelector("#f-project").value;
+    }
     if (!path) { errEl.textContent = "Pick a project to launch."; return; }
     errEl.textContent = "";
     launchBtn.disabled = true;
     try {
-      const name = await window.go.main.App.LaunchSession(path, model, mode, seed);
+      const name = await window.go.main.App.LaunchSession(path, model, mode, seed, addDirs);
       close();
       selectSession(name);
       poll();
@@ -889,10 +1569,21 @@ async function openLauncher() {
 function buildPaletteItems() {
   const items = [
     { label: "New session", hint: "launch", run: () => openLauncher() },
+    { label: "New project", hint: "group repos into an initiative", run: () => openCreateProject() },
     { label: "Fan out to projects", hint: "one prompt · many repos", run: () => openFanout() },
     { label: "Workflows", hint: "runs & definitions", run: () => openWorkflows() },
     { label: "Search history", hint: "find past work", run: () => openSearch() },
   ];
+  // Projects the §6 predicate would show. Hidden ones are deliberately absent:
+  // the palette is an ambient surface and a hidden client's name must not
+  // appear in one. They are reachable only through the explicit gesture below.
+  for (const p of latestProjects) {
+    if (p.ungrouped || !projectVisible(p)) continue;
+    items.push({ label: p.name, hint: "project", run: () => openProject(p.root) });
+  }
+  if (latestProjects.some((p) => p.hidden)) {
+    items.push({ label: "Hidden projects…", hint: "restore one", run: () => openHiddenProjects() });
+  }
   for (const s of latestSessions) {
     items.push({
       label: displayName(s),

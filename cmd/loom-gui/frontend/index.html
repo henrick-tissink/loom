@@ -20,6 +20,9 @@
         <button id="search-btn" title="Search history (/)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
         </button>
+        <!-- Hide/solo chip (§6.4). Permanent rather than a toast: a restart
+             mid-demo that silently revealed a project is the worse failure. -->
+        <button id="hidechip" class="hidechip" title="Hiding is in force"></button>
         <span id="attn" class="attn"></span>
         <button id="new-session" title="New session">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -29,7 +32,10 @@
     </header>
     <main id="body">
       <aside id="rail">
-        <div class="rail-head">Threads</div>
+        <div class="rail-head">
+          <span>Threads</span>
+          <button id="new-project" title="New project">+ New project</button>
+        </div>
         <ul id="threads"></ul>
       </aside>
       <section id="stage"><div id="stage-empty">Select a session, or press + New</div></section>

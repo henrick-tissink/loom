@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/workflow"
 )
@@ -84,11 +85,30 @@ func runStepLabel(defJSON string, stepIdx int64) (label string, count int, defEr
 	return fmt.Sprintf("step %d/%d %s", stepIdx+1, count, name), count, false
 }
 
+// defDirs is every directory a definition names — each step's Project, which
+// LoadAll has already resolved from a label to an absolute path. A definition
+// is attributed by the UNION, not by step 1, for the same reason a run is: a
+// chain that starts in a visible repo and moves into a hidden one would
+// otherwise sit in the list naming the hidden project's work.
+func defDirs(d workflow.Definition) []string {
+	out := make([]string, 0, len(d.Steps))
+	for _, s := range d.Steps {
+		if s.Project != "" {
+			out = append(out, s.Project)
+		}
+	}
+	return out
+}
+
 // defsToDTOs maps loaded definitions to their list view (step-1 project shown
-// as a basename). Pure/testable.
-func defsToDTOs(defs []workflow.Definition) []WorkflowDefDTO {
+// as a basename), dropping the ones §6 hides — the definitions list is its own
+// leak surface, distinct from the runs list. Pure/testable.
+func defsToDTOs(defs []workflow.Definition, res *projects.Resolver) []WorkflowDefDTO {
 	out := make([]WorkflowDefDTO, 0, len(defs))
 	for _, d := range defs {
+		if !visible(res, defDirs(d)...) {
+			continue
+		}
 		proj := ""
 		if len(d.Steps) > 0 && d.Steps[0].Project != "" {
 			proj = filepath.Base(d.Steps[0].Project)
@@ -130,8 +150,30 @@ func (a *App) ListWorkflows() WorkflowsDTO {
 	if a.runner == nil {
 		return WorkflowsDTO{Defs: []WorkflowDefDTO{}, Errors: []LoadErrorDTO{}}
 	}
-	defs, errs := workflow.LoadAll(a.workflowsDir, a.projects)
-	return WorkflowsDTO{Defs: defsToDTOs(defs), Errors: loadErrsToDTOs(errs)}
+	defs, errs := workflow.LoadAll(a.workflowsDir, a.workflowRepos())
+	return WorkflowsDTO{Defs: defsToDTOs(defs, a.resolver()), Errors: loadErrsToDTOs(errs)}
+}
+
+// runDirs is the UNION of every directory a run touches: each step's resolved
+// path from the def_json snapshot, plus the cwd (and add-dirs) of every
+// session the run has actually launched. All derivable — no schema change.
+//
+// Attributing a run to step 1 is wrong (§6.3): a run that has advanced into a
+// hidden repo would keep a visible row naming that project's live session.
+func (a *App) runDirs(run store.RunRow) []string {
+	var out []string
+	var def workflow.Definition
+	if err := json.Unmarshal([]byte(run.DefJSON), &def); err == nil {
+		out = append(out, defDirs(def)...)
+	}
+	if a.st != nil {
+		for _, name := range run.SessionNames {
+			if row, ok, err := a.st.Get(name); err == nil && ok {
+				out = append(out, sessionDirs(row)...)
+			}
+		}
+	}
+	return out
 }
 
 // ListRuns returns the active runs for the RUNS list.
@@ -145,7 +187,11 @@ func (a *App) ListRuns() (out []RunDTO) {
 	if err != nil {
 		return out
 	}
+	res := a.resolver()
 	for _, r := range runs {
+		if !visible(res, a.runDirs(r)...) {
+			continue
+		}
 		out = append(out, a.buildRunDTO(r))
 	}
 	return out
@@ -157,7 +203,7 @@ func (a *App) StartWorkflow(defPath string) (int64, error) {
 	if a.runner == nil {
 		return 0, fmt.Errorf("workflows unavailable")
 	}
-	defs, _ := workflow.LoadAll(a.workflowsDir, a.projects)
+	defs, _ := workflow.LoadAll(a.workflowsDir, a.workflowRepos())
 	for _, d := range defs {
 		if d.Path == defPath {
 			return a.runner.Start(d, launchCols, launchRows, a.now())

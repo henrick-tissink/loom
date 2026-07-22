@@ -74,7 +74,87 @@ func TestShellCommand(t *testing.T) {
 	if got := r.ShellCommand(id); got != want {
 		t.Errorf("ShellCommand = %q, want %q", got, want)
 	}
-	if got := ResumeShellCommand(id); got != "'claude' '--resume' '"+id+"' "+settings {
+	if got := ResumeShellCommand(id, nil); got != "'claude' '--resume' '"+id+"' "+settings {
 		t.Errorf("ResumeShellCommand = %q", got)
+	}
+}
+
+// TestArgvAddDirs pins spec §5's flag shape: one --add-dir per directory,
+// appended after --model/--permission-mode so pre-multi-repo argvs are
+// byte-identical (TestArgv above is the untouched proof of that).
+func TestArgvAddDirs(t *testing.T) {
+	id := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	base := []string{"claude", "--session-id", id, "--settings", `{"theme":"light"}`}
+	with := func(rest ...string) []string { return append(append([]string{}, base...), rest...) }
+	cases := []struct {
+		name string
+		r    Recipe
+		want []string
+	}{
+		{"nil AddDirs unchanged", Recipe{}, base},
+		{"empty AddDirs unchanged", Recipe{AddDirs: []string{}}, base},
+		{"one dir", Recipe{AddDirs: []string{"/w/ballista"}}, with("--add-dir", "/w/ballista")},
+		{"order preserved", Recipe{AddDirs: []string{"/w/b", "/w/a"}},
+			with("--add-dir", "/w/b", "--add-dir", "/w/a")},
+		{"after model and mode", Recipe{Model: "opus", Mode: "plan", AddDirs: []string{"/w/b"}},
+			with("--model", "opus", "--permission-mode", "plan", "--add-dir", "/w/b")},
+		{"empty entries skipped", Recipe{AddDirs: []string{"", "/w/b", ""}}, with("--add-dir", "/w/b")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.r.Argv(id); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("Argv = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// A path with a space or a quote must survive the shell round-trip intact —
+// project directories under "~/My Repos" are ordinary, and a broken quote
+// would silently split one --add-dir into two bogus arguments.
+func TestShellCommandAddDirsQuoting(t *testing.T) {
+	id := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	settings := `'--settings' '{"theme":"light"}'`
+	r := Recipe{AddDirs: []string{"/w/My Repos/a", "/w/it's"}}
+	want := "'claude' '--session-id' '" + id + "' " + settings +
+		` '--add-dir' '/w/My Repos/a' '--add-dir' '/w/it'\''s'`
+	if got := r.ShellCommand(id); got != want {
+		t.Errorf("ShellCommand = %q,\n            want %q", got, want)
+	}
+	rwant := "'claude' '--resume' '" + id + "' " + settings + ` '--add-dir' '/w/My Repos/a'`
+	if got := ResumeShellCommand(id, []string{"/w/My Repos/a"}); got != rwant {
+		t.Errorf("ResumeShellCommand = %q, want %q", got, rwant)
+	}
+	if got := ResumeShellCommand(id, nil); got != "'claude' '--resume' '"+id+"' "+settings {
+		t.Errorf("ResumeShellCommand(nil dirs) = %q, want the pre-multi-repo shape", got)
+	}
+}
+
+func TestEncodeDecodeAddDirs(t *testing.T) {
+	cases := []struct {
+		name    string
+		dirs    []string
+		encoded string
+		decoded []string
+	}{
+		{"none", nil, "", nil},
+		{"empty slice encodes as the v8 default", []string{}, "", nil},
+		{"two", []string{"/w/a", "/w/b"}, `["/w/a","/w/b"]`, []string{"/w/a", "/w/b"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := EncodeAddDirs(c.dirs); got != c.encoded {
+				t.Fatalf("EncodeAddDirs = %q, want %q", got, c.encoded)
+			}
+			if got := DecodeAddDirs(c.encoded); !reflect.DeepEqual(got, c.decoded) {
+				t.Fatalf("DecodeAddDirs(%q) = %v, want %v", c.encoded, got, c.decoded)
+			}
+		})
+	}
+	// A corrupt column must degrade to single-repo, never block a resume.
+	for _, bad := range []string{"not json", `{"a":1}`, `[`, "   "} {
+		if got := DecodeAddDirs(bad); got != nil {
+			t.Errorf("DecodeAddDirs(%q) = %v, want nil", bad, got)
+		}
 	}
 }

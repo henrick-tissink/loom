@@ -120,6 +120,66 @@ func (s *Store) migrate() error {
 		// usable FTS expression or zero hits qualify. IF NOT EXISTS for the
 		// same re-entrancy reason as v4/v5.
 		`CREATE INDEX IF NOT EXISTS idx_transcripts_project ON transcripts(project_dir, last_ts)`,
+		// v7: projects (spec docs/superpowers/specs/
+		// 2026-07-22-projects-foundation-design.md §7) — a project is a named
+		// set of repos plus a root directory, orthogonal to a repo. root is the
+		// PK because attribution (§4) is a longest-prefix match over
+		// {projects.root} ∪ {project_repos.path}; project_repos.path is a PK
+		// because §2's exclusivity ("one repo belongs to exactly one project")
+		// is enforced by the schema rather than by every writer remembering to.
+		// The partial unique index is what makes "at most one project is solo"
+		// a database fact — solo lives here and not in a GUI settings file so
+		// the TUI reads the same flag off the same DB (§6.1).
+		// IF NOT EXISTS for the same re-entrancy reason as v4/v5/v6.
+		//
+		// Ungrouped is seeded here as a reserved row rather than computed as a
+		// bucket: §6's visibility predicate keys on project rows, and a
+		// computed bucket forces a second branch into every surface — a
+		// surface that forgets one still passes its test. root='' is chosen so
+		// it can never win §4's longest-prefix match (the resolver excludes it
+		// explicitly; an empty root would otherwise prefix everything).
+		`CREATE TABLE IF NOT EXISTS projects (
+			root       TEXT PRIMARY KEY,
+			name       TEXT NOT NULL,
+			origin     TEXT NOT NULL,
+			hidden     INTEGER NOT NULL DEFAULT 0,
+			solo       INTEGER NOT NULL DEFAULT 0,
+			missing    INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_solo ON projects(solo) WHERE solo = 1;
+		CREATE TABLE IF NOT EXISTS project_repos (
+			path         TEXT PRIMARY KEY,
+			project_root TEXT NOT NULL,
+			label        TEXT NOT NULL,
+			missing      INTEGER NOT NULL DEFAULT 0,
+			added_at     INTEGER NOT NULL
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_project_repos_label ON project_repos(label);
+		CREATE INDEX IF NOT EXISTS idx_project_repos_project ON project_repos(project_root);
+		INSERT OR IGNORE INTO projects (root, name, origin, hidden, solo, missing, created_at, updated_at)
+			VALUES ('', 'Ungrouped', 'reserved', 0, 0, 0, strftime('%s','now'), strftime('%s','now'))`,
+		// v8: multi-repo launch (§5). add_dirs is a JSON array of the extra
+		// directories passed as `--add-dir` at launch; without persisting it a
+		// resumed multi-repo session silently comes back seeing one repo, and
+		// the failure only surfaces when a sibling write fails mid-turn.
+		//
+		// This ALTER gets its OWN migration slot, never folded into v7: ALTER
+		// TABLE has no IF NOT EXISTS, so bundling it would make the whole v7
+		// slot non-re-entrant and a replay from a stale user_version (§9)
+		// would fail on the ALTER even though every CREATE beside it is
+		// idempotent. Same standalone-ALTER shape as v2/v3.
+		`ALTER TABLE sessions ADD COLUMN add_dirs TEXT NOT NULL DEFAULT ''`,
+		// v9: rail collapse state (§8). It lives here beside hidden/solo rather
+		// than in a GUI settings file or localStorage, for the same reason solo
+		// does: §8 says "alongside the other project flags, not in a third
+		// store", and a third store is where the two frontends start
+		// disagreeing about the same project.
+		//
+		// Own slot, again because ALTER is not re-entrant — folding it into v7
+		// would break a replay from a stale user_version even though every
+		// CREATE in that slot is idempotent.
+		`ALTER TABLE projects ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {
@@ -127,6 +187,23 @@ func (s *Store) migrate() error {
 		}
 	}
 	return nil
+}
+
+// isStandaloneAddColumn reports whether a migration slot is exactly one
+// `ALTER TABLE <t> ADD [COLUMN] …` — the only shape whose "already applied"
+// error is safe to swallow (see applyMigration).
+//
+// Deliberately conservative: anything with a second statement, an embedded
+// newline, or an unexpected word order answers false, and false only means the
+// error surfaces as a migration failure. A false POSITIVE is the dangerous
+// direction, because it would let a partially-applied slot commit.
+func isStandaloneAddColumn(ddl string) bool {
+	s := strings.TrimSuffix(strings.TrimSpace(ddl), ";")
+	if strings.ContainsAny(s, ";\n") {
+		return false
+	}
+	f := strings.Fields(strings.ToUpper(s))
+	return len(f) >= 5 && f[0] == "ALTER" && f[1] == "TABLE" && f[3] == "ADD"
 }
 
 // applyMigration runs one migration's DDL and its user_version bump inside a
@@ -145,7 +222,25 @@ func (s *Store) applyMigration(version int, ddl string) (err error) {
 		}
 	}()
 	if _, err = tx.Exec(ddl); err != nil {
-		return fmt.Errorf("migration %d: %w", version, err)
+		// A replay from a stale user_version (see TestMigrationsAreTransactional)
+		// re-runs DDL that is already applied. Every CREATE carries IF NOT
+		// EXISTS; ALTER TABLE ADD COLUMN has no such clause, so its
+		// already-applied signal is this error, and re-adding a column that
+		// exists is semantically a no-op — swallow it and bump the version
+		// rather than bricking Open().
+		//
+		// Gated on the slot being a STANDALONE ALTER rather than applied to
+		// every migration: in a multi-statement slot the same swallow would
+		// commit a half-applied migration, silently stranding every statement
+		// after the failing one and bumping user_version over the damage. That
+		// is exactly the failure applyMigration's single transaction exists to
+		// prevent, so the exemption is scoped to the one statement shape whose
+		// re-run is provably a no-op — which is also why the house rule keeps
+		// each ALTER alone in its slot (v2/v3/v8/v9).
+		if !(isStandaloneAddColumn(ddl) && strings.Contains(err.Error(), "duplicate column name")) {
+			return fmt.Errorf("migration %d: %w", version, err)
+		}
+		err = nil
 	}
 	if _, err = tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
 		return fmt.Errorf("migration %d: pragma user_version: %w", version, err)
@@ -168,13 +263,19 @@ type SessionRow struct {
 	LastStatus      string
 	SeedStatus      string // '', 'sent', 'failed' — see migration v2
 	Title           string // ai-generated session title — see migration v3
+	// AddDirs is a JSON array of extra directories the session was launched
+	// with (`--add-dir`), '' when there are none — see migration v8. Kept as
+	// the raw JSON string, not []string, so SessionRow stays comparable and
+	// the store stays a dumb pipe (the same discipline as workflow_runs.
+	// session_names, whose invariants the runner owns).
+	AddDirs string
 }
 
-const cols = "name, claude_session_id, project_label, cwd, model, mode, seed, tags, created_at, ended_at, exit_code, last_status, seed_status, title"
+const cols = "name, claude_session_id, project_label, cwd, model, mode, seed, tags, created_at, ended_at, exit_code, last_status, seed_status, title, add_dirs"
 
 func (s *Store) Upsert(r SessionRow) error {
 	_, err := s.db.Exec(`INSERT INTO sessions (`+cols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET
 			claude_session_id=excluded.claude_session_id,
 			project_label=excluded.project_label, cwd=excluded.cwd,
@@ -182,9 +283,10 @@ func (s *Store) Upsert(r SessionRow) error {
 			tags=excluded.tags, created_at=excluded.created_at,
 			ended_at=excluded.ended_at, exit_code=excluded.exit_code,
 			last_status=excluded.last_status, seed_status=excluded.seed_status,
-			title=excluded.title`,
+			title=excluded.title, add_dirs=excluded.add_dirs`,
 		r.Name, r.ClaudeSessionID, r.ProjectLabel, r.Cwd, r.Model, r.Mode,
-		r.Seed, r.Tags, r.CreatedAt, r.EndedAt, r.ExitCode, r.LastStatus, r.SeedStatus, r.Title)
+		r.Seed, r.Tags, r.CreatedAt, r.EndedAt, r.ExitCode, r.LastStatus, r.SeedStatus,
+		r.Title, r.AddDirs)
 	return err
 }
 
@@ -227,6 +329,33 @@ func (s *Store) SetTags(name, tags string) error {
 
 func (s *Store) Get(name string) (SessionRow, bool, error) {
 	r, err := scanOne(s.db.QueryRow("SELECT "+cols+" FROM sessions WHERE name=?", name))
+	if err == sql.ErrNoRows {
+		return SessionRow{}, false, nil
+	}
+	return r, err == nil, err
+}
+
+// GetByClaudeSessionID finds the loom row behind a claude conversation id.
+// Search results carry only the conversation id and a cwd, so without this
+// lookup a search-resume has to synthesise a row — and a synthesised row has
+// an empty AddDirs, silently bringing a multi-repo session back single-repo
+// (spec §5 names search-resume as one of the three reachable resume paths).
+//
+// claude_session_id is NOT unique: every Resume writes a NEW sessions row
+// carrying the same conversation id, so a conversation resumed twice has three
+// rows. The newest wins — it holds the add-dir set Resume last filtered to
+// still-existing directories, so a repo that vanished stays vanished instead
+// of being resurrected from the original launch row.
+//
+// The empty id is refused rather than matched: rows acquire their id
+// asynchronously from the transcript, so an empty id would match every session
+// that has not been correlated yet.
+func (s *Store) GetByClaudeSessionID(id string) (SessionRow, bool, error) {
+	if id == "" {
+		return SessionRow{}, false, nil
+	}
+	r, err := scanOne(s.db.QueryRow("SELECT "+cols+
+		" FROM sessions WHERE claude_session_id=? ORDER BY created_at DESC LIMIT 1", id))
 	if err == sql.ErrNoRows {
 		return SessionRow{}, false, nil
 	}
@@ -330,7 +459,7 @@ func (s *Store) query(q string, args ...any) ([]SessionRow, error) {
 		var r SessionRow
 		if err := rows.Scan(&r.Name, &r.ClaudeSessionID, &r.ProjectLabel, &r.Cwd,
 			&r.Model, &r.Mode, &r.Seed, &r.Tags, &r.CreatedAt, &r.EndedAt,
-			&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title); err != nil {
+			&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title, &r.AddDirs); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -344,6 +473,6 @@ func scanOne(row rowScanner) (SessionRow, error) {
 	var r SessionRow
 	err := row.Scan(&r.Name, &r.ClaudeSessionID, &r.ProjectLabel, &r.Cwd,
 		&r.Model, &r.Mode, &r.Seed, &r.Tags, &r.CreatedAt, &r.EndedAt,
-		&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title)
+		&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title, &r.AddDirs)
 	return r, err
 }

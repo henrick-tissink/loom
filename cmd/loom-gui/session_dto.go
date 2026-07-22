@@ -1,32 +1,49 @@
 package main
 
 import (
+	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 )
 
 // SessionDTO is the flat, JSON-friendly view of a live session the frontend renders.
+// ProjectRoot/ProjectName are SERVER-COMPUTED attribution (§4): the rail
+// groups by them. Project stays what it always was — ProjectLabel, a display
+// string — and is never an attribution input: it is filepath.Base(cwd) for
+// adopted orphans, so two same-basename repos in different projects are
+// indistinguishable through it, which the multi-repo model makes routine.
 type SessionDTO struct {
-	Name      string `json:"name"`
-	Project   string `json:"project"`
-	Title     string `json:"title"`
-	Status    string `json:"status"` // running | needs_you | idle | done | error | unknown
-	CtxTokens int64  `json:"ctxTokens"` // approx context tokens in the last turn; 0 = unknown
-	LastTool  string `json:"lastTool"`  // tool the session is currently running, if any
+	Name        string `json:"name"`
+	Project     string `json:"project"`
+	ProjectRoot string `json:"projectRoot"`
+	ProjectName string `json:"projectName"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`    // running | needs_you | idle | done | error | unknown
+	CtxTokens   int64  `json:"ctxTokens"` // approx context tokens in the last turn; 0 = unknown
+	LastTool    string `json:"lastTool"`  // tool the session is currently running, if any
 }
 
-// snapshotToDTOs flattens a status.Snapshot's live rows into SessionDTOs.
-// Always returns a non-nil slice so it marshals to [] rather than null.
-func snapshotToDTOs(s status.Snapshot) []SessionDTO {
+// snapshotToDTOs flattens a status.Snapshot's live rows into SessionDTOs,
+// dropping the rows §6 hides — the rail is leak surface 1. Filtering happens
+// HERE rather than in the engine: the engine keeps polling and transitioning
+// hidden sessions (§6.2a), it just stops being rendered. A nil resolver means
+// nothing is hidden. Always returns a non-nil slice so it marshals to [].
+func snapshotToDTOs(s status.Snapshot, res *projects.Resolver) []SessionDTO {
 	out := make([]SessionDTO, 0, len(s.Live))
 	for _, r := range s.Live {
+		if !visible(res, sessionDirs(r.SessionRow)...) {
+			continue
+		}
+		at := attribute(res, r.Cwd)
 		out = append(out, SessionDTO{
-			Name:      r.Name,
-			Project:   r.ProjectLabel,
-			Title:     r.Title,
-			Status:    string(r.Status),
-			CtxTokens: r.CtxTokens,
-			LastTool:  r.LastTool,
+			Name:        r.Name,
+			Project:     r.ProjectLabel,
+			ProjectRoot: at.Root,
+			ProjectName: at.Name,
+			Title:       r.Title,
+			Status:      string(r.Status),
+			CtxTokens:   r.CtxTokens,
+			LastTool:    r.LastTool,
 		})
 	}
 	return out
@@ -35,23 +52,29 @@ func snapshotToDTOs(s status.Snapshot) []SessionDTO {
 // FinishedDTO is the flat view of a finished (ended) session for the rail's
 // Finished group — resumable and dismissable.
 type FinishedDTO struct {
-	Name    string `json:"name"`
-	Project string `json:"project"`
-	Title   string `json:"title"`
-	Status  string `json:"status"` // done | error
-	EndedAt int64  `json:"endedAt"`
-	Summary string `json:"summary"` // stored LLM summary, or "" if none yet
+	Name        string `json:"name"`
+	Project     string `json:"project"`
+	ProjectRoot string `json:"projectRoot"`
+	ProjectName string `json:"projectName"`
+	Title       string `json:"title"`
+	Status      string `json:"status"` // done | error
+	EndedAt     int64  `json:"endedAt"`
+	Summary     string `json:"summary"` // stored LLM summary, or "" if none yet
 }
 
 // recentToDTOs maps store rows to FinishedDTOs, skipping still-live rows
 // (EndedAt < 0) and deriving done/error from the exit code. summaryFor (may be
 // nil) supplies each row's stored LLM summary by claude session id. Non-nil
-// slice.
-func recentToDTOs(rows []store.SessionRow, summaryFor func(string) string) []FinishedDTO {
+// slice. res (may be nil) applies §6's visibility predicate — the Finished
+// list is leak surface 2; the caller over-fetches and trims after this.
+func recentToDTOs(rows []store.SessionRow, summaryFor func(string) string, res *projects.Resolver) []FinishedDTO {
 	out := make([]FinishedDTO, 0, len(rows))
 	for _, r := range rows {
 		if r.EndedAt < 0 {
 			continue // still live — belongs in the live rail, not Finished
+		}
+		if !visible(res, sessionDirs(r)...) {
+			continue
 		}
 		st := "done"
 		if r.ExitCode > 0 {
@@ -61,8 +84,10 @@ func recentToDTOs(rows []store.SessionRow, summaryFor func(string) string) []Fin
 		if summaryFor != nil {
 			summary = summaryFor(r.ClaudeSessionID)
 		}
+		at := attribute(res, r.Cwd)
 		out = append(out, FinishedDTO{
 			Name: r.Name, Project: r.ProjectLabel, Title: r.Title,
+			ProjectRoot: at.Root, ProjectName: at.Name,
 			Status: st, EndedAt: r.EndedAt, Summary: summary,
 		})
 	}

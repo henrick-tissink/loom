@@ -33,11 +33,21 @@ type Snapshot struct {
 	Live   []Row
 	Recent []store.SessionRow
 
-	// NewlyNeedsYou lists "project · title" labels for sessions that flipped
-	// to NeedsYou on THIS poll (last_status != needs_you && new == needs_you).
-	// Computed before SetStatus persists the new status, so the once-only
-	// property holds naturally: the next poll observes LastStatus already
-	// needs_you and doesn't re-fire.
+	// NewlyNeedsYou lists the SESSION NAMES (the store PK, and this engine's
+	// own identity key) of sessions that flipped to NeedsYou on THIS poll
+	// (last_status != needs_you && new == needs_you). Computed before
+	// SetStatus persists the new status, so the once-only property holds
+	// naturally: the next poll observes LastStatus already needs_you and
+	// doesn't re-fire.
+	//
+	// Names, not pre-rendered "ProjectLabel · Title" strings (spec §4): a
+	// label cannot be attributed back to anything, because ProjectLabel is
+	// filepath.Base(cwd) for adopted orphans — two same-basename repos in
+	// different directories collide, which the multi-repo model makes
+	// routine. Consumers join against Live (same snapshot, same poll — every
+	// name here is present there) to recover cwd and label, and render the
+	// display string themselves. This keeps the engine ignorant of projects
+	// (§6.2a); it reports identity, not grouping.
 	NewlyNeedsYou []string
 }
 
@@ -178,11 +188,7 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 		paneActive := now.Unix()-activity[r.Name] <= int64(activeWindow/time.Second)
 		st := Fuse(rs.State, paneActive)
 		if st == NeedsYou && r.LastStatus != string(NeedsYou) {
-			label := r.ProjectLabel
-			if r.Title != "" {
-				label += " · " + r.Title
-			}
-			newly = append(newly, label)
+			newly = append(newly, r.Name)
 		}
 		if string(st) != r.LastStatus {
 			_ = e.st.SetStatus(r.Name, string(st))

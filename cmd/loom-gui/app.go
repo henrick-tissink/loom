@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/henricktissink/loom/internal/memory"
-	"github.com/henricktissink/loom/internal/registry"
+	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
@@ -21,19 +21,31 @@ import (
 // App is the Go↔JS bridge. It owns no orchestration logic beyond the PTY
 // registry; session state comes from the shared engine.
 type App struct {
-	ctx      context.Context
-	engine   *status.Engine
-	tm       *tmux.Client
-	st       *store.Store
-	launcher *session.Launcher
-	projects []registry.Project
-	now        func() time.Time
-	reg        *ptyRegistry
-	notifier   *notifier
+	ctx          context.Context
+	engine       *status.Engine
+	tm           *tmux.Client
+	st           *store.Store
+	launcher     *session.Launcher
+	now          func() time.Time
+	reg          *ptyRegistry
+	notifier     *notifier
 	settings     *settingsStore
 	summarizer   *memory.Summarizer
 	runner       *workflow.Runner
 	workflowsDir string
+
+	// projects is the runtime source of truth for launch targets and for §6's
+	// visibility predicate, queried read-through. It replaced a by-value
+	// registry.Discover snapshot taken at startup, which is why a project
+	// created in-app used to be listed but not launchable (§7).
+	projects *projects.Service
+
+	// lastRes is the last resolver a read actually succeeded in building. It
+	// is what a failed read falls back to, so a transient DB error cannot
+	// un-hide a project mid-screen-share (see resolver()). Guarded because the
+	// poll loop and the bound methods both call resolver().
+	resMu   sync.Mutex
+	lastRes *projects.Resolver
 
 	// auto-summarize guards: sumTried marks sessions already attempted this
 	// process (so a failed/empty summary isn't retried forever); sumBusy keeps
@@ -43,8 +55,8 @@ type App struct {
 	sumBusy  bool
 }
 
-func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, projects []registry.Project, now func() time.Time) *App {
-	a := &App{engine: engine, tm: tm, st: st, launcher: launcher, projects: projects, now: now, notifier: newNotifier()}
+func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {
+	a := &App{engine: engine, tm: tm, st: st, launcher: launcher, projects: svc, now: now, notifier: newNotifier()}
 	// Until startup() wires the real emitter, events go nowhere (safe for tests).
 	a.reg = newPTYRegistry(
 		func(name string) *exec.Cmd { return tm.AttachCmd(name) },
@@ -72,27 +84,26 @@ func (a *App) ListSessions() (out []SessionDTO) {
 	if err != nil {
 		return out
 	}
-	out = snapshotToDTOs(snap)
-	a.onSnapshot(snap, out)
+	// One resolver per poll, shared by the rail rows and by the notification
+	// join below, so the two can never disagree about what is hidden.
+	res := a.resolver()
+	out = snapshotToDTOs(snap, res)
+	a.onSnapshot(snap, out, res)
 	return out
 }
 
 // onSnapshot runs the attention side effects of a poll: a native notification
 // for sessions that just flipped to needs-you (once-only, from the engine),
 // and the window title reflecting the current needs-you count.
-func (a *App) onSnapshot(snap status.Snapshot, dtos []SessionDTO) {
+func (a *App) onSnapshot(snap status.Snapshot, dtos []SessionDTO, res *projects.Resolver) {
 	if a.notifier != nil && (a.settings == nil || a.settings.get().Notifications) {
-		a.notifier.needsYou(snap.NewlyNeedsYou)
+		labels, suppressed := needsYouLabels(snap, res)
+		a.notifier.needsYou(labels, suppressed)
 	}
 	if a.ctx == nil {
 		return
 	}
-	n := 0
-	for _, d := range dtos {
-		if d.Status == "needs_you" {
-			n++
-		}
-	}
+	n := needsYouCount(dtos)
 	title := "loom"
 	if n > 0 {
 		title = fmt.Sprintf("loom — %d need you", n)
@@ -102,21 +113,37 @@ func (a *App) onSnapshot(snap status.Snapshot, dtos []SessionDTO) {
 	setDockBadge(n)
 }
 
-// ListProjects returns the workspace projects discovered at startup.
-func (a *App) ListProjects() []ProjectDTO { return projectsToDTOs(a.projects) }
+// needsYouCount is the badge/title number. It counts the DTOs, which are
+// already §6-filtered, so hiding a project takes its attention count with it —
+// the count is a listed leak surface (§6.3): "3 need you" over a two-session
+// demo names a project the user just put out of view.
+func needsYouCount(dtos []SessionDTO) int {
+	n := 0
+	for _, d := range dtos {
+		if d.Status == "needs_you" {
+			n++
+		}
+	}
+	return n
+}
+
+// ListProjects is the launcher's target picker: project roots ∪ repo paths
+// from loom.db (§7), not the startup discovery snapshot. The bound method name
+// is the frontend's contract and is left alone.
+func (a *App) ListProjects() []ProjectDTO { return targetsToDTOs(a.visibleTargets()) }
 
 // LaunchSession starts a new claude session from the form inputs and returns
-// its tmux session name. The session then appears in the next poll; the
-// frontend auto-attaches it.
-func (a *App) LaunchSession(projectPath, model, mode, seed string) (string, error) {
+// its tmux session name. addDirs carries §5's scoped multi-repo shape: cwd is
+// the primary repo, addDirs the other selected ones.
+func (a *App) LaunchSession(repoPath, model, mode, seed string, addDirs []string) (string, error) {
 	if a.launcher == nil {
 		return "", fmt.Errorf("launcher unavailable")
 	}
-	r, err := buildRecipe(a.projects, projectPath, model, mode, seed)
+	r, err := buildRecipe(a.launchableTargets(), repoPath, model, mode, seed, addDirs)
 	if err != nil {
 		return "", err
 	}
-	return a.launcher.Launch(r, 120, 32, a.now())
+	return a.launcher.Launch(r, launchCols, launchRows, a.now())
 }
 
 func (a *App) AttachSession(name string) error {
@@ -125,7 +152,7 @@ func (a *App) AttachSession(name string) error {
 	}
 	return a.reg.attach(name)
 }
-func (a *App) SendInput(name, data string)     { _ = a.reg.send(name, data) }
+func (a *App) SendInput(name, data string) { _ = a.reg.send(name, data) }
 
 // SendReply types a line into a live session and presses Enter — triage from
 // the rail without full-screen attaching. Best-effort; only meaningful for a
@@ -147,6 +174,16 @@ func (a *App) ResizeSession(name string, cols, rows int) {
 }
 func (a *App) CloseSession(name string) { a.reg.close(name) }
 
+// recentLimit is how many finished sessions the Finished group shows;
+// recentFetch is what we ask the store for so that filtering hidden projects
+// out (§6.3) still leaves a full page. The multiplier is a judgement call, not
+// a guarantee — a user with one visible project among many still sees a short
+// list, which is correct: there is nothing else to show.
+const (
+	recentLimit = 30
+	recentFetch = recentLimit * 4
+)
+
 // ListRecent returns the most recent finished sessions for the Finished group,
 // each annotated with its stored LLM summary (when one exists).
 func (a *App) ListRecent() []FinishedDTO {
@@ -155,12 +192,23 @@ func (a *App) ListRecent() []FinishedDTO {
 	if a.st == nil {
 		return out
 	}
-	rows, err := a.st.Recent(30)
+	// Over-fetch, then filter, then trim (the memory/recall.go pattern). The
+	// LIMIT is applied in SQL, so filtering after the cap would silently
+	// shorten the Finished list — badly under solo, where most of a page can
+	// belong to other projects. The predicate cannot be pushed into SQL: a
+	// LIKE join cannot express longest-prefix, and Recent also feeds
+	// Engine.Poll, which must stay project-blind (§6.2a).
+	rows, err := a.st.Recent(recentFetch)
 	if err != nil {
 		return out
 	}
-	a.maybeAutoSummarize(rows)
-	return recentToDTOs(rows, a.summaryFor)
+	res := a.resolver()
+	a.maybeAutoSummarize(rows, res)
+	out = recentToDTOs(rows, a.summaryFor, res)
+	if len(out) > recentLimit {
+		out = out[:recentLimit]
+	}
+	return out
 }
 
 // summaryFor returns the stored LLM summary for a claude session id, or "".
@@ -195,7 +243,7 @@ func (a *App) SummarizeSession(name string) (string, error) {
 // finished session per call in the background — at most one at a time, each
 // session attempted once per process — so the Finished list fills in over
 // time without a burst of claude calls.
-func (a *App) maybeAutoSummarize(rows []store.SessionRow) {
+func (a *App) maybeAutoSummarize(rows []store.SessionRow, res *projects.Resolver) {
 	if a.summarizer == nil || a.settings == nil || !a.settings.get().AutoSummarize {
 		return
 	}
@@ -211,6 +259,15 @@ func (a *App) maybeAutoSummarize(rows []store.SessionRow) {
 		id := r.ClaudeSessionID
 		if id == "" || a.sumTried[id] || r.EndedAt < 0 {
 			continue // no id, already attempted, or still live
+		}
+		if !visible(res, sessionDirs(r)...) {
+			// §6.2b: hiding suppresses new Loom-initiated background work.
+			// This runs on raw store rows before DTO mapping, so without the
+			// check we'd spend claude quota summarizing the project the user
+			// just put out of view. Skipped WITHOUT marking sumTried —
+			// marking it is per-process and unhiding would never re-enable
+			// the summary.
+			continue
 		}
 		if a.summaryFor(id) != "" {
 			a.sumTried[id] = true // already summarized

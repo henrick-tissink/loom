@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,5 +253,250 @@ func TestResumePreservesSessionIDNoGoroutineCorrection(t *testing.T) {
 	if row.ClaudeSessionID != old.ClaudeSessionID {
 		t.Fatalf("ClaudeSessionID changed immediately after Resume (unexpected async correction): got %q, want %q",
 			row.ClaudeSessionID, old.ClaudeSessionID)
+	}
+}
+
+// TestWaitReadyBoundsTrustPendingWait guards spec §12's first defect: the
+// trust branch used to `continue` without advancing any clock, so a dialog
+// nobody answered pinned the goroutine forever and seedWhenReady never
+// recorded an outcome. TrustTimeout is that bound; without it this test hangs
+// until the package test binary's own timeout.
+func TestWaitReadyBoundsTrustPendingWait(t *testing.T) {
+	l, dir := testLauncher(t)
+	l.ReadyTimeout = 10 * time.Second // deliberately long: the trust bound must be what fires
+	l.TrustTimeout = 300 * time.Millisecond
+	l.PollEvery = 50 * time.Millisecond
+
+	id := NewSessionID()
+	name := TmuxName(id)
+	// A pane that shows the trust dialog and never advances past it.
+	if err := l.Tmux.NewSession(name, dir,
+		`sh -c 'echo "Do you trust the files in this folder?"; sleep 60'`, 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Store.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id,
+		ProjectLabel: "p", Cwd: dir, CreatedAt: 1, EndedAt: -1, ExitCode: -1,
+		LastStatus: "unknown"}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan bool, 1)
+	go func() { done <- l.waitReady(name) }()
+	select {
+	case ready := <-done:
+		if ready {
+			t.Fatal("waitReady = true with the trust dialog still showing")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitReady never returned: trust-pending wait is unbounded (spec §12)")
+	}
+
+	// And the seed's outcome must land as 'failed' rather than staying in limbo.
+	l.seedWhenReady(name, "never sent")
+	row, ok, err := l.Store.Get(name)
+	if err != nil || !ok {
+		t.Fatalf("Store.Get(%q) = %v, %v, %v", name, row, ok, err)
+	}
+	if row.SeedStatus != "failed" {
+		t.Fatalf("SeedStatus = %q, want failed", row.SeedStatus)
+	}
+}
+
+// TestLaunchRejectsUnusableDirs guards spec §12's second defect: `tmux
+// new-session -c <nonexistent>` exits 0 and silently starts the pane in $HOME,
+// so a stale path would otherwise run a real agent against the wrong tree.
+func TestLaunchRejectsUnusableDirs(t *testing.T) {
+	l, dir := testLauncher(t)
+	file := filepath.Join(dir, "a-file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(dir, "vanished")
+
+	cases := []struct {
+		name string
+		r    Recipe
+	}{
+		{"missing cwd", Recipe{ProjectLabel: "p", Cwd: gone}},
+		{"empty cwd", Recipe{ProjectLabel: "p"}},
+		{"cwd is a file", Recipe{ProjectLabel: "p", Cwd: file}},
+		{"missing add-dir", Recipe{ProjectLabel: "p", Cwd: dir, AddDirs: []string{gone}}},
+		{"add-dir is a file", Recipe{ProjectLabel: "p", Cwd: dir, AddDirs: []string{file}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			before, err := l.Tmux.ListSessions()
+			if err != nil {
+				t.Fatal(err)
+			}
+			name, err := l.Launch(c.r, 80, 24, time.Now())
+			if err == nil {
+				t.Fatalf("Launch(%+v) = %q, nil; want an error", c.r, name)
+			}
+			if name != "" {
+				t.Fatalf("Launch returned a session name %q on a rejected launch", name)
+			}
+			after, err := l.Tmux.ListSessions()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(after) != len(before) {
+				t.Fatalf("tmux sessions %d → %d: a rejected launch must create none", len(before), len(after))
+			}
+			if rows, err := l.Store.Live(); err == nil && len(rows) != 0 {
+				t.Fatalf("rejected launch wrote %d rows", len(rows))
+			}
+		})
+	}
+}
+
+// TestLaunchPersistsAddDirsAndResumeRoundTrips is the §5 end-to-end: the
+// launch argv carries --add-dir, the row carries the JSON, and the resumed
+// session's argv carries the same dirs (--resume does not restore them, so
+// dropping them here is exactly the invisible single-repo regression §5
+// describes).
+func TestLaunchPersistsAddDirsAndResumeRoundTrips(t *testing.T) {
+	l, dir := testLauncher(t)
+	sib1, sib2 := filepath.Join(dir, "sib1"), filepath.Join(dir, "sib2")
+	for _, d := range []string{sib1, sib2} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := Recipe{ProjectLabel: "p", Cwd: dir, Model: "opus", AddDirs: []string{sib1, sib2}}
+	name, err := l.Launch(r, 80, 24, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, ok, _ := l.Store.Get(name)
+	if !ok {
+		t.Fatal("no row")
+	}
+	if want := `["` + sib1 + `","` + sib2 + `"]`; row.AddDirs != want {
+		t.Fatalf("row.AddDirs = %q, want %q", row.AddDirs, want)
+	}
+
+	row.EndedAt, row.ExitCode, row.LastStatus = 5, 0, "done"
+	if err := l.Store.Upsert(row); err != nil {
+		t.Fatal(err)
+	}
+	rname, err := l.Resume(row, 80, 24, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rrow, ok, _ := l.Store.Get(rname)
+	if !ok || rrow.AddDirs != row.AddDirs {
+		t.Fatalf("resumed row.AddDirs = %q, want %q", rrow.AddDirs, row.AddDirs)
+	}
+	cmd := ResumeShellCommand(rrow.ClaudeSessionID, DecodeAddDirs(rrow.AddDirs))
+	for _, d := range []string{sib1, sib2} {
+		if !strings.Contains(cmd, "'--add-dir' '"+d+"'") {
+			t.Fatalf("resume command lost %q: %s", d, cmd)
+		}
+	}
+}
+
+// TestResumeFiltersVanishedAddDirs: a moved repo degrades to a session that
+// visibly no longer lists it, rather than failing the resume outright or
+// re-passing a path claude would reject.
+func TestResumeFiltersVanishedAddDirs(t *testing.T) {
+	l, dir := testLauncher(t)
+	alive := filepath.Join(dir, "alive")
+	if err := os.Mkdir(alive, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(dir, "moved-away")
+
+	old := store.SessionRow{Name: "loom-old3", ClaudeSessionID: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+		ProjectLabel: "p", Cwd: dir, AddDirs: `["` + alive + `","` + gone + `"]`,
+		CreatedAt: 1, EndedAt: 5, ExitCode: 0, LastStatus: "done"}
+	if err := l.Store.Upsert(old); err != nil {
+		t.Fatal(err)
+	}
+	name, err := l.Resume(old, 80, 24, time.Now())
+	if err != nil {
+		t.Fatalf("Resume = %v; a vanished add-dir must degrade, not fail the resume", err)
+	}
+	row, ok, _ := l.Store.Get(name)
+	if !ok {
+		t.Fatal("no resumed row")
+	}
+	if want := `["` + alive + `"]`; row.AddDirs != want {
+		t.Fatalf("resumed AddDirs = %q, want %q (vanished dir dropped)", row.AddDirs, want)
+	}
+}
+
+// TestResumeRejectsVanishedCwd: unlike an add-dir, the primary repo cannot be
+// dropped — tmux would silently start the agent in $HOME.
+func TestResumeRejectsVanishedCwd(t *testing.T) {
+	l, dir := testLauncher(t)
+	old := store.SessionRow{Name: "loom-old4", ClaudeSessionID: "abababab-abab-abab-abab-abababababab",
+		ProjectLabel: "p", Cwd: filepath.Join(dir, "gone"), CreatedAt: 1, EndedAt: 5,
+		ExitCode: 0, LastStatus: "done"}
+	if _, err := l.Resume(old, 80, 24, time.Now()); err == nil {
+		t.Fatal("Resume with a vanished cwd must error")
+	}
+}
+
+// TestSelectCursorPatternMatchesAnyNumberedDialog pins spec §5's generic
+// hardening. The allowlist it replaced (TrustMarker's exact wording) would let
+// every row in the "dialog" group below through as ready, because each one
+// contains the bare ReadyMarker glyph and none of them says "Do you trust…" —
+// and seedWhenReady would then type the seed into an open dialog.
+func TestSelectCursorPatternMatchesAnyNumberedDialog(t *testing.T) {
+	re := selectCursorPattern(DefaultReadyMarker)
+	for _, tc := range []struct {
+		name   string
+		pane   string
+		dialog bool
+	}{
+		{"trust dialog", "Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No", true},
+		{"add-dir dialog", "Add /Users/x/ballista as a working directory?\n❯ 1. Yes\n  2. No", true},
+		{"paren option", "Select a model\n ❯ 2) Sonnet", true},
+		{"indented cursor", "    ❯ 10. Something", true},
+		{"double digit", "❯ 12. Option", true},
+		{"ready prompt", "some output\n❯ ", false},
+		{"ready prompt with typed text", "❯ fix the build", false},
+		{"pre-mount", "loading…", false},
+		{"plain numbered list", "  1. not a cursor\n  2. either", false},
+		// A glyph on one line and a number on the next is two separate lines,
+		// not a cursor — \s would have spanned the newline and called it one.
+		{"glyph then numbered line", "❯\n1. list item", false},
+	} {
+		if got := re.MatchString(tc.pane); got != tc.dialog {
+			t.Errorf("%s: selectCursorPattern match = %v, want %v", tc.name, got, tc.dialog)
+		}
+	}
+	if selectCursorPattern("") != nil {
+		t.Error(`selectCursorPattern("") must be nil: an empty marker would call every numbered list a dialog`)
+	}
+}
+
+// TestWaitReadyHoldsForANonTrustDialog is the behavioural half: a dialog whose
+// wording TrustMarker does not know (the `--add-dir` prompt §5 warns about)
+// must still hold the seed, and must still be bounded by TrustTimeout rather
+// than pinning the goroutine forever.
+func TestWaitReadyHoldsForANonTrustDialog(t *testing.T) {
+	l, dir := testLauncher(t)
+	l.ReadyTimeout = 10 * time.Second // the dialog bound must be what fires
+	l.TrustTimeout = 300 * time.Millisecond
+	l.PollEvery = 50 * time.Millisecond
+
+	id := NewSessionID()
+	name := TmuxName(id)
+	if err := l.Tmux.NewSession(name, dir,
+		`sh -c 'echo "Add /tmp/other as a working directory?"; echo "❯ 1. Yes"; echo "  2. No"; sleep 60'`,
+		80, 24); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan bool, 1)
+	go func() { done <- l.waitReady(name) }()
+	select {
+	case ready := <-done:
+		if ready {
+			t.Fatal("waitReady = true with a numbered select dialog still showing (spec §5 seed corruption)")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitReady never returned: the dialog-pending wait is unbounded")
 	}
 }

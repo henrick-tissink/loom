@@ -24,6 +24,21 @@ func resolveFile(cwd, path string) string {
 	return ""
 }
 
+// resolveFileIn tries each base in order, first match wins. An empty base set
+// still resolves an absolute path, so a link from a session with no store row
+// behaves as it always did.
+func resolveFileIn(bases []string, path string) string {
+	if len(bases) == 0 {
+		bases = []string{""}
+	}
+	for _, base := range bases {
+		if p := resolveFile(base, path); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
 // pickEditor returns the editor binary to use. A non-empty preferred binary
 // wins when it's installed; otherwise the first available GUI editor, or
 // "open" (the macOS default-application opener) as a fallback. look is injected
@@ -88,18 +103,26 @@ func editorCommands(bin, absPath string, line int) [][]string {
 	return cmds
 }
 
-// OpenInEditor resolves path against the session's cwd and opens it in the
-// user's editor at the given line, bringing the editor to the foreground.
-// Errors (surfaced but harmless) if the file can't be found, so clicking a
-// non-file token does nothing.
+// OpenInEditor resolves path against the session's directory set and opens it
+// in the user's editor at the given line, bringing the editor to the
+// foreground. Errors (surfaced but harmless) if the file can't be found, so
+// clicking a non-file token does nothing.
+//
+// The bases are cwd ∪ add_dirs (§5), in that order, because a scoped multi-repo
+// session prints paths relative to whichever repo the agent was working in —
+// resolving against cwd alone silently loses every link into a sibling repo,
+// and the sectioned diff (§8) is exactly the surface that produces them. cwd
+// first makes the primary repo win a same-named file in two repos, which is
+// deterministic rather than right; the callers that CAN be exact (the diff's
+// per-repo sections) pass an absolute path and never reach the search.
 func (a *App) OpenInEditor(sessionName, path string, line int) error {
-	cwd := ""
+	var bases []string
 	if a.st != nil {
 		if row, ok, _ := a.st.Get(sessionName); ok {
-			cwd = row.Cwd
+			bases = sessionDirs(row)
 		}
 	}
-	abs := resolveFile(cwd, path)
+	abs := resolveFileIn(bases, path)
 	if abs == "" {
 		return fmt.Errorf("file not found: %s", path)
 	}

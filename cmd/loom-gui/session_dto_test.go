@@ -15,7 +15,7 @@ func TestSnapshotToDTOs_mapsFieldsAndStatus(t *testing.T) {
 			Status: status.Running, Title: ""},
 	}}
 
-	got := snapshotToDTOs(snap)
+	got := snapshotToDTOs(snap, nil)
 
 	if len(got) != 2 {
 		t.Fatalf("want 2 DTOs, got %d", len(got))
@@ -29,7 +29,7 @@ func TestSnapshotToDTOs_mapsFieldsAndStatus(t *testing.T) {
 }
 
 func TestSnapshotToDTOs_emptyIsNonNil(t *testing.T) {
-	got := snapshotToDTOs(status.Snapshot{})
+	got := snapshotToDTOs(status.Snapshot{}, nil)
 	if got == nil {
 		t.Fatal("want non-nil empty slice (marshals to [] not null)")
 	}
@@ -52,7 +52,7 @@ func TestRecentToDTOs_filtersLiveAndDerivesStatus(t *testing.T) {
 		return ""
 	}
 	rows[0].ClaudeSessionID = "cs-a"
-	got := recentToDTOs(rows, sumFor)
+	got := recentToDTOs(rows, sumFor, nil)
 	if len(got) != 2 {
 		t.Fatalf("want 2 (live excluded), got %d", len(got))
 	}
@@ -68,7 +68,7 @@ func TestRecentToDTOs_filtersLiveAndDerivesStatus(t *testing.T) {
 }
 
 func TestRecentToDTOs_emptyIsNonNil(t *testing.T) {
-	if recentToDTOs(nil, nil) == nil {
+	if recentToDTOs(nil, nil, nil) == nil {
 		t.Fatal("want non-nil empty slice")
 	}
 }

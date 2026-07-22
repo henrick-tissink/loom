@@ -21,32 +21,32 @@ func optLabel(v string) string {
 	return v
 }
 
-// launcherForm is a minimal 4-field form: project / model / mode / seed.
+// launcherForm is a minimal 4-field form: repo / model / mode / seed.
 // tab moves fields, ←/→ cycle selects, enter submits, esc cancels.
 type launcherForm struct {
-	projects []registry.Project
-	projIdx  int
+	repos    []registry.Repo
+	repoIdx  int
 	modelIdx int
 	modeIdx  int
 	seed     textinput.Model
-	focus    int // 0=project 1=model 2=mode 3=seed
+	focus    int // 0=repo 1=model 2=mode 3=seed
 }
 
-func newLauncherForm(projects []registry.Project) launcherForm {
+func newLauncherForm(repos []registry.Repo) launcherForm {
 	ti := textinput.New()
 	ti.Placeholder = "optional seed prompt or /slash-command"
 	ti.CharLimit = 500
-	return launcherForm{projects: projects, seed: ti}
+	return launcherForm{repos: repos, seed: ti}
 }
 
 func (f *launcherForm) Recipe() (session.Recipe, bool) {
-	if len(f.projects) == 0 {
+	if len(f.repos) == 0 {
 		return session.Recipe{}, false
 	}
-	p := f.projects[f.projIdx]
+	r := f.repos[f.repoIdx]
 	return session.Recipe{
-		ProjectLabel: p.Label,
-		Cwd:          p.Path,
+		ProjectLabel: r.Label,
+		Cwd:          r.Path,
 		Model:        modelOptions[f.modelIdx],
 		Mode:         modeOptions[f.modeIdx],
 		Seed:         f.seed.Value(),
@@ -76,8 +76,8 @@ func (f *launcherForm) update(msg tea.KeyMsg) tea.Cmd {
 		}
 		switch f.focus {
 		case 0:
-			if n := len(f.projects); n > 0 {
-				f.projIdx = cycle(f.projIdx, d, n)
+			if n := len(f.repos); n > 0 {
+				f.repoIdx = cycle(f.repoIdx, d, n)
 			}
 		case 1:
 			f.modelIdx = cycle(f.modelIdx, d, len(modelOptions))
@@ -116,8 +116,8 @@ func (f *launcherForm) view(active bool) string {
 		return fmt.Sprintf("%s%-9s ‹ %s ›", marker, label, val)
 	}
 	proj := "(no projects found)"
-	if len(f.projects) > 0 {
-		proj = f.projects[f.projIdx].Label
+	if len(f.repos) > 0 {
+		proj = f.repos[f.repoIdx].Label
 	}
 	seedMarker := "  "
 	if active && f.focus == 3 {

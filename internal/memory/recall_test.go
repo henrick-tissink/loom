@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -298,5 +299,42 @@ func TestRelatedDuplicateTokensInSeedDoesNotWarpGate(t *testing.T) {
 	// and be returned.
 	if len(got) == 0 {
 		t.Fatalf("expected at least recency fallback results, got none")
+	}
+}
+
+// The candidate pool must widen with the caller's limit, or an over-fetching
+// caller (the RELATED panel, which asks wide and then drops hits belonging to
+// hidden projects) cannot reach past the floor no matter what it asks for.
+func TestFetchLimitScalesWithLimit(t *testing.T) {
+	cases := []struct{ limit, want int }{
+		{limit: 0, want: minFetchLimit},
+		{limit: 5, want: minFetchLimit}, // the panel's display limit: floor unchanged
+		{limit: minFetchLimit / candidatesPerHit, want: minFetchLimit},
+		{limit: 15, want: 45},
+		{limit: 40, want: 120},
+	}
+	for _, tc := range cases {
+		if got := fetchLimit(tc.limit); got != tc.want {
+			t.Errorf("fetchLimit(%d) = %d, want %d", tc.limit, got, tc.want)
+		}
+	}
+}
+
+// End-to-end: with more qualifying sessions than the old fixed 15-candidate
+// pool, a caller asking for 20 must actually get 20 back.
+func TestRelatedWideLimitReachesPastTheOldFixedPool(t *testing.T) {
+	s := openStore(t)
+	const n = 30
+	for i := 0; i < n; i++ {
+		seedRecallSession(t, s, fmt.Sprintf("s%02d", i), "loom",
+			"planning the database migration carefully", int64(100+i))
+	}
+	got, err := Related(s, "loom", "database migration plan", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 20 {
+		t.Fatalf("Related(limit=20) = %d hits, want 20 (the pool must widen past %d)",
+			len(got), minFetchLimit)
 	}
 }

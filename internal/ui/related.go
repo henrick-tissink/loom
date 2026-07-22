@@ -26,8 +26,10 @@ import (
 const includeCap = 3
 
 // panelDisplayLimit is how many recall hits the panel shows (spec §2/§6:
-// "fetch ~15 (display 5)" — Related() itself does the fetch-15/display-N
-// split; this is the N the launcher asks for).
+// "fetch ~15 (display 5)"). The split now runs one level higher: the launcher
+// asks Related for panelFetchLimit and trims to this N only after the §6
+// visibility filter, so a hidden project's hits cannot silently shorten the
+// panel.
 const panelDisplayLimit = 5
 
 // panelRow is one row of the RELATED panel's combined display list (spec
@@ -152,16 +154,16 @@ func (a *App) includeSnapshot() []store.Transcript {
 	return out
 }
 
-// relatedLabel resolves the short project label for a RELATED-panel row or
-// included transcript (spec §6 M3): registry reverse-match — the project
+// relatedLabel resolves the short repo label for a RELATED-panel row or
+// included transcript (spec §6 M3): registry reverse-match — the repo
 // whose transcript.ProjectDirName(Path) equals t.ProjectDir — preferred
 // (works even when t.Cwd is empty, since it keys off project_dir); else
 // filepath.Base(t.Cwd); NEVER the raw encoded project_dir (e.g.
 // "-Users-h-Sauce-loom").
-func relatedLabel(projects []registry.Project, t store.Transcript) string {
-	for _, p := range projects {
-		if transcript.ProjectDirName(p.Path) == t.ProjectDir {
-			return p.Label
+func relatedLabel(repos []registry.Repo, t store.Transcript) string {
+	for _, r := range repos {
+		if transcript.ProjectDirName(r.Path) == t.ProjectDir {
+			return r.Label
 		}
 	}
 	return filepath.Base(t.Cwd)
@@ -173,7 +175,7 @@ func relatedLabel(projects []registry.Project, t store.Transcript) string {
 // the assembled seed (spec §4): outcomeCap (1.5KB) is the spec's own number;
 // labelCap/titleCap are this implementation's defensive bounds so
 // assertSeedInvariant can never legitimately fire regardless of how long a
-// transcript's title/ask or a project's label happen to be (neither is
+// transcript's title/ask or a repo's label happen to be (neither is
 // otherwise bounded by the store schema).
 const (
 	outcomeCap = 1536
@@ -208,14 +210,14 @@ const seedInvariantMax = 8 * 1024
 //
 // Deviates from the brief's declared 2-arg signature
 // (buildSeedWithRecall(seed string, includes []store.Transcript)) by taking
-// projects too — disclosed in the task report: store.Transcript has no
+// repos too — disclosed in the task report: store.Transcript has no
 // field to carry a pre-resolved label, and the M3 registry-reverse-match
-// label helper needs the registry project list, so either every included
+// label helper needs the registry repo list, so either every included
 // Transcript would need extending with a label field it doesn't otherwise
 // need, or this function takes the list it resolves labels from. The latter
 // keeps buildSeedWithRecall pure and keeps the marker's label consistent
 // with what M3 shows in the panel itself.
-func buildSeedWithRecall(seed string, includes []store.Transcript, projects []registry.Project) (string, bool) {
+func buildSeedWithRecall(seed string, includes []store.Transcript, repos []registry.Repo) (string, bool) {
 	if len(includes) == 0 {
 		return seed, false
 	}
@@ -229,7 +231,7 @@ func buildSeedWithRecall(seed string, includes []store.Transcript, projects []re
 	var b strings.Builder
 	b.WriteString(seed)
 	for _, t := range includes {
-		label := truncateBytes(stripCRLF(relatedLabel(projects, t)), labelCap, recallTruncMarker)
+		label := truncateBytes(stripCRLF(relatedLabel(repos, t)), labelCap, recallTruncMarker)
 		titleOrAsk := t.Title
 		if titleOrAsk == "" {
 			titleOrAsk = t.Ask

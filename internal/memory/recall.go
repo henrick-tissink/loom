@@ -29,11 +29,34 @@ type RelatedHit struct {
 	MatchedTerms int
 }
 
-// fetchLimit is how many candidates Related pulls from SearchSessionsRaw
-// before ranking and trimming to the caller's display limit (spec §6): wide
-// enough that the same-project boost can promote a hit ranked lower by raw
-// bm25 into the visible set.
-const fetchLimit = 15
+// minFetchLimit is the floor on how many candidates Related pulls from
+// SearchSessionsRaw before ranking and trimming to the caller's limit (spec
+// §6): wide enough that the same-project boost can promote a hit ranked lower
+// by raw bm25 into the visible set.
+//
+// candidatesPerHit widens that floor for callers asking for a large limit.
+// A fixed 15 made over-fetching impossible: a caller that asks for 15 in order
+// to filter down to 5 (the projects-slice RELATED panel, which drops hits
+// belonging to hidden projects) got at most 15 candidates, of which the ≥2-term
+// gate and the filter could leave fewer than 5 — a visibly short panel with
+// qualifying hits sitting just below the cut. The pool now scales with what was
+// asked for, so the widest fetch is the caller's decision.
+//
+// A multiplier rather than a second parameter: every candidate that survives
+// the gate costs a GetTranscript point lookup, so the cost is bounded by the
+// caller's own limit instead of by an independent knob nothing would keep in
+// step with it. Small limits are unaffected — 5 still fetches the floor of 15.
+const (
+	minFetchLimit    = 15
+	candidatesPerHit = 3
+)
+
+func fetchLimit(limit int) int {
+	if n := limit * candidatesPerHit; n > minFetchLimit {
+		return n
+	}
+	return minFetchLimit
+}
 
 // stopwords is dropped from recall seeds before querying (spec §2): common
 // function words that would otherwise OR their way into confident-noise
@@ -118,7 +141,7 @@ func countMatchedTerms(terms []string, fields ...string) int {
 // Related is the recall engine (spec §2/§6). It builds a recall-specific
 // FTS query from seed; an unusable seed (fewer than 2 surviving terms)
 // falls straight back to same-project recency. Otherwise it fetches
-// fetchLimit candidates, computes each hit's matched-term count, and drops
+// fetchLimit(limit) candidates, computes each hit's matched-term count, and drops
 // any hit matching fewer than 2 terms (spec §2: "require ≥2 matched
 // content terms for an FTS hit to show at all" — kills the
 // confident-noise failure mode where OR + stopwords surface unrelated
@@ -130,9 +153,10 @@ func countMatchedTerms(terms []string, fields ...string) int {
 // Per-hit full Transcript is fetched via GetTranscript (disclosed
 // implementation choice, see task report): SearchHit only carries a subset
 // of transcript fields (no FirstTS/MsgCount/Outcome/Files/LLMSummary/
-// SummaryAt), and fetchLimit is small (15) for what is an on-demand,
-// user-triggered launcher action — not a hot path — so up to 15 extra
-// point lookups by primary key is simpler and safer than widening
+// SummaryAt), and the candidate pool stays small — a few tens of rows,
+// bounded by the caller's own limit — for what is an on-demand,
+// user-triggered launcher action, not a hot path, so a point lookup per
+// qualifying candidate is simpler and safer than widening
 // SearchHit (a struct shared with SearchSessions) to carry every
 // Transcript field recall might need.
 func Related(st *store.Store, projectDir, seed string, limit int) ([]RelatedHit, error) {
@@ -141,7 +165,7 @@ func Related(st *store.Store, projectDir, seed string, limit int) ([]RelatedHit,
 		return recencyFallback(st, projectDir, limit)
 	}
 
-	hits, err := st.SearchSessionsRaw(expr, fetchLimit)
+	hits, err := st.SearchSessionsRaw(expr, fetchLimit(limit))
 	if err != nil {
 		return nil, err
 	}

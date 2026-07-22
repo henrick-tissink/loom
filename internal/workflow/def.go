@@ -22,13 +22,14 @@ import (
 // Step is one entry of a Definition's "steps" array (spec §3). Field names
 // match the on-disk JSON keys via the tags below.
 //
-// Project deserves a callout: on disk it is a registry project LABEL (e.g.
-// "parallax"). LoadAll resolves and VALIDATES it against the registry at
-// load time and overwrites it in place with the project's resolved
-// ABSOLUTE PATH (registry.Project.Path) — never a bare label past LoadAll.
-// This is a deliberate design choice, not an oversight: Runner (run.go) has
-// no registry of its own (by the Produces contract its only fields are
-// Store/Launcher/ClaudeConfigDir), so project→path resolution can only
+// Project deserves a callout: on disk it is a registry repo LABEL (e.g.
+// "parallax"). The JSON key stays "project" — renaming it would invalidate
+// every saved workflow on disk. LoadAll resolves and VALIDATES it against
+// the registry at load time and overwrites it in place with the repo's
+// resolved ABSOLUTE PATH (registry.Repo.Path) — never a bare label past
+// LoadAll. This is a deliberate design choice, not an oversight: Runner
+// (run.go) has no registry of its own (by the Produces contract its only
+// fields are Store/Launcher/ClaudeConfigDir), so label→path resolution can only
 // happen once, here, while a registry is in hand. An empty Project (valid
 // for any step but step 1) means "inherit the resolved previous step's
 // cwd/label" (spec §2.12) — resolved at Advance time from the previous
@@ -93,7 +94,7 @@ var templateWhitelist = map[string]bool{
 // files produce a LoadError, never a panic, and are excluded from the
 // returned Definitions. Both slices are sorted for deterministic output
 // (Definitions by Name, LoadErrors by Path).
-func LoadAll(dir string, projects []registry.Project) ([]Definition, []LoadError) {
+func LoadAll(dir string, repos []registry.Repo) ([]Definition, []LoadError) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -102,9 +103,9 @@ func LoadAll(dir string, projects []registry.Project) ([]Definition, []LoadError
 		return nil, []LoadError{{Path: dir, Err: err.Error()}}
 	}
 
-	known := make(map[string]registry.Project, len(projects))
-	for _, p := range projects {
-		known[p.Label] = p
+	known := make(map[string]registry.Repo, len(repos))
+	for _, r := range repos {
+		known[r.Label] = r
 	}
 
 	var defs []Definition
@@ -131,11 +132,11 @@ func LoadAll(dir string, projects []registry.Project) ([]Definition, []LoadError
 }
 
 // loadOne parses and validates one definition file (spec §3 "Load
-// validation"): name == filename stem; ≥1 step; step-1 project known to
+// validation"): name == filename stem; ≥1 step; step-1 repo label known to
 // the registry; relations/models/modes in known sets; template-token
 // whitelist. Only ever returns an error for the caller to wrap as a
 // LoadError — never panics on malformed input.
-func loadOne(path string, known map[string]registry.Project) (Definition, error) {
+func loadOne(path string, known map[string]registry.Repo) (Definition, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Definition{}, err
@@ -178,11 +179,11 @@ func loadOne(path string, known map[string]registry.Project) (Definition, error)
 			return Definition{}, fmt.Errorf("step %d: relation must be one of fresh/fork/continue, got %q", i+1, s.Relation)
 		}
 		if s.Project != "" {
-			proj, ok := known[s.Project]
+			repo, ok := known[s.Project]
 			if !ok {
 				return Definition{}, fmt.Errorf("step %d: unknown project %q", i+1, s.Project)
 			}
-			s.Project = proj.Path // bake the resolved absolute path in place (see Step's doc comment)
+			s.Project = repo.Path // bake the resolved absolute path in place (see Step's doc comment)
 		}
 		s.Seed = seedNewlineRe.ReplaceAllString(s.Seed, " ") // normalize BEFORE template-token validation, see seedNewlineRe
 		for _, tok := range templateTokenRe.FindAllString(s.Seed, -1) {

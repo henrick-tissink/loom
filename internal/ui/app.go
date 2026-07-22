@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/henricktissink/loom/internal/memory"
+	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -50,7 +51,7 @@ const (
 type Deps struct {
 	Engine     *status.Engine
 	Launcher   *session.Launcher
-	Projects   []registry.Project
+	Repos      []registry.Repo
 	Tmux       *tmux.Client
 	InsideTmux bool
 
@@ -64,14 +65,26 @@ type Deps struct {
 
 	// Runner/WorkflowsDir back the workflows view (Task 3, the `w` view).
 	// Both are nil-safe: a nil Runner means the workflows view still opens
-	// (LoadAll needs only Projects/WorkflowsDir) but shows an empty RUNS
+	// (LoadAll needs only Repos/WorkflowsDir) but shows an empty RUNS
 	// section and no-ops every run action; an empty WorkflowsDir makes
 	// LoadAll's os.ReadDir("") fail with IsNotExist, which LoadAll already
-	// treats as "no definitions" rather than an error. Projects (existing
-	// field above) doubles as the registry LoadAll validates step-1 projects
-	// against — the brief's "Registry" field is this one, reused.
+	// treats as "no definitions" rather than an error. Repos (existing
+	// field above) doubles as the registry LoadAll validates each step-1
+	// "project" label against — the brief's "Registry" field is this one,
+	// reused.
 	Runner       *workflow.Runner
 	WorkflowsDir string
+
+	// Projects is the §4 attribution/visibility authority. Nil-safe like
+	// every other dep: a nil authority means nothing is ever hidden, so
+	// Deps{} (and any caller predating this slice) behaves unchanged.
+	//
+	// The TUI owns the §6.3 surfaces listed for it — rail, Finished, wall,
+	// recall/RELATED, search, notifications — because notifications exist in
+	// BOTH binaries and ARCHITECTURE.md declares two instances against one DB
+	// a supported state: an unfiltered terminal banner naming a hidden client
+	// mid-screen-share defeats the feature outright.
+	Projects Projects
 }
 
 // uiRow is one selectable dashboard line (live or recent).
@@ -283,6 +296,14 @@ type App struct {
 	// carrying any other generation is a stale, fully-discarded result (an
 	// overlapping capture from a slower, earlier tick), never applied.
 	wallSeq int64
+
+	// res is the last successfully-read visibility authority (§6.1), kept so
+	// a transient store error cannot un-hide a project mid-screen-share. It
+	// is refreshed read-through by App.visibility(), read only on the Update
+	// loop, and captured BY POINTER into query commands — a Resolver is
+	// immutable once built, so sharing it with a tea.Cmd goroutine is safe
+	// where sharing App is not.
+	res *projects.Resolver
 }
 
 // wfRunRow is one RUNS-section entry: a store.RunRow plus the display/action
@@ -491,7 +512,7 @@ type (
 func NewApp(deps Deps) *App {
 	ti := textinput.New()
 	ti.Placeholder = "tags (comma separated)"
-	return &App{deps: deps, form: newLauncherForm(deps.Projects), fanForm: newFanoutForm(deps.Projects), tag: ti}
+	return &App{deps: deps, form: newLauncherForm(deps.Repos), fanForm: newFanoutForm(deps.Repos), tag: ti}
 }
 
 func (a *App) Init() tea.Cmd { return tea.Batch(a.pollCmd(), tickAfter()) }
@@ -548,6 +569,31 @@ func max(a, b int) int {
 	return b
 }
 
+// needsYouLabels renders the display strings for the sessions that just
+// flipped to needs-you. The engine reports session names (spec §4) because a
+// pre-rendered label carries no identity; the label is joined back here, from
+// the same snapshot's Live rows — the poll that produced a name always
+// produced its Live row, so an unmatched name means the snapshot was
+// hand-built and is silently dropped rather than announced as an empty
+// banner.
+func needsYouLabels(snap status.Snapshot) []string {
+	var out []string
+	for _, name := range snap.NewlyNeedsYou {
+		for _, r := range snap.Live {
+			if r.Name != name {
+				continue
+			}
+			label := r.ProjectLabel
+			if r.Title != "" {
+				label += " · " + r.Title
+			}
+			out = append(out, label)
+			break
+		}
+	}
+	return out
+}
+
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -598,13 +644,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// action, stacking concurrent Engine.Poll goroutines (finding 1).
 		return a, a.pollCmd()
 	case snapMsg:
-		a.snap = status.Snapshot(m)
+		// §6.3: the filter lands HERE, on the way in, so every surface fed by
+		// a.snap — rail, Finished, wall — is filtered by construction rather
+		// than each remembering to. The engine's own snapshot is untouched:
+		// hidden sessions were polled and their transitions persisted before
+		// this line ran (§6.2a).
+		snap, suppressed := a.filterSnapshot(status.Snapshot(m))
+		a.snap = snap
 		a.errStr = ""
 		a.now = time.Now()
 		a.rebuildRows()
 		a.applyWallOrder()
-		if len(m.NewlyNeedsYou) > 0 {
-			return a, notifyCmd(m.NewlyNeedsYou)
+		// suppressed transitions still raise a signal, just a label-free one
+		// (§6.4) — see filterSnapshot.
+		if labels := needsYouLabels(snap); len(labels)+suppressed > 0 {
+			return a, notifyCmd(labels, suppressed)
 		}
 		return a, nil
 	case errMsg:
@@ -1127,8 +1181,12 @@ func (a *App) updateSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // (non-debounced — this is a view-open, not a keystroke burst) panel query
 // for the default-selected project's recent sessions, same "fresh state +
 // immediate refresh cmd" shape as openSearch/openWorkflows.
+// The repo list is project-scoped on open (§6.3, launcher target picker): the
+// form is rebuilt from scratch here every time, so scoping it at open is
+// enough — a project hidden while the launcher is already up is caught the
+// next time it opens, and the launcher is modal.
 func (a *App) openLauncher() tea.Cmd {
-	a.form = newLauncherForm(a.deps.Projects)
+	a.form = newLauncherForm(a.visibleRepos())
 	a.form.setFocus(0)
 	a.view = viewLauncher
 	a.panelFocused = false
@@ -1146,10 +1204,10 @@ func (a *App) openLauncher() tea.Cmd {
 // project, or "" when there are no projects (panelQueryCmd treats "" as
 // "nothing to query" — matches Deps' nil-safety contract).
 func (a *App) currentProjectDir() string {
-	if len(a.form.projects) == 0 {
+	if len(a.form.repos) == 0 {
 		return ""
 	}
-	return transcript.ProjectDirName(a.form.projects[a.form.projIdx].Path)
+	return transcript.ProjectDirName(a.form.repos[a.form.repoIdx].Path)
 }
 
 // panelQueryCmd runs internal/memory.Related in a tea.Cmd for the launcher
@@ -1164,12 +1222,18 @@ func (a *App) panelQueryCmd(seed, projectDir string) tea.Cmd {
 	if st == nil || projectDir == "" {
 		return nil
 	}
+	// Recall crosses projects by design, so its hits are filtered
+	// independently of the (already scoped) seed project — §6.3 lists the
+	// RELATED panel as its own leak surface for exactly that reason. Asked
+	// for panelFetchLimit, trimmed to panelDisplayLimit after filtering.
+	res := a.visibility()
 	return func() tea.Msg {
-		hits, err := memory.Related(st, projectDir, seed, panelDisplayLimit)
+		hits, err := memory.Related(st, projectDir, seed, panelFetchLimit)
 		if err != nil {
 			hits = nil
 		}
-		return panelResultsMsg{seed: seed, projectDir: projectDir, hits: hits}
+		return panelResultsMsg{seed: seed, projectDir: projectDir,
+			hits: visibleRelated(res, hits, panelDisplayLimit)}
 	}
 }
 
@@ -1315,7 +1379,7 @@ func (a *App) launch() (tea.Model, tea.Cmd) {
 	if !ok || a.deps.Launcher == nil {
 		return a, nil
 	}
-	seed, _ := buildSeedWithRecall(r.Seed, a.includeSnapshot(), a.deps.Projects)
+	seed, _ := buildSeedWithRecall(r.Seed, a.includeSnapshot(), a.deps.Repos)
 	r.Seed = seed
 	l := a.deps.Launcher
 	w, h := a.width, a.height
@@ -1530,17 +1594,22 @@ func (a *App) searchStatusCmd() tea.Cmd {
 
 // searchQueryCmd runs the actual FTS query in a tea.Cmd. nil Store → nil cmd
 // (no-op), matching Deps' nil-safety contract.
+// Results are project-scoped (§6.3): the resolver is read HERE, on the Update
+// loop, and captured by pointer — the command goroutine must not touch App.
+// searchFetchLimit over-fetches so hiding shortens the result list only when
+// there genuinely are fewer than searchDisplayLimit visible matches.
 func (a *App) searchQueryCmd(query string) tea.Cmd {
 	st := a.deps.Store
 	if st == nil {
 		return nil
 	}
+	res := a.visibility()
 	return func() tea.Msg {
-		hits, err := st.SearchSessions(query, 30)
+		hits, err := st.SearchSessions(query, searchFetchLimit)
 		if err != nil {
 			hits = nil
 		}
-		return searchResultsMsg{query: query, hits: hits}
+		return searchResultsMsg{query: query, hits: visibleHits(res, hits, searchDisplayLimit)}
 	}
 }
 
@@ -1561,17 +1630,17 @@ func (a *App) openWorkflows() tea.Cmd {
 }
 
 // wfLoadCmd loads both workflows-view sections (spec §4/§2.1): WORKFLOWS via
-// workflow.LoadAll(WorkflowsDir, Projects) — the registry Definitions §3
-// validates step-1 projects against — and RUNS via Runner.Store.ActiveRuns,
+// workflow.LoadAll(WorkflowsDir, Repos) — the registry Definitions §3
+// validates each step-1 "project" label against — and RUNS via Runner.Store.ActiveRuns,
 // each resolved into a wfRunRow up front (buildWFRunRow). Both deps are
 // nil-safe: a nil Runner (or nil Runner.Store) yields an empty RUNS section
 // rather than panicking, matching Deps' nil-safety contract elsewhere.
 func (a *App) wfLoadCmd() tea.Cmd {
 	dir := a.deps.WorkflowsDir
-	projects := a.deps.Projects
+	repos := a.deps.Repos
 	runner := a.deps.Runner
 	return func() tea.Msg {
-		defs, loadErrs := workflow.LoadAll(dir, projects)
+		defs, loadErrs := workflow.LoadAll(dir, repos)
 		var rows []wfRunRow
 		if runner != nil && runner.Store != nil {
 			runs, err := runner.Store.ActiveRuns()
@@ -1957,7 +2026,9 @@ func (a *App) wfStartCmd(def workflow.Definition, w, h int) tea.Cmd {
 // always gets cleared again by fanResultMsg before the view could return
 // here.
 func (a *App) openFanout() tea.Cmd {
-	a.fanForm = newFanoutForm(a.deps.Projects)
+	// Same project scoping as openLauncher: the fan-out checklist is a launch
+	// surface, and a hidden repo must not be reachable from it.
+	a.fanForm = newFanoutForm(a.visibleRepos())
 	a.fanForm.setFocus(0)
 	a.fanInFlight = false
 	a.view = viewFanout
@@ -2023,8 +2094,8 @@ func (a *App) updateFanoutKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // form does after ↵ can affect an in-flight launch. (fix #2, the form-freeze,
 // is belt-and-braces on top of this: see updateFanoutKeys.)
 type fanLaunchItem struct {
-	Project registry.Project
-	Recipe  session.Recipe
+	Repo   registry.Repo
+	Recipe session.Recipe
 }
 
 // fanLaunch handles ↵ (spec §2.1/§2.2/§2.3 I2): a double-↵ while a launch
@@ -2036,8 +2107,8 @@ func (a *App) fanLaunch() (tea.Model, tea.Cmd) {
 	if a.fanInFlight {
 		return a, nil
 	}
-	projects := a.fanForm.selectedProjects()
-	if len(projects) == 0 {
+	repos := a.fanForm.selectedRepos()
+	if len(repos) == 0 {
 		a.fanForm.hint = "select at least one project"
 		return a, nil
 	}
@@ -2046,9 +2117,9 @@ func (a *App) fanLaunch() (tea.Model, tea.Cmd) {
 	}
 	// Snapshot every recipe NOW, synchronously — see fanLaunchItem's doc
 	// comment for why this is the critical fix.
-	items := make([]fanLaunchItem, len(projects))
-	for i, p := range projects {
-		items[i] = fanLaunchItem{Project: p, Recipe: a.fanForm.recipeFor(p)}
+	items := make([]fanLaunchItem, len(repos))
+	for i, r := range repos {
+		items[i] = fanLaunchItem{Repo: r, Recipe: a.fanForm.recipeFor(r)}
 	}
 	a.fanInFlight = true
 	w, h := a.width, a.height
@@ -2100,10 +2171,10 @@ func (a *App) fanLaunchCmdWith(launch fanLaunchFn, items []fanLaunchItem, w, h i
 		for _, item := range items {
 			name, err := launch(item.Recipe, w, h, time.Now())
 			if err != nil {
-				results = append(results, fanResult{Project: item.Project.Label, Name: name, Err: err})
+				results = append(results, fanResult{Project: item.Repo.Label, Name: name, Err: err})
 				continue
 			}
-			res := fanResult{Project: item.Project.Label, Name: name}
+			res := fanResult{Project: item.Repo.Label, Name: name}
 			if tagErr := st.SetTags(name, "fan:"+group); tagErr != nil {
 				res.Untagged = true
 			}
@@ -2500,7 +2571,7 @@ func (a *App) renderPanelRow(i int, row panelRow, inner int) []string {
 	if text == "" {
 		text = t.Ask
 	}
-	line1 := box + " " + relatedLabel(a.deps.Projects, t) + " · " + text
+	line1 := box + " " + relatedLabel(a.deps.Repos, t) + " · " + text
 	if age := humanAge(a.now, t.LastTS); age != "" {
 		line1 += " " + age
 	}

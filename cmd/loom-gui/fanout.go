@@ -39,8 +39,12 @@ func (a *App) Fanout(projectPaths []string, model, mode, seed string) FanResultD
 	}
 	group := newFanGroupID()
 	res := FanResultDTO{Group: group}
+	// The checklist is built from the same visible, present-on-disk target set
+	// the picker offers (§6.3 lists the fan-out checklist as a leak surface),
+	// resolved once so a mid-fan-out reconcile can't change the set underneath.
+	targets := a.launchableTargets()
 	for _, path := range projectPaths {
-		r, err := buildRecipe(a.projects, path, model, mode, seed)
+		r, err := buildRecipe(targets, path, model, mode, seed, nil)
 		if err != nil {
 			res.Failed++
 			continue

@@ -35,7 +35,7 @@ func TestApp_ListProjects_nonNil(t *testing.T) {
 
 func TestApp_LaunchSession_nilLauncherErrors(t *testing.T) {
 	app := newApp(nil, tmux.New(), nil, nil, nil, time.Now)
-	if _, err := app.LaunchSession("/ws/loom", "", "", ""); err == nil {
+	if _, err := app.LaunchSession("/ws/loom", "", "", "", nil); err == nil {
 		t.Fatal("LaunchSession with nil launcher must error")
 	}
 }

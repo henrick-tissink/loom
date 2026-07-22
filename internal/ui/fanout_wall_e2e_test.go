@@ -112,12 +112,13 @@ func TestFanoutWallE2E(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	projs, err := registry.Discover(cfg.WorkspaceRoot, cfg.ClaudeConfigDir)
+	projects, err := registry.Discover(cfg.WorkspaceRoot, cfg.ClaudeConfigDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	projs := registry.Repos(projects)
 	if len(projs) != 3 || projs[0].Label != "proja" || projs[1].Label != "projb" || projs[2].Label != "projc" {
-		t.Fatalf("registry.Discover = %+v, want [proja projb projc] (alphabetical)", projs)
+		t.Fatalf("registry.Repos(Discover) = %+v, want [proja projb projc] (alphabetical)", projs)
 	}
 
 	// --- isolated throwaway tmux socket + PATH-injected fake claude ---------
@@ -151,7 +152,7 @@ func TestFanoutWallE2E(t *testing.T) {
 	}
 
 	deps := Deps{
-		Launcher: launcher, Projects: projs, Tmux: tm, Store: st,
+		Launcher: launcher, Repos: projs, Tmux: tm, Store: st,
 		Engine: status.NewEngine(tm, st, cfg.ClaudeConfigDir),
 	}
 	a := NewApp(deps)
@@ -165,8 +166,8 @@ func TestFanoutWallE2E(t *testing.T) {
 	if a.view != viewFanout {
 		t.Fatalf("view = %v, want viewFanout", a.view)
 	}
-	if len(a.fanForm.projects) != 3 {
-		t.Fatalf("fanForm.projects = %d, want 3", len(a.fanForm.projects))
+	if len(a.fanForm.repos) != 3 {
+		t.Fatalf("fanForm.repos = %d, want 3", len(a.fanForm.repos))
 	}
 
 	a.Update(key(" ")) // toggle proja (listCur 0)
@@ -174,8 +175,8 @@ func TestFanoutWallE2E(t *testing.T) {
 	a.Update(key(" ")) // toggle projb (listCur 1)
 	a.Update(tea.KeyMsg{Type: tea.KeyDown})
 	a.Update(key(" ")) // toggle projc (listCur 2)
-	if sel := a.fanForm.selectedProjects(); len(sel) != 3 {
-		t.Fatalf("selectedProjects = %+v, want all 3 checked", sel)
+	if sel := a.fanForm.selectedRepos(); len(sel) != 3 {
+		t.Fatalf("selectedRepos = %+v, want all 3 checked", sel)
 	}
 
 	for i := 0; i < 3; i++ {

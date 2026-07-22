@@ -39,7 +39,7 @@ func TestDefsToDTOs(t *testing.T) {
 		{Name: "a", Path: "/w/a.json", Steps: []workflow.Step{{Label: "s1", Project: "/Users/me/Sauce/loom"}, {Label: "s2"}}},
 		{Name: "b", Path: "/w/b.json", Steps: nil},
 	}
-	got := defsToDTOs(defs)
+	got := defsToDTOs(defs, nil)
 	if len(got) != 2 {
 		t.Fatalf("want 2, got %d", len(got))
 	}
@@ -52,7 +52,7 @@ func TestDefsToDTOs(t *testing.T) {
 }
 
 func TestDefsToDTOs_emptyNonNil(t *testing.T) {
-	if defsToDTOs(nil) == nil {
+	if defsToDTOs(nil, nil) == nil {
 		t.Fatal("want non-nil slice")
 	}
 	if loadErrsToDTOs(nil) == nil {
