@@ -160,9 +160,40 @@ func countMatchedTerms(terms []string, fields ...string) int {
 // SearchHit (a struct shared with SearchSessions) to carry every
 // Transcript field recall might need.
 func Related(st *store.Store, projectDir, seed string, limit int) ([]RelatedHit, error) {
+	return RelatedIn(st, []string{projectDir}, seed, limit)
+}
+
+// RelatedIn is Related over a SET of directories (orchestrator spec §5.2): a
+// project's "same project" is {project root} ∪ {member repo paths}, not one
+// repo, so a hit in ANY dir of the set is SameProject and the recency fallback
+// covers the whole set.
+//
+// Related becomes the one-element wrapper rather than the other way round, for
+// the same reason store.RecentTranscriptsByProjectDir did: it makes this a
+// backward-compatible extension. Every existing single-dir caller and its tests
+// are untouched, because {d} membership is exactly `== d` and the fallback
+// bottoms out in the identical query.
+//
+// This is the whole of the set-scoping. The orchestrator previously composed it
+// caller-side — call Related with dirs[0] and re-filter the hits against the set
+// — which ranked with the WRONG SameProject flag: a hit in a member repo other
+// than dirs[0] sorted below a cross-project hit, and only then got filtered.
+// The boost has to be applied during the sort to mean anything, so it belongs
+// here where the sort is.
+//
+// An empty set is NOT "every directory": it ranks with SameProject false for
+// everything and falls back to no rows at all, matching
+// RecentTranscriptsByProjectDirs' own fail-closed choice. An unattributable
+// project must not silently widen into a scan of the whole index.
+func RelatedIn(st *store.Store, dirs []string, seed string, limit int) ([]RelatedHit, error) {
+	inSet := make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		inSet[d] = true
+	}
+
 	expr, terms := buildRecallQuery(seed)
 	if expr == "" {
-		return recencyFallback(st, projectDir, limit)
+		return recencyFallbackIn(st, dirs, limit)
 	}
 
 	hits, err := st.SearchSessionsRaw(expr, fetchLimit(limit))
@@ -191,7 +222,7 @@ func Related(st *store.Store, projectDir, seed string, limit int) ([]RelatedHit,
 			hit: RelatedHit{
 				T:            tr,
 				Snippet:      h.Snippet,
-				SameProject:  h.ProjectDir == projectDir,
+				SameProject:  inSet[h.ProjectDir],
 				MatchedTerms: matched,
 			},
 			order: i,
@@ -199,7 +230,7 @@ func Related(st *store.Store, projectDir, seed string, limit int) ([]RelatedHit,
 	}
 
 	if len(qualifying) == 0 {
-		return recencyFallback(st, projectDir, limit)
+		return recencyFallbackIn(st, dirs, limit)
 	}
 
 	sort.SliceStable(qualifying, func(i, j int) bool {
@@ -226,11 +257,14 @@ func Related(st *store.Store, projectDir, seed string, limit int) ([]RelatedHit,
 	return out, nil
 }
 
-// recencyFallback is the same-project recency path (spec §2/§6): used both
+// recencyFallbackIn is the same-project recency path (spec §2/§6): used both
 // when the seed can't produce a usable recall query and when it produces
 // one but zero hits survive the ≥2-matched-term gate.
-func recencyFallback(st *store.Store, projectDir string, limit int) ([]RelatedHit, error) {
-	trs, err := st.RecentTranscriptsByProjectDir(projectDir, limit)
+//
+// Every row it returns is SameProject by construction — the query selected on
+// the dir set — so the flag is set unconditionally rather than re-tested.
+func recencyFallbackIn(st *store.Store, dirs []string, limit int) ([]RelatedHit, error) {
+	trs, err := st.RecentTranscriptsByProjectDirs(dirs, limit)
 	if err != nil {
 		return nil, err
 	}

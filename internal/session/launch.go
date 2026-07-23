@@ -90,9 +90,15 @@ func dirUsable(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// physicalDir resolves symlinks in path, falling back to path unchanged when
+// PhysicalDir resolves symlinks in path, falling back to path unchanged when
 // resolution fails (a path that validateDirs already accepted can still fail
 // EvalSymlinks on e.g. a permission error — degrade, never block a launch).
+//
+// Exported because every path internal/delegate stores or compares — a
+// worktree cwd, the §6.2 occupancy refusal, §13.3's orphan recovery — must
+// produce BYTE-IDENTICAL output to what Launch wrote into sessions.cwd, or the
+// double-spawn guard silently stops guarding. A second copy of this function
+// in another package is a copy that can drift; one exported function cannot.
 //
 // This is load-bearing for status, NOT cosmetic. Verified by
 // docs/spikes/2026-07-22-add-dir-spike.md: a process's getcwd() returns the
@@ -109,7 +115,7 @@ func dirUsable(p string) bool {
 // breaks it. status.Engine already stores the resolved form when it adopts an
 // orphan (#{pane_current_path} is physical), so resolving here also makes the
 // launch path and the adopt path agree instead of disagreeing by symlink.
-func physicalDir(path string) string {
+func PhysicalDir(path string) string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved
 	}
@@ -122,7 +128,7 @@ func physicalDirs(paths []string) []string {
 	}
 	out := make([]string, len(paths))
 	for i, p := range paths {
-		out[i] = physicalDir(p)
+		out[i] = PhysicalDir(p)
 	}
 	return out
 }
@@ -156,8 +162,8 @@ func (l *Launcher) Launch(r Recipe, w, h int, now time.Time) (string, error) {
 	name := TmuxName(id)
 	// Resolve AFTER validation (so the error names the path the user gave) and
 	// BEFORE both tmux and the store, so the recorded cwd matches the one
-	// claude will record — see physicalDir.
-	cwd, addDirs := physicalDir(r.Cwd), physicalDirs(r.AddDirs)
+	// claude will record — see PhysicalDir.
+	cwd, addDirs := PhysicalDir(r.Cwd), physicalDirs(r.AddDirs)
 	r.Cwd, r.AddDirs = cwd, addDirs
 	if err := l.Tmux.NewSession(name, cwd, r.ShellCommand(id), w, h); err != nil {
 		return "", err
@@ -196,10 +202,10 @@ func (l *Launcher) Resume(old store.SessionRow, w, h int, now time.Time) (string
 	}
 	id := NewSessionID() // for the tmux name only
 	name := TmuxName(id)
-	// Idempotent for rows launched after the physicalDir fix; repairs older
+	// Idempotent for rows launched after the PhysicalDir fix; repairs older
 	// rows that stored an unresolved cwd and were therefore never matched to
 	// their transcript.
-	cwd, dirs := physicalDir(old.Cwd), physicalDirs(dirs)
+	cwd, dirs := PhysicalDir(old.Cwd), physicalDirs(dirs)
 	if err := l.Tmux.NewSession(name, cwd, ResumeShellCommand(old.ClaudeSessionID, dirs), w, h); err != nil {
 		return "", err
 	}

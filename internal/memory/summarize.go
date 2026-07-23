@@ -97,7 +97,7 @@ func (sm *Summarizer) Summarize(sessionID string, now time.Time) (string, error)
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = sm.WorkDir
-	cmd.Env = scrubEnv(os.Environ())
+	cmd.Env = ScrubEnv(os.Environ())
 	cmd.Stdin = strings.NewReader(payload)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -125,10 +125,18 @@ func (sm *Summarizer) Summarize(sessionID string, now time.Time) (string, error)
 	return summary, nil
 }
 
-// scrubEnv strips CLAUDECODE and CLAUDE_CODE_* from the child's environment
+// ScrubEnv strips CLAUDECODE and CLAUDE_CODE_* from the child's environment
 // (spec §5 child-env constraint) while keeping everything else — notably
 // CLAUDE_CONFIG_DIR, which the child needs to find its own config.
-func scrubEnv(environ []string) []string {
+//
+// Exported because internal/delegate's check runner needs the identical rule
+// (delegation §8.1): a check that believes it is running inside a Claude
+// session changes its own behaviour via hooks and output modes, and a check
+// whose result depends on who launched it is not a definition of done. Two
+// copies of this list would drift the next time claude adds a variable, and
+// the drift would show up as a check that passes for one caller and fails for
+// the other — so there is one copy.
+func ScrubEnv(environ []string) []string {
 	out := make([]string, 0, len(environ))
 	for _, e := range environ {
 		key := e

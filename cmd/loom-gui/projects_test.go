@@ -3,9 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/henricktissink/loom/internal/delegate"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
@@ -400,5 +403,73 @@ func TestResolverKeepsLastGoodOnReadError(t *testing.T) {
 	}
 	if visible(r, hidRepo) {
 		t.Error("a transient read error un-hid the project (§6: the worse failure)")
+	}
+}
+
+// testAttributor is testResolver wrapped in delegation §14.1's override, with
+// no Runs source. Every row in these fixtures has an empty `delegation`
+// column, so the wrapper is a pure pass-through and the assertions are
+// unchanged from when they called the bare resolver — which is exactly the
+// property the override is supposed to have for non-delegation rows.
+func testAttributor(hidden ...string) *delegate.Attributor {
+	return &delegate.Attributor{Resolver: testResolver(hidden...)}
+}
+
+// Orchestrator §13 (GUI): "ListProjectDetails issues ONE orchestrator query for
+// N projects (no N+1)."
+//
+// This is a promise about how many statements run, and an N+1 returns byte-
+// identical output to the hoisted version — so it is asserted from underneath
+// the driver rather than from the DTO. The obvious spelling of this code (ask
+// for this project's orchestrator inside the per-project loop) is what the test
+// exists to catch, and it is the spelling anyone adding a second per-project
+// field will reach for first.
+//
+// The second half matters as much as the count: one read means the whole DTO
+// sits on a single consistent snapshot. A per-project query could interleave
+// with a spawn and return a set no single instant ever had.
+func TestListProjectDetails_orchestratorIsOneQueryForNProjects(t *testing.T) {
+	st, err := store.OpenWithDriver("sqlite-counting", filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	a := newApp(nil, tmux.New(), st, nil, projects.New(st),
+		func() time.Time { return time.Unix(1000, 0) })
+
+	const projectCount = 7
+	for i := 0; i < projectCount; i++ {
+		root := filepath.Join(t.TempDir(), "p")
+		if err := a.st.UpsertProject(store.Project{
+			Root: root, Name: "P" + strconv.Itoa(i), Origin: "discovered", CreatedAt: 1, UpdatedAt: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// Every second project has a live orchestrator, so the join in memory is
+		// exercised in both directions — a hit and a miss.
+		if i%2 == 0 {
+			if _, _, err := a.st.ClaimOrchestrator(root, int64(100+i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	var details []ProjectDetailDTO
+	hits := countStatements("orchestrators", func() { details = a.ListProjectDetails() })
+	if len(hits) != 1 {
+		t.Fatalf("ListProjectDetails issued %d orchestrator statements for %d projects, want 1:\n%s",
+			len(hits), projectCount, strings.Join(hits, "\n"))
+	}
+
+	// And the answer is still right — a count test that passed by not asking at
+	// all would be worse than no test.
+	withOrch := 0
+	for _, d := range details {
+		if d.Orchestrator != nil {
+			withOrch++
+		}
+	}
+	if withOrch != (projectCount+1)/2 {
+		t.Errorf("%d projects carry an orchestrator block, want %d", withOrch, (projectCount+1)/2)
 	}
 }

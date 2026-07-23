@@ -16,8 +16,13 @@ type Recipe struct {
 	ProjectLabel string
 	Cwd          string
 	Model        string // "", "opus", "sonnet", "fable"
-	Mode         string // "", "plan", "acceptEdits", "auto", "bypassPermissions"
-	Seed         string // optional initial prompt or /slash-command
+	// Mode is claude's --permission-mode. "" means "do not pass the flag at
+	// all", which is not the same as "default": "default" is passed through
+	// verbatim and is what a manifest writes when it wants the standard mode
+	// named explicitly rather than left implicit. Argv already emits it
+	// correctly; this list is what was out of date.
+	Mode string // "", "default", "plan", "acceptEdits", "auto", "bypassPermissions"
+	Seed string // optional initial prompt or /slash-command
 	// AddDirs are the other repos of a scoped multi-repo launch (spec §5):
 	// Cwd is the primary repo, AddDirs the siblings claude is granted via
 	// --add-dir. Empty for a root launch or a single-repo launch.

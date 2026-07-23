@@ -21,6 +21,11 @@ type Project struct {
 	Solo      bool
 	Missing   bool
 	Collapsed bool // rail section collapsed (§8) — a project flag, not a GUI-local setting
+	// NotesDir is where the orchestrator's three notes files live (orchestrator
+	// spec §3), '' until the first spawn materializes it. Stored literally, not
+	// derived from Root: RepointProject rewrites Root, and a derived default
+	// would silently relocate a project's whole brain on a directory rename.
+	NotesDir  string
 	CreatedAt int64
 	UpdatedAt int64
 }
@@ -56,7 +61,7 @@ var (
 	ErrReservedRoot = errors.New("store: reserved project root")
 )
 
-const projectCols = "root, name, origin, hidden, solo, missing, collapsed, created_at, updated_at"
+const projectCols = "root, name, origin, hidden, solo, missing, collapsed, notes_dir, created_at, updated_at"
 
 // UpsertProject inserts a project and NEVER updates an existing row. Discovery
 // re-runs on every launch and must not clobber a user-set name, hidden, solo
@@ -67,16 +72,18 @@ const projectCols = "root, name, origin, hidden, solo, missing, collapsed, creat
 // against the scan set (§7 retirement).
 func (s *Store) UpsertProject(p Project) error {
 	_, err := s.db.Exec(`INSERT INTO projects (`+projectCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(root) DO NOTHING`,
-		p.Root, p.Name, p.Origin, p.Hidden, p.Solo, p.Missing, p.Collapsed, p.CreatedAt, p.UpdatedAt)
+		p.Root, p.Name, p.Origin, p.Hidden, p.Solo, p.Missing, p.Collapsed, p.NotesDir,
+		p.CreatedAt, p.UpdatedAt)
 	return err
 }
 
 func (s *Store) GetProject(root string) (Project, bool, error) {
 	var p Project
 	err := s.db.QueryRow("SELECT "+projectCols+" FROM projects WHERE root=?", root).Scan(
-		&p.Root, &p.Name, &p.Origin, &p.Hidden, &p.Solo, &p.Missing, &p.Collapsed, &p.CreatedAt, &p.UpdatedAt)
+		&p.Root, &p.Name, &p.Origin, &p.Hidden, &p.Solo, &p.Missing, &p.Collapsed, &p.NotesDir,
+		&p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return Project{}, false, nil
 	}
@@ -100,7 +107,7 @@ func (s *Store) ListProjects() ([]Project, error) {
 	for rows.Next() {
 		var p Project
 		if err := rows.Scan(&p.Root, &p.Name, &p.Origin, &p.Hidden, &p.Solo,
-			&p.Missing, &p.Collapsed, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&p.Missing, &p.Collapsed, &p.NotesDir, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -145,6 +152,22 @@ func (s *Store) SetProjectSolo(root string, solo bool, now int64) error {
 // last folded the rail".
 func (s *Store) SetProjectCollapsed(root string, collapsed bool) error {
 	_, err := s.db.Exec("UPDATE projects SET collapsed=? WHERE root=?", collapsed, root)
+	return err
+}
+
+// SetProjectNotesDir records where the orchestrator's notes live (orchestrator
+// spec §3). Two writers: the first spawn, materializing the default under
+// ~/.loom, and the user's explicit *Move notes…* gesture. It is a plain setter
+// rather than a CAS because both writers are user-initiated and the loser of a
+// race has simply moved the notes twice — the files themselves are copied, not
+// moved, and the old location is left in place, so no content is at risk.
+//
+// RepointProject deliberately does NOT rewrite this: the notes are Loom's
+// pointer to a directory the user (or Loom) chose, and a directory rename of
+// the project root says nothing about where the brain lives. That is the whole
+// reason the path is stored rather than derived.
+func (s *Store) SetProjectNotesDir(root, dir string, now int64) error {
+	_, err := s.db.Exec("UPDATE projects SET notes_dir=?, updated_at=? WHERE root=?", dir, now, root)
 	return err
 }
 

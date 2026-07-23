@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/henricktissink/loom/internal/arch"
 	"github.com/henricktissink/loom/internal/memory"
+	"github.com/henricktissink/loom/internal/orchestrator"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -34,6 +36,14 @@ type App struct {
 	runner       *workflow.Runner
 	workflowsDir string
 
+	// loomDir is ~/.loom, handed over from cfg.LoomDir in main.go. It is what
+	// delegate.NewLayout needs to derive a run's deterministic worktree paths
+	// (delegation §6.3). It is a field rather than a derivation from
+	// settings.path because that derivation yielded "" whenever the settings
+	// store was absent, and an empty ~/.loom degrades every spawn to a visible
+	// "delegation unavailable" — a real capability lost to a seam.
+	loomDir string
+
 	// projects is the runtime source of truth for launch targets and for §6's
 	// visibility predicate, queried read-through. It replaced a by-value
 	// registry.Discover snapshot taken at startup, which is why a project
@@ -46,6 +56,19 @@ type App struct {
 	// poll loop and the bound methods both call resolver().
 	resMu   sync.Mutex
 	lastRes *projects.Resolver
+
+	// orch is the orchestrator service (orchestrator spec §7/§9/§10). Nil in
+	// tests that do not exercise it; every bound method checks.
+	orch *orchestrator.Service
+
+	// docs is ONE long-lived arch document cache, shared by every read
+	// (orchestration-view §7.4). It is mutex-guarded internally and therefore
+	// safe for the poll goroutine and the bound methods to share. One cache
+	// rather than one per call is the whole point: arch.Documents stats before
+	// reading and serves from cache on an unchanged (size, mtime), so a
+	// per-call cache would re-read every declared document on every tick and
+	// the cache would never hit.
+	docs *arch.Cache
 
 	// auto-summarize guards: sumTried marks sessions already attempted this
 	// process (so a failed/empty summary isn't retried forever); sumBusy keeps
@@ -87,7 +110,7 @@ func (a *App) ListSessions() (out []SessionDTO) {
 	// One resolver per poll, shared by the rail rows and by the notification
 	// join below, so the two can never disagree about what is hidden.
 	res := a.resolver()
-	out = snapshotToDTOs(snap, res)
+	out = snapshotToDTOs(snap, a.attributor(res))
 	a.onSnapshot(snap, out, res)
 	return out
 }
@@ -204,7 +227,7 @@ func (a *App) ListRecent() []FinishedDTO {
 	}
 	res := a.resolver()
 	a.maybeAutoSummarize(rows, res)
-	out = recentToDTOs(rows, a.summaryFor, res)
+	out = recentToDTOs(rows, a.summaryFor, a.attributor(res))
 	if len(out) > recentLimit {
 		out = out[:recentLimit]
 	}
@@ -259,6 +282,22 @@ func (a *App) maybeAutoSummarize(rows []store.SessionRow, res *projects.Resolver
 		id := r.ClaudeSessionID
 		if id == "" || a.sumTried[id] || r.EndedAt < 0 {
 			continue // no id, already attempted, or still live
+		}
+		if orchestrator.IsOrchestratorSession(r.Tags) {
+			// Orchestrator spec §7: an orchestrator's transcript is a
+			// byproduct (§2), never a channel — the NOTES are the deliberate
+			// handoff between generations. Summarizing it spends quota to
+			// produce a thing the echo-chamber guard (§5.4) then refuses to
+			// show anyone, and an LLM summary of an orchestrator's own session
+			// is exactly the recall-compounding artefact that guard exists to
+			// keep out of a successor's brief.
+			//
+			// Skipped WITHOUT marking sumTried, for the same reason as the
+			// hidden case below: the map is per-process, and marking it would
+			// permanently poison the id for this process. The tags column is
+			// mutable — SetTags can drop `orch` — so a marked id could never
+			// recover its summary without a restart.
+			continue
 		}
 		if !visible(res, sessionDirs(r)...) {
 			// §6.2b: hiding suppresses new Loom-initiated background work.

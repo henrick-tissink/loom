@@ -1,22 +1,19 @@
 package main
 
 import (
-	"os/exec"
 	"path/filepath"
-	"strings"
+
+	"github.com/henricktissink/loom/internal/gitdiff"
 )
 
 // RepoDiff is one repo's working-tree changes vs HEAD. Error is non-empty
 // (and the rest empty) when the directory isn't a git work tree.
-type RepoDiff struct {
-	Path      string   `json:"path"`
-	Label     string   `json:"label"`
-	Stat      string   `json:"stat"`      // `git diff HEAD --stat` summary
-	Patch     string   `json:"patch"`     // full `git diff HEAD`
-	Untracked []string `json:"untracked"` // new files not yet tracked
-	Dirty     bool     `json:"dirty"`     // any tracked change or untracked file
-	Error     string   `json:"error"`     // set when the path isn't a git work tree
-}
+//
+// An alias, not a copy: the capture moved down to internal/gitdiff so
+// internal/delegate can use it (ARCHITECTURE §3 — nothing in internal/ may
+// import a frontend), and a parallel struct here would need a converter whose
+// only job is to drift. The JSON keys the panel binds to are pinned there.
+type RepoDiff = gitdiff.RepoDiff
 
 // DiffDTO is a session's changes across ITS WHOLE DIRECTORY SET — cwd plus
 // every --add-dir (§8). gitDiff runs against one directory, so the old
@@ -31,33 +28,16 @@ type DiffDTO struct {
 }
 
 // gitDiff collects the uncommitted changes in cwd (tracked vs HEAD, plus
-// untracked file paths). Shells out; a non-repo or git failure degrades to a
-// RepoDiff with Error set rather than a hard failure.
+// untracked file paths). A non-repo or git failure degrades to a RepoDiff with
+// Error set rather than a hard failure.
 func gitDiff(cwd string) RepoDiff {
 	if cwd == "" {
+		// gitdiff's own wording is generic because it has callers with no
+		// session; the panel's reader has one, and the reason they are looking
+		// at an empty diff is that *their session* has no directory.
 		return RepoDiff{Error: "no working directory for this session"}
 	}
-	d := RepoDiff{Path: cwd}
-	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--is-inside-work-tree").Output()
-	if err != nil || strings.TrimSpace(string(out)) != "true" {
-		d.Error = "not a git repository"
-		return d
-	}
-	stat, _ := exec.Command("git", "-C", cwd, "diff", "HEAD", "--stat").Output()
-	patch, _ := exec.Command("git", "-C", cwd, "diff", "HEAD").Output()
-	untr, _ := exec.Command("git", "-C", cwd, "ls-files", "--others", "--exclude-standard").Output()
-
-	var untracked []string
-	for _, l := range strings.Split(strings.TrimSpace(string(untr)), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			untracked = append(untracked, l)
-		}
-	}
-	d.Stat = strings.TrimRight(string(stat), "\n")
-	d.Patch = string(patch)
-	d.Untracked = untracked
-	d.Dirty = strings.TrimSpace(d.Patch) != "" || len(untracked) > 0
-	return d
+	return gitdiff.WorkingTree(cwd)
 }
 
 // SessionDiff returns the uncommitted changes in every directory a session was

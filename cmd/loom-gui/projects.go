@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/henricktissink/loom/internal/delegate"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
@@ -76,6 +77,31 @@ func attribute(r *projects.Resolver, cwd string) projects.Attribution {
 		return projects.Attribution{}
 	}
 	at, _ := r.Attribute(cwd)
+	return at
+}
+
+// attributor wraps a resolver with delegation §14.1's identity override. EVERY
+// session-row attribution and visibility decision in the DTO layer goes through
+// it, because a delegation child's cwd is a worktree under ~/.loom that matches
+// no project target: the bare resolver answers ok=false, Visible fails closed,
+// and the children vanish from the rail, Finished, search and needs-you the
+// moment anything is hidden — including when the user solos precisely the
+// project the run belongs to. With nothing hidden they group under Ungrouped
+// instead of their project.
+//
+// The override is a WRAPPER, deliberately: internal/projects keeps no knowledge
+// of delegation and its own tests stay exactly as they are. For a row with no
+// delegation column it is a pass-through, so this is safe to route everything
+// through and wrong to route only some things through.
+//
+// *store.Store already satisfies delegate.Runs. The nil check matters: a typed
+// nil in the interface would panic on the first delegation row rather than
+// degrading.
+func (a *App) attributor(res *projects.Resolver) *delegate.Attributor {
+	at := &delegate.Attributor{Resolver: res}
+	if a.st != nil {
+		at.Runs = a.st
+	}
 	return at
 }
 
@@ -178,6 +204,11 @@ type ProjectDetailDTO struct {
 	Collapsed bool             `json:"collapsed"`
 	Ungrouped bool             `json:"ungrouped"`
 	Repos     []ProjectRepoDTO `json:"repos"`
+	// Orchestrator is nil for a project that has never had one and has never
+	// been briefed — the overwhelmingly common case, and the one where an
+	// empty card would be noise. Populated from ONE ListOrchestrators read
+	// joined in memory (see orchestratorsByRoot), never a per-project query.
+	Orchestrator *OrchestratorDTO `json:"orchestrator"`
 }
 
 // ListProjectDetails returns every project with its repos. It is NOT filtered
@@ -203,17 +234,25 @@ func (a *App) ListProjectDetails() []ProjectDetailDTO {
 		byRoot[m.ProjectRoot] = append(byRoot[m.ProjectRoot],
 			ProjectRepoDTO{Path: m.Path, Label: m.Label, Missing: m.Missing})
 	}
+	// One read for the whole list, indexed by root. A query inside the loop
+	// would be an N+1 against a table holding at most one row per project.
+	orchs := a.orchestratorsByRoot()
 	for _, p := range ps {
 		repos := byRoot[p.Root]
 		if repos == nil {
 			repos = []ProjectRepoDTO{}
 		}
+		o, haveRow := orchs[p.Root]
 		out = append(out, ProjectDetailDTO{
 			Root: p.Root, Name: p.Name, Origin: p.Origin,
 			Hidden: p.Hidden, Solo: p.Solo, Missing: p.Missing,
 			Collapsed: p.Collapsed,
 			Ungrouped: p.Root == store.UngroupedRoot,
 			Repos:     repos,
+			// Ungrouped can never have an orchestrator (§2: no directory to
+			// launch at, no coherent repo set), and the backend refuses it —
+			// so it never gets a block to click on either.
+			Orchestrator: a.orchestratorDTOFor(p.Root, o, haveRow),
 		})
 	}
 	return out

@@ -2,6 +2,8 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -652,5 +654,416 @@ func TestDuplicateColumnSwallowIsScopedToStandaloneALTER(t *testing.T) {
 	}
 	if n != 0 {
 		t.Error("the failed slot committed anyway: half-applied migration")
+	}
+}
+
+// TestMigrationV10ToV13FromStaleUserVersion is the orchestration arc's
+// re-entrancy test, run against a REAL DB rather than a fresh one: the new
+// objects are left in place (or selectively removed) and only user_version is
+// rewound, which is the shape that catches a CREATE missing IF NOT EXISTS and
+// an ALTER folded in beside one.
+//
+// Four slots land together — v10 orchestrators, v11 projects.notes_dir, v12 the
+// delegation tables, v13 sessions.delegation — so the replay crosses two
+// standalone ALTERs with re-entrant CREATE slots on both sides of each. That is
+// exactly the arrangement that breaks if either ALTER is ever folded into a
+// neighbouring slot: `duplicate column name` is only swallowed for a slot that
+// is nothing BUT an ALTER (isStandaloneAddColumn), and a multi-statement slot
+// would strand every statement after the failing one while bumping the version
+// over the damage.
+func TestMigrationV10ToV13FromStaleUserVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		// unapply rewinds a fully-migrated DB to look like a v9-era one, to
+		// varying degrees of thoroughness.
+		unapply []string
+		// keepsEdits: the pre-existing rows survived the rewind, so the replay
+		// must not have clobbered them.
+		keepsEdits bool
+	}{
+		{
+			name:       "version only", // all four slots replayed against live objects
+			unapply:    []string{"PRAGMA user_version = 9"},
+			keepsEdits: true,
+		},
+		{
+			name: "both new ALTER columns rewound",
+			unapply: []string{
+				"ALTER TABLE projects DROP COLUMN notes_dir",
+				"ALTER TABLE sessions DROP COLUMN delegation",
+				"PRAGMA user_version = 9",
+			},
+		},
+		{
+			// One CREATE slot's objects gone, the other's intact: v10 must
+			// rebuild and v12 must no-op through IF NOT EXISTS in the same
+			// replay. keepsEdits is false because the dropped table took its
+			// row with it — that is the rewind, not a replay defect.
+			name: "orchestrators dropped, delegation tables kept",
+			unapply: []string{
+				"DROP TABLE orchestrators",
+				"PRAGMA user_version = 9",
+			},
+		},
+		{
+			name: "genuine pre-v10 database", // nothing to collide with
+			unapply: []string{
+				"DROP TABLE orchestrators",
+				"DROP TABLE delegation_artifacts",
+				"DROP TABLE delegation_tasks",
+				"DROP TABLE delegation_runs",
+				"ALTER TABLE projects DROP COLUMN notes_dir",
+				"ALTER TABLE sessions DROP COLUMN delegation",
+				"PRAGMA user_version = 9",
+			},
+		},
+		{
+			name: "all the way back to v6", // the slice-1 replay still works underneath
+			unapply: []string{
+				"DROP TABLE orchestrators",
+				"DROP TABLE delegation_artifacts",
+				"DROP TABLE delegation_tasks",
+				"DROP TABLE delegation_runs",
+				"ALTER TABLE projects DROP COLUMN notes_dir",
+				"ALTER TABLE projects DROP COLUMN collapsed",
+				"ALTER TABLE sessions DROP COLUMN delegation",
+				"ALTER TABLE sessions DROP COLUMN add_dirs",
+				"PRAGMA user_version = 6",
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "loom.db")
+			s, err := Open(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want int
+			if err := s.db.QueryRow("PRAGMA user_version").Scan(&want); err != nil {
+				t.Fatal(err)
+			}
+			// real state the replay must not disturb, one row per new object
+			if err := s.Upsert(row("loom-old")); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetProjectNotesDir(UngroupedRoot, "/h/.loom/projects/x/notes", 1500); err != nil {
+				t.Fatal(err)
+			}
+			if ok, _, err := s.ClaimOrchestrator("/w/a", 1000); err != nil || !ok {
+				t.Fatalf("claim: %v %v", ok, err)
+			}
+			run, err := s.InsertDelegationRun("atlas", "/w/a", "{}", "{}", 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			raw, err := sql.Open("sqlite", "file:"+p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, stmt := range c.unapply {
+				if _, err := raw.Exec(stmt); err != nil {
+					t.Fatalf("unapply %q: %v", stmt, err)
+				}
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			s2, err := Open(p)
+			if err != nil {
+				t.Fatalf("re-entrant Open failed: %v", err)
+			}
+			defer s2.Close()
+
+			var v int
+			if err := s2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+				t.Fatal(err)
+			}
+			if v != want {
+				t.Fatalf("user_version = %d, want %d", v, want)
+			}
+			if _, ok, _ := s2.Get("loom-old"); !ok {
+				t.Fatal("session history lost across the replay")
+			}
+			if c.keepsEdits {
+				ung, ok, err := s2.GetProject(UngroupedRoot)
+				if err != nil || !ok || ung.NotesDir != "/h/.loom/projects/x/notes" {
+					t.Fatalf("notes_dir clobbered by the replay: %+v %v %v", ung, ok, err)
+				}
+				o, ok, err := s2.GetOrchestrator("/w/a")
+				if err != nil || !ok || o.SpawnedAt != 1000 {
+					t.Fatalf("orchestrator claim clobbered by the replay: %+v %v %v", o, ok, err)
+				}
+				got, ok, err := s2.GetDelegationRun(run.ID)
+				if err != nil || !ok || got.Slug != run.Slug {
+					t.Fatalf("delegation run clobbered by the replay: %+v %v %v", got, ok, err)
+				}
+			}
+
+			// every new object is usable after the replay, not merely present
+			if err := s2.Upsert(row("loom-new")); err != nil {
+				t.Fatalf("sessions unusable after the v13 replay: %v", err)
+			}
+			if err := s2.SetSessionDelegation("loom-new", "1:schema"); err != nil {
+				t.Fatalf("sessions.delegation unusable after the v13 replay: %v", err)
+			}
+			if err := s2.SetProjectNotesDir(UngroupedRoot, "/h/notes2", 1600); err != nil {
+				t.Fatalf("projects.notes_dir unusable after the v11 replay: %v", err)
+			}
+			if _, _, err := s2.ClaimOrchestrator("/w/b", 2000); err != nil {
+				t.Fatalf("orchestrators unusable after the v10 replay: %v", err)
+			}
+			r2, err := s2.InsertDelegationRun("atlas2", "/w/a", "{}", "{}", 2000)
+			if err != nil {
+				t.Fatalf("delegation_runs unusable after the v12 replay: %v", err)
+			}
+			if err := s2.InsertDelegationTask(DelegationTask{RunID: r2.ID, TaskID: "t",
+				State: "pending", RepoLabel: "r", UpdatedAt: 2000}); err != nil {
+				t.Fatalf("delegation_tasks unusable after the v12 replay: %v", err)
+			}
+			if err := s2.UpsertDelegationArtifact(DelegationArtifact{RunID: r2.ID,
+				ArtifactID: "a", TaskID: "t", Path: "p"}); err != nil {
+				t.Fatalf("delegation_artifacts unusable after the v12 replay: %v", err)
+			}
+		})
+	}
+}
+
+// TestUserVersionIsThirteen asserts the ABSOLUTE migration head, which the
+// orchestrator spec §13 asks for by name and for a specific reason: revision 1
+// of that spec allocated an already-occupied slot, and migrate() loops
+// `for i := v; i < len(migrations)`, so a DB sitting at the colliding version
+// would skip the new slot entirely and open cleanly WITHOUT it — green on every
+// fresh-DB test, broken on every real one. A relative assertion cannot catch
+// that. When a later slice adds a slot, this number moves with it deliberately.
+func TestUserVersionIsThirteen(t *testing.T) {
+	s := open(t)
+	var v int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != 13 {
+		t.Fatalf("user_version = %d, want 13", v)
+	}
+	for _, obj := range []string{"orchestrators", "delegation_runs", "delegation_tasks",
+		"delegation_artifacts"} {
+		var name string
+		if err := s.db.QueryRow(
+			"SELECT name FROM sqlite_master WHERE type='table' AND name=?", obj).Scan(&name); err != nil {
+			t.Fatalf("%s missing: %v", obj, err)
+		}
+	}
+	for _, idx := range []string{"idx_dtasks_state", "idx_druns_project"} {
+		var name string
+		if err := s.db.QueryRow(
+			"SELECT name FROM sqlite_master WHERE type='index' AND name=?", idx).Scan(&name); err != nil {
+			t.Fatalf("%s missing: %v", idx, err)
+		}
+	}
+	// delegation_amendments belongs to the deferred §§9-12 block. An empty
+	// table is an invitation to write to it, so its absence is deliberate and
+	// pinned here — unparking that work must add a slot, not discover one.
+	var name string
+	if err := s.db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='delegation_amendments'",
+	).Scan(&name); err != sql.ErrNoRows {
+		t.Fatalf("delegation_amendments exists (%q, %v); slice 3a does not ship it", name, err)
+	}
+}
+
+// TestSessionDelegationRoundtrip pins migration v13 through the session path.
+// Without it a delegation child's cwd (a worktree under ~/.loom) matches no
+// project target, the resolver fails closed, and every child vanishes from the
+// rail the moment anything is hidden — including when the user soloed the run's
+// own project.
+func TestSessionDelegationRoundtrip(t *testing.T) {
+	s := open(t)
+	r := row("loom-child")
+	if err := s.Upsert(r); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := s.Get("loom-child")
+	if got.Delegation != "" {
+		t.Fatalf("default Delegation = %q, want empty (migration v13 default)", got.Delegation)
+	}
+	if err := s.SetSessionDelegation("loom-child", "7:auth-api"); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = s.Get("loom-child")
+	if got.Delegation != "7:auth-api" {
+		t.Fatalf("Delegation = %q", got.Delegation)
+	}
+	live, _ := s.Live()
+	if len(live) != 1 || live[0].Delegation != "7:auth-api" {
+		t.Fatalf("Delegation lost in query(): %+v", live)
+	}
+	// a re-spawn writes a second row from the first (the Resume shape): the
+	// linkage must survive or the new child is unattributable again
+	resumed := got
+	resumed.Name = "loom-child-2"
+	if err := s.Upsert(resumed); err != nil {
+		t.Fatal(err)
+	}
+	if got2, _, _ := s.Get("loom-child-2"); got2.Delegation != "7:auth-api" {
+		t.Fatalf("resumed Delegation = %q", got2.Delegation)
+	}
+}
+
+// TestProjectNotesDirSurvivesRepoint is the derived-default regression the
+// orchestrator spec §3 names explicitly: notes_dir is MATERIALIZED into the row
+// rather than derived from root, so renaming the project's directory does not
+// silently relocate its whole brain.
+func TestProjectNotesDirSurvivesRepoint(t *testing.T) {
+	s := open(t)
+	if err := s.UpsertProject(Project{Root: "/w/old", Name: "P", Origin: "created",
+		CreatedAt: 1000, UpdatedAt: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := s.GetProject("/w/old"); got.NotesDir != "" {
+		t.Fatalf("default NotesDir = %q, want empty (migration v11 default)", got.NotesDir)
+	}
+	const notes = "/h/.loom/projects/P-9f2c1ab4/notes"
+	if err := s.SetProjectNotesDir("/w/old", notes, 1100); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RepointProject("/w/old", "/w/new", 1200); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.GetProject("/w/new")
+	if err != nil || !ok {
+		t.Fatalf("GetProject after repoint: %v %v", ok, err)
+	}
+	if got.NotesDir != notes {
+		t.Fatalf("NotesDir = %q after repoint, want %q", got.NotesDir, notes)
+	}
+	list, _ := s.ListProjects()
+	for _, p := range list {
+		if p.Root == "/w/new" && p.NotesDir != notes {
+			t.Fatalf("NotesDir lost in ListProjects: %+v", p)
+		}
+	}
+}
+
+// TestMigrationHeadIsPinned pins the schema head. The orchestrator spec §9 and
+// the delegation spec §13.1 were both written against a v9 head and both
+// allocated v10/v11 for different DDL, so the tree renumbered delegation to
+// v12/v13. That renumbering is exactly the kind of decision that a later slice
+// re-breaks by allocating "the next free slot" from a stale spec, and the
+// failure is silent in the worst way: migrate() loops
+// `for i := v; i < len(migrations)`, so a DB already at a colliding version
+// SKIPS the new slot entirely and opens cleanly WITHOUT the tables — green on
+// a fresh DB, broken on every real one.
+//
+// This test failing is not a bug to route around by editing the constant. It
+// means a slot was added, and the question to answer is whether every
+// already-migrated DB in existence will still receive it.
+func TestMigrationHeadIsPinned(t *testing.T) {
+	const wantHead = 13
+
+	s := open(t)
+	var v int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != wantHead {
+		t.Fatalf("PRAGMA user_version = %d, want %d — a migration slot was added or renumbered; "+
+			"confirm a DB already at %d still receives it before updating this constant", v, wantHead, v)
+	}
+}
+
+// TestMigrationsReplayFromEveryStaleVersion is the generalized form of
+// TestMigrationsAreTransactional, and it is what catches a NON-RE-ENTRANT
+// ALTER. Every slot must be replayable against a DB whose objects already
+// exist but whose user_version was rolled back — the pre-fix partial-apply
+// shape, and also what a two-instance install looks like mid-upgrade.
+//
+// CREATE ... IF NOT EXISTS is re-entrant by construction; ALTER TABLE ADD
+// COLUMN is NOT, which is why the house rule gives every ALTER its own slot
+// and applyMigration exempts exactly the standalone-ADD-COLUMN shape. v8, v9
+// and v11 are all bare ALTERs, so replaying from 7, 8 or 10 is the case that
+// actually exercises that exemption. Replaying from EVERY version rather than
+// one hand-picked version means a future ALTER cannot be added into a slot
+// this test does not cover.
+func TestMigrationsReplayFromEveryStaleVersion(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "loom.db")
+	s, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var head int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&head); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// From v1, not v0. v1 predates the IF-NOT-EXISTS house rule and creates
+	// `sessions` bare, so replaying it against a populated DB fails on "table
+	// sessions already exists". That is not a live defect and the fix is not
+	// available: a DB at user_version 0 is by definition a brand-new empty
+	// file, so the replay-from-0 case cannot occur on real data, and the house
+	// rule forbids editing a shipped migration to make a test happy. Every
+	// slot that a real DB can actually be stale at IS covered.
+	for stale := 1; stale <= head; stale++ {
+		t.Run(fmt.Sprintf("from_v%d", stale), func(t *testing.T) {
+			// A real DB copy, not a fresh file: the objects are already there,
+			// so every statement in every replayed slot runs against existing
+			// state — which is the only way a non-re-entrant statement shows up.
+			dir := t.TempDir()
+			dst := filepath.Join(dir, "loom.db")
+			blob, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dst, blob, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			raw, err := sql.Open("sqlite", "file:"+dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version = %d", stale)); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			s2, err := Open(dst)
+			if err != nil {
+				t.Fatalf("replay from stale user_version %d failed: %v", stale, err)
+			}
+			defer s2.Close()
+
+			var got int
+			if err := s2.db.QueryRow("PRAGMA user_version").Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got != head {
+				t.Fatalf("after replay from %d: user_version = %d, want %d", stale, got, head)
+			}
+
+			// The replayed objects must still be USABLE, not merely present —
+			// a re-run that silently emptied or reshaped a table would leave
+			// the version correct and the DB wrong. One touch per slice's
+			// headline table, orchestrator (v10/v11) and delegation (v12/v13)
+			// included, since those are the slots this suite is newest at.
+			if _, err := s2.TranscriptCount(); err != nil {
+				t.Fatalf("transcripts unusable after replay from %d: %v", stale, err)
+			}
+			if _, err := s2.ListOrchestrators(); err != nil {
+				t.Fatalf("orchestrators unusable after replay from %d: %v", stale, err)
+			}
+			if _, err := s2.ListProjects(); err != nil {
+				t.Fatalf("projects unusable after replay from %d: %v", stale, err)
+			}
+		})
 	}
 }

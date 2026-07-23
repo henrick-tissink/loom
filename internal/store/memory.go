@@ -351,9 +351,39 @@ func sanitizeFTSQuery(raw string) string {
 // query builder can't produce a usable FTS expression, or produces one but
 // zero hits qualify. Backed by idx_transcripts_project (migration v6).
 func (s *Store) RecentTranscriptsByProjectDir(projectDir string, limit int) ([]Transcript, error) {
+	return s.RecentTranscriptsByProjectDirs([]string{projectDir}, limit)
+}
+
+// RecentTranscriptsByProjectDirs is the same query over a SET of directories —
+// the orchestrator brief's "Recent work" section (orchestrator spec §5.2) is
+// scoped to {project root} ∪ {member repo paths}, not to one repo.
+//
+// The single-dir form above becomes a one-element wrapper rather than the other
+// way round, which is what makes this a backward-compatible extension: recall's
+// existing callers and their tests are untouched, and slice 1 §10's noted
+// follow-on ("recall's same-project boost still operates on the repo dir, not
+// the project") is paid down for this path without moving recall's own.
+//
+// An empty set returns no rows rather than every row: an unattributable or
+// empty project must not silently widen into a scan of the whole index. Same
+// fail-closed direction as slice 1 §4.
+//
+// The limit applies to the merged result, not per directory — a project whose
+// work all happened in one repo should still fill the section.
+func (s *Store) RecentTranscriptsByProjectDirs(dirs []string, limit int) ([]Transcript, error) {
+	if len(dirs) == 0 {
+		return nil, nil
+	}
+	ph := make([]string, len(dirs))
+	args := make([]any, 0, len(dirs)+1)
+	for i, d := range dirs {
+		ph[i] = "?"
+		args = append(args, d)
+	}
+	args = append(args, limit)
 	rows, err := s.db.Query(
-		"SELECT "+transcriptCols+" FROM transcripts WHERE project_dir=? ORDER BY last_ts DESC LIMIT ?",
-		projectDir, limit)
+		"SELECT "+transcriptCols+" FROM transcripts WHERE project_dir IN ("+
+			strings.Join(ph, ",")+") ORDER BY last_ts DESC LIMIT ?", args...)
 	if err != nil {
 		return nil, err
 	}

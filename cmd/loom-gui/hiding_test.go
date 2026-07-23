@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/henricktissink/loom/internal/delegate"
 	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
@@ -40,7 +41,7 @@ func TestLeak_rail(t *testing.T) {
 		liveIn("cross", visRepo, hidRepo),
 	}}
 
-	all := snapshotToDTOs(snap, testResolver())
+	all := snapshotToDTOs(snap, testAttributor())
 	if len(all) != 3 {
 		t.Fatalf("nothing hidden: want 3 rows, got %d", len(all))
 	}
@@ -51,7 +52,7 @@ func TestLeak_rail(t *testing.T) {
 		t.Errorf("ProjectLabel must stay a display-only passthrough: %+v", all[0])
 	}
 
-	got := snapshotToDTOs(snap, testResolver(hidRoot))
+	got := snapshotToDTOs(snap, testAttributor(hidRoot))
 	if len(got) != 1 || got[0].Name != "vis" {
 		t.Fatalf("rail leaked: %+v", got)
 	}
@@ -63,10 +64,10 @@ func TestLeak_finished(t *testing.T) {
 		{Name: "vis", Cwd: visRepo, EndedAt: 10},
 		{Name: "hid", Cwd: hidRepo, EndedAt: 20},
 	}
-	if got := recentToDTOs(rows, nil, testResolver()); len(got) != 2 {
+	if got := recentToDTOs(rows, nil, testAttributor()); len(got) != 2 {
 		t.Fatalf("nothing hidden: want 2, got %d", len(got))
 	}
-	got := recentToDTOs(rows, nil, testResolver(hidRoot))
+	got := recentToDTOs(rows, nil, testAttributor(hidRoot))
 	if len(got) != 1 || got[0].Name != "vis" {
 		t.Fatalf("Finished leaked: %+v", got)
 	}
@@ -217,10 +218,10 @@ func TestLeak_needsYouCountTitleAndBadge(t *testing.T) {
 		liveIn("vis", visRepo),
 		liveIn("hid", hidRepo),
 	}}
-	if n := needsYouCount(snapshotToDTOs(snap, testResolver())); n != 2 {
+	if n := needsYouCount(snapshotToDTOs(snap, testAttributor())); n != 2 {
 		t.Fatalf("nothing hidden: count = %d, want 2", n)
 	}
-	n := needsYouCount(snapshotToDTOs(snap, testResolver(hidRoot)))
+	n := needsYouCount(snapshotToDTOs(snap, testAttributor(hidRoot)))
 	if n != 1 {
 		t.Fatalf("count = %d, want 1 — the title reads \"loom — %d need you\" and the dock badge the same number", n, n)
 	}
@@ -343,5 +344,218 @@ func TestAutoSummarize_suppressedWhileHiddenAndReEnabledOnUnhide(t *testing.T) {
 	a.sumMu.Unlock()
 	if !tried {
 		t.Fatal("unhiding must re-enable auto-summarize for the row")
+	}
+}
+
+// Orchestrator spec §7: an orchestrator session is never auto-summarized. Its
+// transcript is a byproduct, never a channel — the notes are the deliberate
+// handoff — so the summary costs quota to produce something §5.4's
+// echo-chamber guard then refuses to show anyone.
+//
+// The skip must NOT mark sumTried, for the same per-process reason as the
+// hidden case: tags are mutable, so an id poisoned while tagged could never
+// recover its summary without restarting Loom. Both halves are asserted, and
+// the untagged control row proves the skip is keyed on the tag rather than on
+// something incidental to the fixture.
+func TestAutoSummarize_skipsOrchestratorWithoutPoisoningSumTried(t *testing.T) {
+	a := newTestApp(t)
+	seedProjects(t, a)
+	a.settings = &settingsStore{cur: Settings{AutoSummarize: true}}
+	a.summarizer = &memory.Summarizer{Store: a.st, Binary: "/nonexistent", WorkDir: t.TempDir()}
+
+	orch := []store.SessionRow{{
+		Name: "o", ClaudeSessionID: "cs-orch", Cwd: visRepo, Tags: "orch", EndedAt: 10,
+	}}
+
+	a.maybeAutoSummarize(orch, testResolver())
+	a.sumMu.Lock()
+	tried, busy := a.sumTried["cs-orch"], a.sumBusy
+	a.sumMu.Unlock()
+	if tried {
+		t.Fatal("orchestrator row must be skipped WITHOUT poisoning sumTried")
+	}
+	if busy {
+		t.Fatal("no summarize should have started for an orchestrator session")
+	}
+
+	// The tag is the whole reason: the identical row without it is eligible.
+	untagged := []store.SessionRow{{
+		Name: "o", ClaudeSessionID: "cs-orch", Cwd: visRepo, Tags: "", EndedAt: 10,
+	}}
+	a.maybeAutoSummarize(untagged, testResolver())
+	a.sumMu.Lock()
+	tried = a.sumTried["cs-orch"]
+	a.sumMu.Unlock()
+	if !tried {
+		t.Fatal("an untagged row must still be eligible — the skip is keyed on the orch tag")
+	}
+}
+
+// The token test must not be a substring test. A user's own "orchid" tag is a
+// real tag on a real session, and swallowing it would drop their work out of
+// the Finished summaries with nothing anywhere saying why.
+func TestAutoSummarize_orchTagIsATokenNotASubstring(t *testing.T) {
+	a := newTestApp(t)
+	seedProjects(t, a)
+	a.settings = &settingsStore{cur: Settings{AutoSummarize: true}}
+	a.summarizer = &memory.Summarizer{Store: a.st, Binary: "/nonexistent", WorkDir: t.TempDir()}
+
+	rows := []store.SessionRow{{
+		Name: "x", ClaudeSessionID: "cs-orchid", Cwd: visRepo, Tags: "orchid", EndedAt: 10,
+	}}
+	a.maybeAutoSummarize(rows, testResolver())
+	a.sumMu.Lock()
+	tried := a.sumTried["cs-orchid"]
+	a.sumMu.Unlock()
+	if !tried {
+		t.Fatal(`a session tagged "orchid" was treated as an orchestrator (substring match)`)
+	}
+}
+
+// --- delegation §14.1: child attribution through the REAL DTO path -------
+
+// These are the three cases §17 says revision 1 would have passed while
+// broken, asserted at the DTO layer rather than inside internal/delegate.
+// That placement is the point: the override only fixes anything if the DTO
+// layer actually CALLS it, and a wrapper that exists but is not wired is
+// indistinguishable from no wrapper at all from the user's seat.
+//
+// The fixture uses a real store so the run row, the delegation column and the
+// resolver are joined the way production joins them.
+func delegationFixture(t *testing.T, hidden ...string) (*App, store.SessionRow) {
+	t.Helper()
+	a := newTestApp(t)
+	seedProjects(t, a)
+
+	run, err := a.st.InsertDelegationRun("rearch", visRoot, "{}", "{}", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The child's cwd is a worktree under ~/.loom — outside every project
+	// target, which is the whole reason the prefix scan cannot place it.
+	child := store.SessionRow{
+		Name:            "loom-child",
+		ProjectLabel:    "api",
+		Cwd:             "/home/u/.loom/worktrees/rearch-1/api/account-schema",
+		ClaudeSessionID: "cs-child",
+		Delegation:      delegate.FormatDelegation(run.ID, "account-schema"),
+		EndedAt:         -1,
+		ExitCode:        -1,
+	}
+	if err := a.st.Upsert(child); err != nil {
+		t.Fatal(err)
+	}
+	return a, child
+}
+
+func TestDelegationChildVisibilityThroughDTO(t *testing.T) {
+	tests := []struct {
+		name    string
+		hidden  []string
+		soloed  string
+		wantVis bool
+		why     string
+	}{
+		{
+			name: "solo the run's own project", soloed: visRoot, wantVis: true,
+			why: "the one situation where you most want to watch a run must not blank it",
+		},
+		{
+			name: "solo a different project", soloed: hidRoot, wantVis: false,
+			why: "solo means only that project's work is on screen",
+		},
+		{
+			name: "nothing hidden", wantVis: true, why: "no filtering at all",
+		},
+		{
+			name: "a different project hidden", hidden: []string{hidRoot}, wantVis: true,
+			why: "filtering is on but not for this project — the fail-closed trap",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			a, child := delegationFixture(t)
+			for _, root := range tc.hidden {
+				if err := a.SetProjectHidden(root, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.soloed != "" {
+				if err := a.SetProjectSolo(tc.soloed, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			snap := status.Snapshot{Live: []status.Row{{
+				SessionRow: child, Status: status.NeedsYou, Title: "work",
+			}}}
+			got := snapshotToDTOs(snap, a.attributor(a.resolver()))
+
+			if tc.wantVis && len(got) != 1 {
+				t.Fatalf("child hidden from the rail: %s", tc.why)
+			}
+			if !tc.wantVis && len(got) != 0 {
+				t.Fatalf("child leaked into the rail: %s", tc.why)
+			}
+		})
+	}
+}
+
+// Nothing hidden ⇒ the child groups under its run's PROJECT, not Ungrouped.
+// The rail sections on projectRoot, so an Ungrouped answer scatters a run's
+// children out of their own project even with no filtering on at all.
+func TestDelegationChildGroupsUnderItsProject(t *testing.T) {
+	a, child := delegationFixture(t)
+
+	snap := status.Snapshot{Live: []status.Row{{
+		SessionRow: child, Status: status.NeedsYou, Title: "work",
+	}}}
+	got := snapshotToDTOs(snap, a.attributor(a.resolver()))
+	if len(got) != 1 {
+		t.Fatalf("want 1 row, got %d", len(got))
+	}
+	if got[0].ProjectRoot != visRoot {
+		t.Fatalf("projectRoot = %q, want %q (Ungrouped is %q)",
+			got[0].ProjectRoot, visRoot, store.UngroupedRoot)
+	}
+	if got[0].ProjectName != "Visible" {
+		t.Fatalf("projectName = %q, want the run's project", got[0].ProjectName)
+	}
+}
+
+// The Finished list is a second DTO path with its own visibility call, so it
+// gets its own assertion — §6.3's "one per surface" rule. A fix applied only
+// to the rail is exactly the kind of half-wiring this catches.
+func TestDelegationChildVisibleInFinished(t *testing.T) {
+	a, child := delegationFixture(t)
+	if err := a.SetProjectSolo(visRoot, true); err != nil {
+		t.Fatal(err)
+	}
+	child.EndedAt, child.ExitCode = 2000, 0
+
+	got := recentToDTOs([]store.SessionRow{child}, nil, a.attributor(a.resolver()))
+	if len(got) != 1 {
+		t.Fatal("child vanished from Finished while its own project was soloed")
+	}
+	if got[0].ProjectRoot != visRoot {
+		t.Fatalf("projectRoot = %q, want %q", got[0].ProjectRoot, visRoot)
+	}
+}
+
+// A child whose delegation names a DELETED run falls through to the prefix
+// scan and thus to fail-closed.
+func TestDelegationChildWithDeletedRunFailsClosed(t *testing.T) {
+	a, child := delegationFixture(t)
+	if err := a.SetProjectHidden(hidRoot, true); err != nil { // ⇒ Filtering()
+		t.Fatal(err)
+	}
+	child.Delegation = delegate.FormatDelegation(99999, "account-schema")
+
+	snap := status.Snapshot{Live: []status.Row{{
+		SessionRow: child, Status: status.NeedsYou, Title: "work",
+	}}}
+	if got := snapshotToDTOs(snap, a.attributor(a.resolver())); len(got) != 0 {
+		t.Fatalf("a child naming a deleted run must fail closed, got %+v", got)
 	}
 }

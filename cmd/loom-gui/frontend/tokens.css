@@ -481,3 +481,226 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .wordmark:hover .wave i:nth-child(5) { animation-delay: 0.36s; }
   @keyframes blush-wave { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(0.5); } }
 }
+
+/* ------------------------------------------------------------------ */
+/* ---- orchestration view (slice 4) ----                              */
+/* Everything derives from the tokens above: NO NEW HUES. The graph is  */
+/* neutral-on-surface and spends chroma only where the app already      */
+/* spends it — attention. Motion budget is exactly two moments (§8):    */
+/* the lit wait-edge, and the blocked-on-you dot's glow.                */
+/* ------------------------------------------------------------------ */
+
+.po-arch { display: flex; flex-direction: column; gap: 16px; }
+.dg-hiddenline:empty { display: none; }
+.dg-hiddenline { font-size: 12px; color: var(--text-faint); padding: 2px 0; }
+
+/* ---- block 1: run strip ---- */
+.dg-runname { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+.dg-elapsed { font-size: 11px; color: var(--text-faint); }
+.dg-runsel {
+  margin-left: auto; font-family: var(--font-ui); font-size: 11.5px; color: var(--text-dim);
+  background: var(--surface); border: 1px solid var(--edge); border-radius: 8px; padding: 4px 8px;
+}
+.dg-figs { display: flex; flex-wrap: wrap; gap: 18px; padding: 2px 0; }
+.dg-fig { display: flex; align-items: baseline; gap: 6px; }
+.dg-fig b { font-family: var(--font-mono); font-size: 15px; font-weight: 600; color: var(--text); }
+.dg-fig i { font-style: normal; font-size: 10.5px; letter-spacing: 0.04em; color: var(--text-faint); }
+.dg-fig.dg-f-bad b { color: #a5453a; }
+.dg-chain-fig { cursor: help; }
+.dg-chain-fig:hover b { color: var(--accent-ink); }
+.dg-chiprow, .dg-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.dg-chips { margin-left: auto; }
+.dg-chip {
+  font-family: var(--font-ui); font-size: 10px; color: var(--text-dim);
+  background: var(--bg); border: 1px solid var(--edge); border-radius: 999px;
+  padding: 2px 9px; cursor: default;
+}
+button.dg-chip { cursor: pointer; }
+.dg-chip-mute { color: var(--text-faint); }
+.dg-chip-accent { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent-line); }
+.dg-chip-warn { color: #a5453a; background: #F7E4E0; border-color: #E7B3A9; }
+.dg-count { font-size: 10.5px; color: var(--text-faint); }
+
+/* ---- block 2: blocked on you ---- */
+.dg-brow { cursor: pointer; }
+.dg-bdot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: #C56A4A; box-shadow: 0 0 6px rgba(197, 106, 74, 0.6);
+}
+.dg-reason { font-size: 11.5px; color: var(--accent-ink); }
+.dg-since { margin-left: auto; font-size: 10.5px; color: var(--text-faint); }
+.dg-baction { flex-shrink: 0; padding: 0 8px; }
+
+/* ---- block 3: the graph ---- */
+.dg-host {
+  height: 46vh; min-height: 280px; border: 1px solid var(--edge); border-radius: 9px;
+  background: var(--stage); overflow: hidden; position: relative;
+}
+.dg-legend { font-size: 10.5px; color: var(--text-faint); }
+.dg-fatal { font-family: var(--font-mono); font-size: 11.5px; white-space: pre-wrap; }
+.dg-svg { width: 100%; height: 100%; display: block; cursor: grab; }
+.dg-svg.dragging { cursor: grabbing; }
+
+.dg-card { fill: var(--surface); stroke: var(--edge); stroke-width: 1; }
+.dg-node { cursor: pointer; }
+.dg-node:hover .dg-card { stroke: var(--text-faint); }
+.dg-node:focus { outline: none; }
+.dg-node:focus-visible .dg-card { stroke: var(--accent); stroke-width: 2; }
+.dg-title { fill: var(--text); font-family: var(--font-mono); font-size: 12.5px; }
+.dg-sub { fill: var(--text-faint); font-family: var(--font-ui); font-size: 10.5px; }
+.dg-badge { font-family: var(--font-ui); font-size: 10px; letter-spacing: 0.02em; }
+.dg-warn { fill: #a5453a; font-family: var(--font-ui); font-size: 10px; }
+.dg-bneck { fill: var(--accent-ink); font-family: var(--font-ui); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; }
+.dg-dot { stroke: var(--surface); stroke-width: 1.5; }
+
+/* Lifecycle badge inks. Shared by the SVG badge (fill), the inspector chip and
+   the >200-node table (color), so one state reads the same in all three. */
+.dg-b-plan { fill: var(--text-faint); color: var(--text-faint); }
+.dg-b-ready { fill: var(--accent-ink); color: var(--accent-ink); }
+.dg-b-live { fill: #3E9A80; color: #3E9A80; }
+.dg-b-ok { fill: #4E9C6A; color: #4E9C6A; }
+.dg-b-done { fill: #6FAE66; color: #6FAE66; opacity: 0.75; }
+.dg-b-bad { fill: #a5453a; color: #a5453a; }
+.dg-b-warn { fill: #9C4E38; color: #9C4E38; }
+.dg-b-off { fill: var(--text-faint); color: var(--text-faint); opacity: 0.7; }
+/* "awaiting check" is deliberately colourless: the child has STOPPED and made
+   no verifiable statement about being finished (§2.1). Any ink here would be
+   the completion signal only a gate result is allowed to give. */
+.dg-b-wait { fill: var(--text-dim); color: var(--text-dim); }
+
+.dg-node.dg-done .dg-card { fill: var(--bg); }
+.dg-node.dg-ready .dg-card { stroke: var(--accent-line); }
+.dg-node.dg-blocked .dg-card { fill: var(--accent-soft); stroke: var(--accent-line); }
+.dg-node.dg-blocked .dg-title { fill: var(--accent-ink); }
+.dg-node.dg-bottleneck .dg-card { stroke: var(--accent); stroke-width: 1.6; filter: drop-shadow(0 2px 8px rgba(96, 60, 72, 0.16)); }
+.dg-node.dg-chain .dg-card { stroke: var(--accent-ink); }
+.dg-node.dg-hidden .dg-card { fill: var(--bg); stroke-dasharray: 3 3; }
+.dg-node.dg-hidden .dg-title { fill: var(--text-faint); }
+.dg-node.dg-ghost .dg-card { stroke-dasharray: 4 3; fill: none; }
+
+.dg-edge { fill: none; stroke: var(--edge); stroke-width: 1.5; }
+.dg-edge.chain { stroke: var(--accent-ink); stroke-width: 2; }
+.dg-edge-cycle { stroke: #a5453a; stroke-dasharray: 5 3; }
+.dg-edge.lit { stroke: var(--accent); stroke-dasharray: 6 5; }
+.dg-head { fill: var(--edge); }
+.dg-head-bad { fill: #a5453a; }
+
+/* ---- >200 nodes: the table fallback ---- */
+.dg-tablewrap { max-height: 100%; overflow: auto; }
+.dg-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.dg-table th {
+  text-align: left; font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--text-faint); font-weight: 700; padding: 8px 10px; position: sticky; top: 0; background: var(--stage);
+}
+.dg-table td { padding: 6px 10px; border-top: 1px solid var(--edge); color: var(--text-dim); }
+.dg-trow { cursor: pointer; }
+.dg-trow:hover td { background: var(--sel); }
+.dg-tmono { font-family: var(--font-mono); font-size: 11.5px; }
+.dg-tbadge { font-size: 10.5px; }
+
+/* ---- the node inspector ---- */
+.dg-modal { width: 640px; max-width: calc(100vw - 48px); max-height: 84vh; overflow-y: auto; }
+.dgi-head { display: flex; align-items: center; gap: 8px; }
+.dgi-badge { font-size: 11px; }
+.dgi-dot { width: 7px; height: 7px; border-radius: 50%; }
+.dgi-sess { font-size: 11px; color: var(--text-faint); font-family: var(--font-mono); }
+.dgi-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
+.dgi-fact { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.dgi-fact span { font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-faint); flex-shrink: 0; }
+.dgi-fact code { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dgi-sec { font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); font-weight: 700; padding-top: 6px; }
+.dgi-pre {
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--text); margin: 0;
+  background: var(--bg); border: 1px solid var(--edge); border-radius: 8px; padding: 8px 10px;
+  white-space: pre-wrap; max-height: 22vh; overflow-y: auto;
+}
+.dgi-brief { max-height: 26vh; }
+.dgi-cmd { color: var(--accent-ink); }
+.dgi-out { max-height: 30vh; white-space: pre; overflow-x: auto; }
+.dgi-checkline { font-size: 12px; font-family: var(--font-mono); }
+.dgi-checkline.ok { color: #4E9C6A; }
+.dgi-checkline.bad { color: #a5453a; }
+.dgi-outcome { font-size: 12.5px; color: var(--text-dim); }
+.dgi-actions { flex-wrap: wrap; }
+
+/* ---- the orchestrator block (orchestrator §10) ---- */
+.po-orch-state { font-size: 11.5px; color: var(--text-dim); }
+.po-orch-facts { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11.5px; color: var(--text-faint); }
+.po-orch-facts code { font-family: var(--font-mono); font-size: 11px; }
+
+/* ---- block 4: the document reader ---- */
+.doc-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.doc-tab {
+  font-family: var(--font-ui); font-size: 11.5px; color: var(--text-dim);
+  background: transparent; border: 1px solid var(--edge); border-radius: 999px;
+  padding: 3px 11px; cursor: pointer;
+}
+.doc-tab.active { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent-line); }
+.doc-reader { display: grid; grid-template-columns: minmax(0, 1fr) 176px; gap: 18px; align-items: start; }
+.doc-pane {
+  min-width: 0; max-height: 62vh; overflow-y: auto;
+  border: 1px solid var(--edge); border-radius: 9px; background: var(--surface); padding: 14px 16px;
+}
+.doc-meta { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; }
+.doc-path { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); }
+.doc-outline { display: flex; flex-direction: column; gap: 1px; position: sticky; top: 0; max-height: 62vh; overflow-y: auto; }
+.doc-orow {
+  text-align: left; font-family: var(--font-ui); font-size: 11px; color: var(--text-dim);
+  background: transparent; border: 0; border-left: 2px solid var(--edge); padding: 3px 8px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.doc-orow:hover { color: var(--accent-ink); border-left-color: var(--accent-line); }
+.doc-o3 { padding-left: 18px; font-size: 10.5px; color: var(--text-faint); }
+
+.doc-body { font-size: 13px; line-height: 1.6; color: var(--text-dim); }
+.doc-h { color: var(--text); margin: 16px 0 6px; }
+.doc-h1 { font-size: 16px; } .doc-h2 { font-size: 14px; } .doc-h3 { font-size: 12.5px; }
+.doc-body > .doc-h:first-child { margin-top: 0; }
+.doc-p { margin: 0 0 9px; }
+.doc-list { margin: 0 0 9px; padding-left: 20px; }
+.doc-list li { margin-bottom: 3px; }
+.doc-quote { margin: 0 0 9px; padding: 2px 0 2px 12px; border-left: 2px solid var(--accent-line); color: var(--text-faint); }
+.doc-rule { border: 0; border-top: 1px solid var(--edge); margin: 14px 0; }
+.doc-icode { font-family: var(--font-mono); font-size: 11.5px; background: var(--bg); border-radius: 4px; padding: 1px 4px; }
+.doc-link { color: var(--accent-ink); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.doc-inert { color: var(--text-faint); text-decoration: underline dotted; }
+.doc-img { color: var(--text-faint); font-style: italic; }
+.doc-code { border: 1px solid var(--edge); border-radius: 8px; overflow: hidden; margin: 0 0 10px; }
+.doc-code-warn { border-color: #E7B3A9; }
+.doc-codehead {
+  display: flex; align-items: center; gap: 8px; padding: 5px 10px;
+  background: var(--bg); border-bottom: 1px solid var(--edge);
+}
+.doc-lang { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); }
+.doc-chip { font-size: 10px; color: var(--text-dim); background: var(--surface); border: 1px solid var(--edge); border-radius: 999px; padding: 1px 8px; }
+.doc-chip-bad { color: #a5453a; background: #F7E4E0; border-color: #E7B3A9; }
+.doc-codehead .tact { margin-left: auto; padding: 0 8px; }
+.doc-pre { margin: 0; padding: 9px 11px; overflow-x: auto; background: var(--surface); }
+.doc-pre code { font-family: var(--font-mono); font-size: 11.5px; color: var(--text); }
+.doc-tablewrap { overflow-x: auto; margin: 0 0 10px; }
+.doc-table { border-collapse: collapse; font-size: 12px; }
+.doc-table th, .doc-table td { border: 1px solid var(--edge); padding: 5px 9px; text-align: left; }
+.doc-table th { background: var(--bg); color: var(--text); font-weight: 600; }
+
+.doc-sec { display: flex; flex-direction: column; gap: 4px; }
+.doc-card { border: 1px solid var(--edge); border-radius: 9px; background: var(--surface); padding: 8px 12px; }
+.doc-card > summary { display: flex; align-items: baseline; gap: 10px; cursor: pointer; list-style: none; }
+.doc-card > summary::-webkit-details-marker { display: none; }
+.doc-card.superseded { opacity: 0.55; }
+.doc-ctitle { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+.doc-status { font-size: 10px; color: var(--accent-ink); background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 999px; padding: 1px 8px; }
+.doc-status.unknown { color: var(--text-faint); background: var(--bg); border-color: var(--edge); }
+.doc-date { font-size: 10.5px; color: var(--text-faint); }
+.doc-conseq { font-size: 11.5px; color: var(--text-dim); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* Motion moment one of two: a wait-edge that is COSTING TIME RIGHT NOW
+     drifts toward its consumer. One animation, one meaning. */
+  .dg-edge.lit { animation: dg-flow 2.2s linear infinite; }
+  @keyframes dg-flow { to { stroke-dashoffset: -22; } }
+  /* Moment two: the blocked-on-you dot, the same glow the titlebar's attention
+     marker already uses. Nothing else on this page moves. */
+  .dg-bdot { animation: dg-pulse 2.6s ease-in-out infinite; }
+  @keyframes dg-pulse { 50% { box-shadow: 0 0 10px rgba(197, 106, 74, 0.85); } }
+  .doc-tab, .dg-chip, .doc-orow { transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease; }
+}

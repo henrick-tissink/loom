@@ -350,6 +350,76 @@ func TestRecentTranscriptsByProjectDirOrderingAndLimit(t *testing.T) {
 	}
 }
 
+// TestRecentTranscriptsByProjectDirs covers the orchestrator brief's "Recent
+// work" scope (orchestrator spec §5.2): a project is {root} ∪ {member repos},
+// so the recency query has to span a SET of directories, and the limit applies
+// to the merged result rather than per directory.
+func TestRecentTranscriptsByProjectDirs(t *testing.T) {
+	s := open(t)
+	mk := func(id, project string, lastTS int64) {
+		if err := s.UpsertTranscript(Transcript{SessionID: id, ProjectDir: project, LastTS: lastTS}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("a", "/w/bankenstein", 100)
+	mk("b", "/w/ballista", 300)
+	mk("c", "/w/bankenstein", 200)
+	mk("d", "/w/elsewhere", 400) // another project: never quoted in this brief
+
+	cases := []struct {
+		name  string
+		dirs  []string
+		limit int
+		want  []string
+	}{
+		{
+			name: "spans the whole member set, newest first",
+			dirs: []string{"/w/bankenstein", "/w/ballista"}, limit: 10,
+			want: []string{"b", "c", "a"},
+		},
+		{
+			// the cap is on the merged result: a project whose work all
+			// happened in one repo should still fill the section
+			name: "limit applies to the merge, not per directory",
+			dirs: []string{"/w/bankenstein", "/w/ballista"}, limit: 2,
+			want: []string{"b", "c"},
+		},
+		{
+			name: "one dir behaves exactly like the single-dir form",
+			dirs: []string{"/w/bankenstein"}, limit: 10,
+			want: []string{"c", "a"},
+		},
+		{
+			// fail-closed, slice 1 §4's direction: an unattributable or empty
+			// project must not silently widen into a scan of the whole index
+			name: "empty set returns nothing, never everything",
+			dirs: nil, limit: 10,
+			want: nil,
+		},
+		{
+			name: "unknown dir contributes nothing",
+			dirs: []string{"/w/nope"}, limit: 10,
+			want: nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := s.RecentTranscriptsByProjectDirs(c.dirs, c.limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(c.want) {
+				t.Fatalf("got %d rows %+v, want %v", len(got), got, c.want)
+			}
+			for i := range c.want {
+				if got[i].SessionID != c.want[i] {
+					t.Fatalf("row %d = %q, want %q (full: %+v)", i, got[i].SessionID, c.want[i], got)
+				}
+			}
+		})
+	}
+}
+
 func TestSearchSessionsRawUsesPrebuiltExprNoSanitizing(t *testing.T) {
 	s := open(t)
 	if err := s.UpsertTranscript(Transcript{

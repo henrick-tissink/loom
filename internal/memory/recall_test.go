@@ -338,3 +338,121 @@ func TestRelatedWideLimitReachesPastTheOldFixedPool(t *testing.T) {
 			len(got), minFetchLimit)
 	}
 }
+
+// --- RelatedIn: the dir SET (orchestrator spec §5.2/§13) ----------------
+
+// TestRelatedInSameProjectForHitInAnyDir is §13's binding clause: a project's
+// "same project" is {root} ∪ {member repos}, so a hit in ANY dir of the set
+// carries the boost. The single-dir composition this replaced ranked with the
+// wrong flag — a hit in a member repo other than dirs[0] sorted BELOW a
+// cross-project hit and was only filtered afterwards, so the boost never
+// applied to it. Each member dir is asserted independently, because a
+// membership test that accidentally only ever consults dirs[0] passes any
+// test that puts the interesting row first.
+func TestRelatedInSameProjectForHitInAnyDir(t *testing.T) {
+	dirs := []string{"/w/proj", "/w/proj/api", "/w/proj/web"}
+
+	for _, member := range dirs {
+		t.Run(member, func(t *testing.T) {
+			s := openStore(t)
+			// The member-repo hit is deliberately the WEAKEST by raw bm25.
+			seedRecallSession(t, s, "target", member, "notes about database performance work", 50)
+			for i, id := range []string{"cross-1", "cross-2", "cross-3"} {
+				seedRecallSession(t, s, id, "/w/elsewhere",
+					"database performance database performance database performance tuning", int64(1000+i))
+			}
+
+			got, err := RelatedIn(s, dirs, "database performance tuning", 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) == 0 || got[0].T.SessionID != "target" {
+				t.Fatalf("hit in member dir %q was not boosted to first: %+v", member, got)
+			}
+			if !got[0].SameProject {
+				t.Fatalf("hit in member dir %q not marked SameProject", member)
+			}
+			for _, h := range got[1:] {
+				if h.SameProject {
+					t.Fatalf("hit outside the set marked SameProject: %+v", h)
+				}
+			}
+		})
+	}
+}
+
+// TestRelatedInRecencyFallbackCoversWholeSet: the fallback is set-scoped too.
+// A fallback that only covered dirs[0] would silently blank the section for a
+// project whose recent work happened in a member repo.
+func TestRelatedInRecencyFallbackCoversWholeSet(t *testing.T) {
+	s := openStore(t)
+	seedRecallSession(t, s, "in-root", "/w/proj", "irrelevant body text", 100)
+	seedRecallSession(t, s, "in-member", "/w/proj/api", "irrelevant body text", 200)
+	seedRecallSession(t, s, "outside", "/w/elsewhere", "irrelevant body text", 300)
+
+	// All stopwords -> empty expr -> recency fallback.
+	got, err := RelatedIn(s, []string{"/w/proj", "/w/proj/api"}, "the for with", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].T.SessionID != "in-member" || got[1].T.SessionID != "in-root" {
+		t.Fatalf("got %+v, want set-scoped recency order [in-member in-root]", got)
+	}
+	for _, h := range got {
+		if !h.SameProject {
+			t.Fatalf("fallback row not marked SameProject: %+v", h)
+		}
+	}
+}
+
+// TestRelatedInEmptySetIsFailClosed: an empty dir set must not widen into a
+// scan of the whole index. Same direction as
+// store.RecentTranscriptsByProjectDirs and slice 1 §4.
+func TestRelatedInEmptySetIsFailClosed(t *testing.T) {
+	s := openStore(t)
+	seedRecallSession(t, s, "somewhere", "/w/elsewhere", "irrelevant body text", 100)
+
+	got, err := RelatedIn(s, nil, "the for with", 5) // fallback path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty dir set returned %d rows, want none (fail-closed): %+v", len(got), got)
+	}
+
+	ranked, err := RelatedIn(s, nil, "irrelevant body text", 5) // ranked path
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range ranked {
+		if h.SameProject {
+			t.Fatalf("empty dir set marked a hit SameProject: %+v", h)
+		}
+	}
+}
+
+// TestRelatedIsOneElementRelatedIn pins the wrapper relationship §5.2 binds.
+// If Related ever stops delegating, the single-dir behaviour and the set
+// behaviour can drift apart silently.
+func TestRelatedIsOneElementRelatedIn(t *testing.T) {
+	s := openStore(t)
+	seedRecallSession(t, s, "a", "/w/proj", "planning the database migration carefully", 100)
+	seedRecallSession(t, s, "b", "/w/other", "planning the database migration carefully", 200)
+
+	one, err := Related(s, "/w/proj", "database migration", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := RelatedIn(s, []string{"/w/proj"}, "database migration", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != len(set) {
+		t.Fatalf("Related got %d hits, RelatedIn({d}) got %d", len(one), len(set))
+	}
+	for i := range one {
+		if one[i].T.SessionID != set[i].T.SessionID || one[i].SameProject != set[i].SameProject {
+			t.Fatalf("divergence at %d: Related=%+v RelatedIn=%+v", i, one[i], set[i])
+		}
+	}
+}

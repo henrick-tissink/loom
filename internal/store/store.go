@@ -16,9 +16,26 @@ type Store struct{ db *sql.DB }
 // Open applies the mandatory concurrency pragmas (spec §5): WAL for
 // cross-process safety, busy_timeout against SQLITE_BUSY, and a single
 // connection so one process never self-contends.
-func Open(path string) (*Store, error) {
+func Open(path string) (*Store, error) { return OpenWithDriver("sqlite", path) }
+
+// OpenWithDriver is Open over a caller-supplied database/sql driver name.
+//
+// It exists for one reason, and it is worth stating so nobody mistakes it for
+// configuration: some bindings promise a QUERY COUNT rather than a value —
+// orchestrator §13 binds "ListProjectDetails issues one orchestrator query for
+// N projects (no N+1)" — and a promise about how many statements ran cannot be
+// asserted from outside the driver. A test registers a counting driver that
+// wraps modernc's and passes its name here.
+//
+// The rejected alternative was a counter on Store itself, incremented in every
+// query path: that is production code carrying a test's apparatus through every
+// call site, and it would drift out of date the first time someone added a
+// query without the increment. This adds nothing to the hot path.
+//
+// Production calls Open. Nothing else should call this.
+func OpenWithDriver(driverName, path string) (*Store, error) {
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +197,131 @@ func (s *Store) migrate() error {
 		// would break a replay from a stale user_version even though every
 		// CREATE in that slot is idempotent.
 		`ALTER TABLE projects ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0`,
+		// v10: orchestrators (spec docs/superpowers/specs/
+		// 2026-07-22-orchestrator-brief-design.md §9) — at most one
+		// orchestrator session per project, enforced by the PK rather than by a
+		// UI guard, because two Loom instances against one DB is a supported
+		// state and a UI guard is per-process.
+		//
+		// The row is a POINTER, not a record: everything in it is rederivable
+		// by scanning live sessions for the `orch` tag and attributing their
+		// cwds, so losing the table costs a singleton guarantee for one poll
+		// interval and never a session or a note.
+		//
+		// session_name='' means "claim in flight" — the claim is taken BEFORE
+		// the launch (the AdvanceRunCAS claim-before-side-effect discipline),
+		// so a launch that fails after a successful claim strands a row that
+		// the orchestrator sweep deletes once it is older than its grace.
+		// ended_at=-1 means live; a terminated orchestrator's row is KEPT so
+		// the overview can say "last orchestrator ran Tuesday", and a new
+		// spawn overwrites it (see ClaimOrchestrator's conflict predicate).
+		`CREATE TABLE IF NOT EXISTS orchestrators (
+			project_root      TEXT PRIMARY KEY,
+			session_name      TEXT NOT NULL DEFAULT '',
+			claude_session_id TEXT NOT NULL DEFAULT '',
+			spawned_at        INTEGER NOT NULL,
+			ended_at          INTEGER NOT NULL DEFAULT -1
+		)`,
+		// v11: the project's notes directory (orchestrator spec §3) — where the
+		// agent-authored brain (loom-map.md / loom-decisions.md / loom-open.md)
+		// lives. Empty means "not materialized yet"; the first spawn writes the
+		// literal path back here rather than deriving it on read, because
+		// RepointProject changes `root` and a derived default would silently
+		// relocate a project's whole brain on a directory rename.
+		//
+		// Own slot: ALTER has no IF NOT EXISTS, same reason as v2/v3/v8/v9.
+		`ALTER TABLE projects ADD COLUMN notes_dir TEXT NOT NULL DEFAULT ''`,
+		// v12: delegation (spec docs/superpowers/specs/
+		// 2026-07-22-delegation-design.md §13.1) — orchestration runs, their
+		// tasks, and the artifacts tasks publish.
+		//
+		// RENUMBERED FROM THE SPEC'S v10/v11 (deviation, deliberate): both the
+		// orchestrator spec §9 and the delegation spec §13.1 were written
+		// against a v9 head and both allocated v10/v11 for different DDL. Two
+		// slots cannot hold four migrations. The orchestrator pair keeps v10/v11
+		// (it is the earlier slice) and delegation moves to v12/v13. The failure
+		// this avoids is the one the orchestrator spec §9 describes for its own
+		// renumbering: migrate() loops `for i := v; i < len(migrations)`, so a
+		// DB already at the colliding version would skip the new slot entirely
+		// and open cleanly WITHOUT the tables — green on a fresh DB, broken on
+		// a real one.
+		//
+		// manifest_json is a SNAPSHOT (workflow_runs.def_json precedent): a run
+		// replays what it was created from even if the on-disk manifest is
+		// edited or deleted underneath it. base_shas pins one commit per repo at
+		// run creation so every child of a run branches from the same place.
+		//
+		// delegation_runs.integration and delegation_tasks.spawn_snapshot carry
+		// no writer in slice 3a — §§10 and 12.3.3 are deferred until 3a has run
+		// on a real initiative. They are declared here anyway because adding a
+		// column later costs a standalone ALTER slot, and the whole point of
+		// landing the schema in one pass is that no later slice has to touch
+		// the migration list.
+		//
+		// delegation_amendments (§11.3) is deliberately ABSENT: amendments are
+		// part of the deferred §§9-12 block, and an empty table is an invitation
+		// to write to it. It gets its own slot when that work is unparked.
+		`CREATE TABLE IF NOT EXISTS delegation_runs (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			slug          TEXT NOT NULL UNIQUE,
+			name          TEXT NOT NULL,
+			project_root  TEXT NOT NULL,
+			manifest_json TEXT NOT NULL,
+			base_shas     TEXT NOT NULL,
+			integration   TEXT NOT NULL DEFAULT '',
+			status        TEXT NOT NULL,
+			created_at    INTEGER NOT NULL,
+			updated_at    INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_druns_project ON delegation_runs(project_root, created_at);
+		CREATE TABLE IF NOT EXISTS delegation_tasks (
+			run_id         INTEGER NOT NULL,
+			task_id        TEXT NOT NULL,
+			state          TEXT NOT NULL,
+			session_name   TEXT NOT NULL DEFAULT '',
+			repo_label     TEXT NOT NULL,
+			worktree       TEXT NOT NULL DEFAULT '',
+			branch         TEXT NOT NULL DEFAULT '',
+			base_sha       TEXT NOT NULL DEFAULT '',
+			base_producers TEXT NOT NULL DEFAULT '',
+			check_status   TEXT NOT NULL DEFAULT '',
+			check_exit     INTEGER NOT NULL DEFAULT 0,
+			check_out      TEXT NOT NULL DEFAULT '',
+			check_at       INTEGER NOT NULL DEFAULT 0,
+			branch_head    TEXT NOT NULL DEFAULT '',
+			block_json     TEXT NOT NULL DEFAULT '',
+			pending_seed   TEXT NOT NULL DEFAULT '',
+			divergence     TEXT NOT NULL DEFAULT '',
+			spawn_snapshot TEXT NOT NULL DEFAULT '',
+			flags          TEXT NOT NULL DEFAULT '',
+			updated_at     INTEGER NOT NULL,
+			PRIMARY KEY (run_id, task_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_dtasks_state ON delegation_tasks(state);
+		CREATE TABLE IF NOT EXISTS delegation_artifacts (
+			run_id       INTEGER NOT NULL,
+			artifact_id  TEXT NOT NULL,
+			task_id      TEXT NOT NULL,
+			path         TEXT NOT NULL,
+			fingerprint  TEXT NOT NULL DEFAULT '',
+			commit_sha   TEXT NOT NULL DEFAULT '',
+			published_at INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (run_id, artifact_id)
+		)`,
+		// v13: the reverse lookup from a session row to the delegation task it
+		// belongs to, as "<runID>:<taskID>" (delegation spec §13.1/§14.1).
+		//
+		// It exists because attribution needs it and tags cannot serve: a
+		// child's cwd is `~/.loom/worktrees/…`, which matches no
+		// {projects.root} ∪ {project_repos.path} target, so Resolver.Attribute
+		// fails and Visible fails CLOSED — the moment anything is hidden or
+		// soloed, every delegation child vanishes from the rail, including when
+		// the user soloed the run's own project. §14.1's override resolves
+		// runID → delegation_runs.project_root instead, keyed on identity
+		// rather than on path geometry.
+		//
+		// Own slot: ALTER has no IF NOT EXISTS, same reason as v2/v3/v8/v9/v11.
+		`ALTER TABLE sessions ADD COLUMN delegation TEXT NOT NULL DEFAULT ''`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {
@@ -269,13 +411,20 @@ type SessionRow struct {
 	// the store stays a dumb pipe (the same discipline as workflow_runs.
 	// session_names, whose invariants the runner owns).
 	AddDirs string
+	// Delegation is "<runID>:<taskID>" for a delegation child, '' otherwise —
+	// see migration v13. It is the identity attribution keys on: a child's cwd
+	// is a worktree under ~/.loom and matches no project target, so a
+	// path-based resolver fails closed on it. Kept as the raw composite string
+	// for the same reason AddDirs is kept as raw JSON: the store stays a dumb
+	// pipe and SessionRow stays comparable.
+	Delegation string
 }
 
-const cols = "name, claude_session_id, project_label, cwd, model, mode, seed, tags, created_at, ended_at, exit_code, last_status, seed_status, title, add_dirs"
+const cols = "name, claude_session_id, project_label, cwd, model, mode, seed, tags, created_at, ended_at, exit_code, last_status, seed_status, title, add_dirs, delegation"
 
 func (s *Store) Upsert(r SessionRow) error {
 	_, err := s.db.Exec(`INSERT INTO sessions (`+cols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET
 			claude_session_id=excluded.claude_session_id,
 			project_label=excluded.project_label, cwd=excluded.cwd,
@@ -283,10 +432,22 @@ func (s *Store) Upsert(r SessionRow) error {
 			tags=excluded.tags, created_at=excluded.created_at,
 			ended_at=excluded.ended_at, exit_code=excluded.exit_code,
 			last_status=excluded.last_status, seed_status=excluded.seed_status,
-			title=excluded.title, add_dirs=excluded.add_dirs`,
+			title=excluded.title, add_dirs=excluded.add_dirs,
+			delegation=excluded.delegation`,
 		r.Name, r.ClaudeSessionID, r.ProjectLabel, r.Cwd, r.Model, r.Mode,
 		r.Seed, r.Tags, r.CreatedAt, r.EndedAt, r.ExitCode, r.LastStatus, r.SeedStatus,
-		r.Title, r.AddDirs)
+		r.Title, r.AddDirs, r.Delegation)
+	return err
+}
+
+// SetSessionDelegation links a session row to the delegation task it is the
+// child of, as "<runID>:<taskID>" (migration v13). Separate from Upsert
+// because the linkage is written AFTER the launch — Launcher.Launch mints the
+// session id itself, so the task↔session binding cannot be part of the row's
+// first write, and the delegation spec §13.3 discloses that window rather than
+// pretending it closed it.
+func (s *Store) SetSessionDelegation(name, delegation string) error {
+	_, err := s.db.Exec("UPDATE sessions SET delegation=? WHERE name=?", delegation, name)
 	return err
 }
 
@@ -325,6 +486,47 @@ func (s *Store) SetClaudeSessionID(name, id string) error {
 func (s *Store) SetTags(name, tags string) error {
 	_, err := s.db.Exec("UPDATE sessions SET tags=? WHERE name=?", tags, name)
 	return err
+}
+
+// SessionTag is one (claude session id, tags) pair — the only two columns a
+// tag-membership question needs.
+type SessionTag struct {
+	ClaudeSessionID string
+	Tags            string
+}
+
+// TaggedSessions returns every session row that carries any tag at all and has
+// a claude session id, live or finished, in one query.
+//
+// It replaces the Live() ∪ Recent(CountEnded()) reconstruction the orchestrator
+// echo-chamber guard used to do: three round-trips, two of them full-table, both
+// materializing every column of every session row in the install to look at one
+// field. This is one scan of two columns over the (usually small) tagged subset.
+//
+// It deliberately returns the RAW tags string rather than filtering by tag here.
+// Tags are a free-form field (`orch`, `fan:<group>`, `wf:<id>`) with no schema,
+// and membership is a TOKEN test, not a substring test — a `tags LIKE '%orch%'`
+// filter would silently swallow a user's own "orchid" or "reorch" tag and drop
+// their real sessions out of every brief with nothing anywhere saying why. No
+// SQLite index can express a token test over a free-form column, so pushing the
+// predicate down would buy nothing and cost correctness. The tokenizer stays in
+// the one package that owns the convention, and this stays a narrow read.
+func (s *Store) TaggedSessions() ([]SessionTag, error) {
+	rows, err := s.db.Query(
+		"SELECT claude_session_id, tags FROM sessions WHERE tags != '' AND claude_session_id != ''")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionTag
+	for rows.Next() {
+		var t SessionTag
+		if err := rows.Scan(&t.ClaudeSessionID, &t.Tags); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Get(name string) (SessionRow, bool, error) {
@@ -459,7 +661,8 @@ func (s *Store) query(q string, args ...any) ([]SessionRow, error) {
 		var r SessionRow
 		if err := rows.Scan(&r.Name, &r.ClaudeSessionID, &r.ProjectLabel, &r.Cwd,
 			&r.Model, &r.Mode, &r.Seed, &r.Tags, &r.CreatedAt, &r.EndedAt,
-			&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title, &r.AddDirs); err != nil {
+			&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title, &r.AddDirs,
+			&r.Delegation); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -473,6 +676,7 @@ func scanOne(row rowScanner) (SessionRow, error) {
 	var r SessionRow
 	err := row.Scan(&r.Name, &r.ClaudeSessionID, &r.ProjectLabel, &r.Cwd,
 		&r.Model, &r.Mode, &r.Seed, &r.Tags, &r.CreatedAt, &r.EndedAt,
-		&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title, &r.AddDirs)
+		&r.ExitCode, &r.LastStatus, &r.SeedStatus, &r.Title, &r.AddDirs,
+		&r.Delegation)
 	return r, err
 }

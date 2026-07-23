@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/henricktissink/loom/internal/arch"
 	"github.com/henricktissink/loom/internal/config"
 	"github.com/henricktissink/loom/internal/memory"
+	"github.com/henricktissink/loom/internal/orchestrator"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
@@ -95,6 +97,22 @@ func run() error {
 	app := newApp(engine, tm, st, launcher, svc, time.Now)
 	app.settings = newSettingsStore(cfg.LoomDir)
 	session.SetClaudeTheme(app.settings.get().TerminalTheme) // match Claude's theme to the terminal
+	app.loomDir = cfg.LoomDir
+	app.orch = orchestrator.New(st, launcher, cfg.LoomDir)
+	app.docs = arch.NewCache()
+	// The orchestrator sweep runs beside projects' own (orchestrator §7/§9):
+	// it adopts a live orch-tagged session with no row, retires a claim whose
+	// session went terminal, and reaps a claim that never became one. Its
+	// error is SURFACED rather than swallowed — a sweep that quietly stops
+	// working is how the per-project singleton silently becomes a duplicate,
+	// and a duplicate orchestrator is two agents writing the same notes files.
+	// Non-fatal for the same reason reconcile is: a recovery pass that failed
+	// is not a reason to refuse to start.
+	if reaped, serr := app.SweepOrchestrators(); serr != nil {
+		fmt.Fprintln(os.Stderr, "loom-gui: sweep orchestrators:", serr)
+	} else if reaped > 0 {
+		fmt.Fprintf(os.Stderr, "loom-gui: reaped %d stale orchestrator claim(s)\n", reaped)
+	}
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
 	app.runner = &workflow.Runner{Store: st, Launcher: launcher, ClaudeConfigDir: cfg.ClaudeConfigDir}
 	app.workflowsDir = workflowsDir
