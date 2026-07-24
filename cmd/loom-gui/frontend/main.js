@@ -3499,6 +3499,7 @@ let term = null;
 let fit = null;
 let dataUnsub = null;
 let exitUnsub = null;
+let termRO = null; // ResizeObserver on the terminal host — see selectSession
 let attachGen = 0; // bumped per selectSession; guards stale async callbacks
 
 function b64ToBytes(b64) {
@@ -3511,6 +3512,7 @@ function b64ToBytes(b64) {
 function teardownTerminal() {
   if (dataUnsub) { dataUnsub(); dataUnsub = null; }
   if (exitUnsub) { exitUnsub(); exitUnsub = null; }
+  if (termRO) { termRO.disconnect(); termRO = null; }
   window.removeEventListener("resize", onResize);
   if (activeName) { window.go.main.App.CloseSession(activeName); }
   if (term) { term.dispose(); term = null; }
@@ -3527,9 +3529,15 @@ function selectSession(name) {
   const header = document.createElement("div");
   header.id = "stage-header";
   stage.appendChild(header);
+  const outer = document.createElement("div");
+  outer.id = "terminal";
+  stage.appendChild(outer);
+  // xterm mounts into this padding-free inner wrapper so FitAddon reads the
+  // content width (not the border-box width incl. padding) — see #term-inner in
+  // tokens.css. Without it the grid overflows and clips text on the right.
   const host = document.createElement("div");
-  host.id = "terminal";
-  stage.appendChild(host);
+  host.id = "term-inner";
+  outer.appendChild(host);
   renderStageHeader(name);
   renderRail(latestSessions, latestRecent); // reflect active highlight immediately
 
@@ -3571,7 +3579,26 @@ function selectSession(name) {
       term.write("\r\n\x1b[31mattach failed: " + e + "\x1b[0m\r\n");
     });
 
+  // A ResizeObserver on the terminal host is the RELIABLE resize signal. The
+  // window 'resize' event can fire mid-maximize, before layout settles, so
+  // fit() reads an intermediate size and the grid ends up wider/taller than the
+  // pane — clipping text on the right and eating the bottom padding (both
+  // observed). The observer fires AFTER layout with the final size; a rAF
+  // coalesces the burst a resize produces. window 'resize' is kept as a
+  // belt-and-braces fallback. Observing the host (not .xterm) can't loop: the
+  // host's size comes from the flex layout, not from the grid fit changes.
   window.addEventListener("resize", onResize);
+  let roPending = false;
+  termRO = new ResizeObserver(() => {
+    if (roPending) return;
+    roPending = true;
+    requestAnimationFrame(() => { roPending = false; onResize(); });
+  });
+  termRO.observe(host);
+  // The very first fit can run before the mono font has been measured, giving a
+  // wrong cell width and thus the wrong column count; re-fit once fonts are
+  // ready so the grid matches the pane on the initial attach too.
+  document.fonts.ready.then(() => { if (gen === attachGen) onResize(); });
 }
 
 function onResize() {

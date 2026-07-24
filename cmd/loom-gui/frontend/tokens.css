@@ -253,6 +253,15 @@ body {
 .sh-pill i { width: 6px; height: 6px; border-radius: 50%; }
 
 #terminal { flex: 1; min-height: 0; padding: 12px 14px; background: #FCF7F5; box-shadow: inset 0 6px 12px -8px rgba(0, 0, 0, 0.10); }
+/* xterm mounts into this padding-free inner wrapper, NOT #terminal directly.
+   FitAddon sizes the grid from getComputedStyle(parent).width — and with the
+   global `box-sizing: border-box`, that returns #terminal's BORDER-box width
+   (padding included), so mounting into #terminal made FitAddon overcount columns
+   by the padding: the grid overflowed ~28px, clipping text on the right and
+   eating the bottom padding. The inner wrapper has no padding, so its computed
+   width IS the content width and the grid fits with the 12/14 padding intact.
+   (Verified: 191→187 cols, grid 1495px→1464px inside a 1484px pane.) */
+#term-inner { width: 100%; height: 100%; }
 :root[data-term-theme="dark"] #terminal { background: #241E22; box-shadow: inset 0 6px 12px -8px rgba(0, 0, 0, 0.35); }
 
 /* "⌘-click to open" hint shown while hovering a terminal link */
