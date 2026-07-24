@@ -65,15 +65,20 @@ body {
 #new-session:active { transform: translateY(0); box-shadow: 0 1px 2px rgba(70, 50, 100, 0.06); }
 #new-session svg { width: 13px; height: 13px; }
 
-.tb-right { --wails-draggable: no-drag; display: flex; align-items: center; gap: 10px; }
+.tb-right { --wails-draggable: no-drag; display: flex; align-items: center; gap: 3px; }
+/* Icon buttons are a QUIET cluster: no resting border or fill — just the glyph,
+   so they read as icons rather than empty boxes competing with New. A soft tint
+   lights on hover. Tight 3px gap groups the three; the readout's left margin
+   sets them apart from it. */
 #search-btn, #prefs-btn, #wf-btn {
   --wails-draggable: no-drag;
   display: inline-flex; align-items: center; justify-content: center;
   width: 30px; height: 28px; color: var(--text-dim);
-  background: transparent; border: 1px solid var(--edge); border-radius: 8px; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: 8px; cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
 }
-#search-btn:hover, #prefs-btn:hover, #wf-btn:hover { color: var(--text); border-color: var(--text-faint); }
-#search-btn svg, #prefs-btn svg, #wf-btn svg { width: 14px; height: 14px; }
+#search-btn:hover, #prefs-btn:hover, #wf-btn:hover { color: var(--text); background: var(--sel); }
+#search-btn svg, #prefs-btn svg, #wf-btn svg { width: 15px; height: 15px; }
 
 /* ---- workflows modal ---- */
 .wf-modal { width: 560px; max-width: calc(100vw - 48px); }
@@ -142,19 +147,21 @@ body {
 .pi-label { font-size: 13px; color: var(--text); }
 .pi-hint { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
 .attn {
-  /* A status READOUT, not a button: no border and a flatter fill so it does not
-     masquerade as a second primary action beside New. Height matches the icon
-     buttons and New (28px) so the whole status bar shares one control height —
-     the mismatched 21/26/28px heights read as ragged. margin-left groups the
-     readout+action pair away from the icon cluster. */
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 28px; box-sizing: border-box; margin-left: 4px;
-  font-size: 11px; color: var(--accent-ink);
-  background: var(--accent-soft); border: 1px solid transparent;
-  border-radius: 999px; padding: 0 11px; font-variant-numeric: tabular-nums;
+  /* A status READOUT, not a button — no pill, no border. The glowing dot is the
+     attention signal and the text is information, so New is the ONLY solid
+     control in the bar and reads unambiguously as the primary action. The
+     margins set the readout apart from the icon cluster (left) and New (right)
+     without a container. 28px height keeps it centred on the same axis. */
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 28px; box-sizing: border-box; margin: 0 6px 0 9px;
+  font-size: 11.5px; font-weight: 500; color: var(--accent-ink);
+  font-variant-numeric: tabular-nums;
 }
 .attn:empty { display: none; }
-.attn .attn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--needs-you, #C56A4A); box-shadow: 0 0 6px rgba(197, 106, 74, 0.6); }
+.attn .attn-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--needs-you, #C56A4A);
+  box-shadow: 0 0 0 3px rgba(197, 106, 74, 0.13), 0 0 7px rgba(197, 106, 74, 0.55);
+}
 
 /* ---- body grid ---- */
 /* grid-template-rows: minmax(0,1fr) caps the single row at the flex height so a
