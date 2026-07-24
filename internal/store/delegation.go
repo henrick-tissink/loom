@@ -14,17 +14,18 @@
 // snapshot the caller acted on went stale; the row is left COMPLETELY
 // untouched and the caller must not perform the side effect it was claiming.
 //
-// SCOPE NOTE: this is slice 3a only. §§9-12 (integration worktrees, Loom-run
-// merges, cross-repo checks, rendezvous, amendments, the deadlock detector)
-// are deferred until 3a has run on a real initiative, so `delegation_runs.
-// integration` and `delegation_tasks.spawn_snapshot` have no writer here, and
-// `delegation_amendments` does not exist. The columns are declared in migration
-// v12 anyway so unparking that work costs no migration slot.
+// SCOPE NOTE: §§9-12 (integration worktrees, Loom-run merges, cross-repo
+// checks, rendezvous, amendments, the deadlock detector) are no longer parked.
+// `delegation_runs.integration` and `delegation_tasks.spawn_snapshot` — declared
+// without a writer in migration v12 for exactly this moment — have writers here
+// now; `delegation_amendments` arrives in v14 and `delegation_tasks.
+// needs_snapshot` in v15.
 package store
 
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // DelegationRun is one row of `delegation_runs` (migration v12).
@@ -35,8 +36,11 @@ import (
 // creation so every child of the run branches from the same commit — that is
 // what makes integration deterministic.
 //
-// Integration is JSON {repoLabel: {head,status,at,out}} and is unwritten in
-// 3a (§10, deferred).
+// Integration is JSON {repoLabel: {head,status,at,out}} — §10.2's per-repo
+// staging result at `pre`, which is the left column of its blame table: red with
+// the task merged but green at `pre` blames the task, red at `pre` too blames
+// the baseline and no task is blamed. It is the run's memory of the previous
+// pass, so it must survive a restart between passes.
 type DelegationRun struct {
 	ID           int64
 	Slug         string // "<manifest-name>-<id>"; the worktree and branch component
@@ -80,9 +84,58 @@ type DelegationTask struct {
 	BlockJSON     string
 	PendingSeed   string
 	Divergence    string // JSON file lists (§12.3)
-	SpawnSnapshot string // §12.3.3 — deferred, no writer in 3a
-	Flags         string
-	UpdatedAt     int64
+	// SpawnSnapshot is §12.3.3's out-of-worktree tripwire: JSON
+	// {dir: [{path,mtime,size}]} over every in-scope repo's primary working tree
+	// and every add-dir'd integration worktree, captured at spawn. `--add-dir`
+	// grants write and cannot be revoked (spike), so this is the only thing that
+	// can see a child writing outside its worktree by absolute path.
+	SpawnSnapshot string
+	// NeedsSnapshot is §10.5's stale-contract baseline (migration v15): JSON
+	// {artifactID: {fingerprint, commit}} for every artifact this task `needs`,
+	// as those artifacts stood when the task was spawned. Recorded because
+	// delegation_artifacts holds only the LATEST publication — a producer sent
+	// back by §10.3 overwrites the fingerprint the consumer was built against,
+	// and without a copy the alarm compares the current value with itself.
+	NeedsSnapshot string
+	// SeedOwedSince is when a continuation seed became owed (migration v17), and
+	// it is NOT UpdatedAt. §12.2's `block-stale` row measures the age of the
+	// DEBT; UpdatedAt is the age of the last write to the row, and every delivery
+	// attempt is a write. Zero means no seed is owed.
+	SeedOwedSince int64
+	// CertifiedSHA is the task-branch commit a green §10.2 pass certified
+	// (migration v18). §5.2's gate compares it against the branch head at merge
+	// time so that the diff a human approved is the diff that lands.
+	CertifiedSHA string
+	Flags        string
+	UpdatedAt    int64
+}
+
+// DelegationAmendment is one row of `delegation_amendments` (migration v14):
+// one recorded change to the effective plan, §11.3.
+//
+// APPEND-ONLY, and that is a property of this file, not of the caller: nothing
+// here updates Kind, Body, CreatedAt or Seq once written. The effective graph is
+// the manifest snapshot plus these rows replayed in Seq order, so an amendment
+// that could be rewritten would silently rewrite history a child is already
+// parked against.
+//
+// Body is opaque JSON whose shape depends on Kind (§11.3's needs-artifact edge,
+// re-plan request, authorization amendment). The store stays a dumb pipe for the
+// same reason it does for BlockJSON: the parse — and the cycle detection every
+// amendment must re-run (§11.3/§4.5) — lives in internal/delegate, above it.
+type DelegationAmendment struct {
+	RunID      int64
+	Seq        int64
+	Kind       string
+	Body       string
+	ApprovedAt int64 // 0 = proposed, not yet approved
+	// RejectedAt is the human's NO (migration v16). Zero means no decision, not
+	// "approved" — the pair is exclusive and both being zero is the only state
+	// that means "still on offer". Kept as a timestamp beside ApprovedAt rather
+	// than folded into a status column for the reason approved_at gives: a
+	// decision is when it was made, and two spellings of one fact disagree.
+	RejectedAt int64
+	CreatedAt  int64
 }
 
 // DelegationArtifact is one row of `delegation_artifacts` (migration v12): a
@@ -104,8 +157,10 @@ const (
 	drunCols  = "id, slug, name, project_root, manifest_json, base_shas, integration, status, created_at, updated_at"
 	dtaskCols = "run_id, task_id, state, session_name, repo_label, worktree, branch, base_sha, " +
 		"base_producers, check_status, check_exit, check_out, check_at, branch_head, " +
-		"block_json, pending_seed, divergence, spawn_snapshot, flags, updated_at"
+		"block_json, pending_seed, divergence, spawn_snapshot, needs_snapshot, " +
+		"seed_owed_since, certified_sha, flags, updated_at"
 	dartCols = "run_id, artifact_id, task_id, path, fingerprint, commit_sha, published_at"
+	damdCols = "run_id, seq, kind, body, approved_at, rejected_at, created_at"
 )
 
 // InsertDelegationRun creates a run row at status 'planning' and returns it
@@ -208,6 +263,28 @@ func (s *Store) AdvanceDelegationRunCAS(id int64, expectedStatus, newStatus stri
 		newStatus, now, id, expectedStatus)
 }
 
+// SetDelegationRunIntegrationCAS replaces the per-repo integration blob only if
+// it is still byte-identical to what the caller read.
+//
+// A CAS rather than a setter because the blob is a MAP over repos and two
+// integration passes for two different repos can complete concurrently (§10.2
+// serializes passes per RUN, and two Loom instances against one DB serialize
+// nothing). A plain setter makes each writer round-trip the whole map, so the
+// later write erases the other repo's freshly-recorded baseline — and §10.2's
+// blame table then reads a missing baseline as "no previous result", which
+// flips an attribution from `baseline` to `the task` and blames a child for a
+// red the environment caused. Merging inside SQLite was the alternative and is
+// rejected: it needs JSON1 semantics in the store, and the store does not get to
+// understand a payload it is a pipe for.
+//
+// claimed=false means re-read and re-apply. The caller must not also re-run the
+// checks: it is recording a result it already has.
+func (s *Store) SetDelegationRunIntegrationCAS(id int64, expected, next string, now int64) (claimed bool, err error) {
+	return s.casExec(
+		"UPDATE delegation_runs SET integration=?, updated_at=? WHERE id=? AND integration=?",
+		next, now, id, expected)
+}
+
 // AbandonDelegationRunCAS retires a run from any non-terminal status. Unlike
 // AdvanceDelegationRunCAS it does not name an expected status, because abandon
 // is the one transition the human can issue against a run in any state; what it
@@ -227,12 +304,12 @@ func (s *Store) AbandonDelegationRunCAS(id int64, now int64) (claimed bool, err 
 // writer; this one only ever adds.
 func (s *Store) InsertDelegationTask(t DelegationTask) error {
 	_, err := s.db.Exec(`INSERT INTO delegation_tasks (`+dtaskCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(run_id, task_id) DO NOTHING`,
 		t.RunID, t.TaskID, t.State, t.SessionName, t.RepoLabel, t.Worktree, t.Branch,
 		t.BaseSHA, t.BaseProducers, t.CheckStatus, t.CheckExit, t.CheckOut, t.CheckAt,
 		t.BranchHead, t.BlockJSON, t.PendingSeed, t.Divergence, t.SpawnSnapshot,
-		t.Flags, t.UpdatedAt)
+		t.NeedsSnapshot, t.SeedOwedSince, t.CertifiedSHA, t.Flags, t.UpdatedAt)
 	return err
 }
 
@@ -440,6 +517,43 @@ func (s *Store) RecordTaskCheckCAS(runID int64, taskID, expectedState, newState,
 		newState, checkStatus, exit, out, now, branchHead, now, runID, taskID, expectedState)
 }
 
+// ClaimTaskIntegrationCAS is §10.2's serialization, enforced INSIDE the UPDATE:
+// it moves one task into `integrating` only while no task of the same run is
+// already there.
+//
+// Run-wide exclusion is not a nicety. A cross check (§10.2 step 4) reads several
+// repos' integration worktrees at once and must not see one mid-merge; two
+// concurrent passes in the SAME repo are worse still, because step 0's `pre` is
+// captured by one and `git reset --hard <pre>` executed by the other, which
+// silently discards a sibling's verified merge from the staging branch.
+//
+// The predicate lives in the statement for the reason ClaimTaskSpawnCAS's cap
+// does: a caller that counts `integrating` tasks and then claims has two
+// moments, and both racers count zero. An in-process mutex is not a candidate at
+// all — two Loom instances against one DB is a supported configuration and a
+// mutex is per-process.
+//
+// expectedStates is a source SET the caller must name in code (AdvanceTaskFromAnyCAS's
+// argument): `verified` on the first attempt, plus whatever state a §10.2
+// re-attempt starts from. Passing `integrating` itself is safe rather than
+// clever — the exclusion predicate counts the task's own row and refuses.
+func (s *Store) ClaimTaskIntegrationCAS(runID int64, taskID string, expectedStates []string, now int64) (claimed bool, previous string, err error) {
+	const q = `UPDATE delegation_tasks SET state='integrating', updated_at=?
+		 WHERE run_id=? AND task_id=? AND state=?
+		   AND (SELECT COUNT(*) FROM delegation_tasks
+		         WHERE run_id=? AND state='integrating') = 0`
+	for _, st := range expectedStates {
+		ok, err := s.casExec(q, now, runID, taskID, st, runID)
+		if err != nil {
+			return false, "", err
+		}
+		if ok {
+			return true, st, nil
+		}
+	}
+	return false, "", nil
+}
+
 // AbandonTaskCAS retires a task from any state except a terminal one. §13.2
 // puts `abandoned` reachable "from anywhere"; refusing to re-abandon is what
 // makes claimed=false mean something the caller can report.
@@ -460,6 +574,26 @@ func (s *Store) SetTaskFlags(runID int64, taskID, flags string, now int64) error
 		flags, now, runID, taskID)
 }
 
+// SetTaskFlagsCAS is SetTaskFlags for a flag that is the ONLY record of a
+// failure — §11.4's undelivered seed, §10.5's stale-contract withdrawal — rather
+// than a badge a later poll would recompute anyway.
+//
+// Both exist because the two cases have opposite failure modes. Flags is one
+// JSON set, so a plain write is read-modify-write over the WHOLE set: a watchdog
+// clearing `stalled` at the same moment the seed deliverer records its failure
+// erases the failure, and §12's whole premise is that failures are visible. The
+// unconditional setter is still correct for a badge — retrying a CAS on every
+// poll to re-assert `stalled` costs more than the stale badge it prevents — so
+// the caller chooses, and this comment is the basis on which it chooses.
+//
+// claimed=false means the set moved: re-read, re-merge, re-try. It does NOT
+// mean the flag is set.
+func (s *Store) SetTaskFlagsCAS(runID int64, taskID, expected, next string, now int64) (claimed bool, err error) {
+	return s.casExec(
+		"UPDATE delegation_tasks SET flags=?, updated_at=? WHERE run_id=? AND task_id=? AND flags=?",
+		next, now, runID, taskID, expected)
+}
+
 // SetTaskBlock records the child's block declaration verbatim. The parse
 // happens above the store: a malformed declaration is still evidence and is
 // still shown to the human (the `block-malformed` flag), so the store keeps the
@@ -472,9 +606,26 @@ func (s *Store) SetTaskBlock(runID int64, taskID, blockJSON string, now int64) e
 // SetTaskPendingSeed stores an undelivered continuation seed — the same
 // durable-seed shape as workflow_runs.pending_seed, whose whole point is that
 // a seed which was never delivered is visible rather than lost.
+//
+// seed_owed_since is stamped ONLY on the transition from "nothing owed" to
+// "something owed", which is why it is a CASE and not an assignment. Every
+// caller of this function is either arming a new debt or RE-ARMING one it just
+// failed to deliver, and the poll re-attempts every couple of seconds; a plain
+// assignment would restart the clock on every attempt and §12.2's `block-stale`
+// row — the only escalation a parked child has — could never reach its 5-minute
+// threshold. The row's own updated_at cannot serve for the same reason: it is
+// the age of the last WRITE, and an attempt is a write.
+//
+// The seed text is still overwritten on every call: a newer continuation
+// supersedes an older one (deliver() re-reads for exactly that reason), and the
+// debt those two texts represent is the same debt.
 func (s *Store) SetTaskPendingSeed(runID int64, taskID, seed string, now int64) error {
-	return s.execTask("UPDATE delegation_tasks SET pending_seed=?, updated_at=? WHERE run_id=? AND task_id=?",
-		seed, now, runID, taskID)
+	return s.execTask(`UPDATE delegation_tasks
+		 SET pending_seed=?,
+		     seed_owed_since = CASE WHEN seed_owed_since = 0 THEN ? ELSE seed_owed_since END,
+		     updated_at=?
+		 WHERE run_id=? AND task_id=?`,
+		seed, now, now, runID, taskID)
 }
 
 // ClearTaskPendingSeedCAS clears the seed only if it is still the exact text
@@ -483,9 +634,13 @@ func (s *Store) SetTaskPendingSeed(runID int64, taskID, seed string, now int64) 
 // double-delivery guard): an unconditional clear here would erase a NEWER seed
 // written between the read and the send, and the child would sit blocked
 // forever on a continuation nothing will re-issue.
+//
+// It clears seed_owed_since in the SAME statement. Two writes would mean a
+// window in which nothing is owed and a stale debt clock is still ticking, and
+// §12.2 would offer a retry for a seed that has already been delivered.
 func (s *Store) ClearTaskPendingSeedCAS(runID int64, taskID, expectedSeed string, now int64) (claimed bool, err error) {
 	return s.casExec(
-		"UPDATE delegation_tasks SET pending_seed='', updated_at=? WHERE run_id=? AND task_id=? AND pending_seed=?",
+		"UPDATE delegation_tasks SET pending_seed='', seed_owed_since=0, updated_at=? WHERE run_id=? AND task_id=? AND pending_seed=?",
 		now, runID, taskID, expectedSeed)
 }
 
@@ -504,6 +659,92 @@ func (s *Store) SetTaskDivergence(runID int64, taskID, divergence string, now in
 func (s *Store) SetTaskBranchHead(runID int64, taskID, head string, now int64) error {
 	return s.execTask("UPDATE delegation_tasks SET branch_head=?, updated_at=? WHERE run_id=? AND task_id=?",
 		head, now, runID, taskID)
+}
+
+// SetTaskSpawnSnapshot records §12.3.3's pre-spawn fingerprint of every
+// directory the child can reach but does not own.
+//
+// Ungated, and safely so: it is written by whoever already holds the task's
+// spawn claim (ClaimTaskSpawnCAS put the row in `spawning`), so there is exactly
+// one writer by construction. Folding it into that claim was the alternative and
+// was rejected for a mundane reason — the walk is O(dirty files across every
+// in-scope repo) and would have to complete before the claim, widening the
+// window in which two approvals both see an unclaimed task.
+//
+// An empty snapshot is a real value meaning "nothing dirty anywhere at spawn",
+// not "not captured"; §12.3.3's comparator says "changed since spawn" either way
+// and never says "the child wrote this", because a repo the human is working in
+// is indistinguishable from a misbehaving child.
+func (s *Store) SetTaskSpawnSnapshot(runID int64, taskID, snapshot string, now int64) error {
+	return s.execTask("UPDATE delegation_tasks SET spawn_snapshot=?, updated_at=? WHERE run_id=? AND task_id=?",
+		snapshot, now, runID, taskID)
+}
+
+// SetTaskNeedsSnapshot records the fingerprint+commit of every artifact this
+// task `needs`, as of spawn — §10.5's stale-contract baseline (migration v15).
+// Same single-writer argument as SetTaskSpawnSnapshot.
+//
+// Without it the alarm cannot fire: UpsertDelegationArtifact keeps only the
+// newest publication, so a producer that revises its interface after the
+// consumer was built against it destroys the very value the comparison needs,
+// and "did the contract change?" is answered by comparing the current
+// fingerprint with itself.
+func (s *Store) SetTaskNeedsSnapshot(runID int64, taskID, snapshot string, now int64) error {
+	return s.execTask("UPDATE delegation_tasks SET needs_snapshot=?, updated_at=? WHERE run_id=? AND task_id=?",
+		snapshot, now, runID, taskID)
+}
+
+// SetTaskCertifiedSHA records the task-branch commit a green §10.2 pass
+// certified (migration v18). §5.2's gate refuses when the branch has moved past
+// it, which is what makes "the diff shown is the diff applied" true.
+//
+// Ungated, and the single-writer argument is stronger here than for the two
+// snapshot setters: the only caller holds the run-wide integration claim, which
+// ClaimTaskIntegrationCAS enforced inside its own UPDATE, so no second writer
+// exists even across Loom instances. Folding it into the mergeable CAS was the
+// alternative and is worse in one specific way — the sha must be durable BEFORE
+// the state says `mergeable`, or a crash between the two leaves a gate open on
+// a task with no certified sha, which is precisely the case this column exists
+// to refuse.
+func (s *Store) SetTaskCertifiedSHA(runID int64, taskID, sha string, now int64) error {
+	return s.execTask("UPDATE delegation_tasks SET certified_sha=?, updated_at=? WHERE run_id=? AND task_id=?",
+		sha, now, runID, taskID)
+}
+
+// DelegationTasksInStates returns every task in any of the given states, across
+// ALL runs, newest-updated last. It backs §12.2's watchdogs, which are
+// deliberately run-agnostic: `spawn-orphan` sweeps `spawning`, `no-progress`
+// sweeps `running`, and a watchdog that iterated runs first would skip a task
+// whose run row is momentarily unreadable — the sweep matters most exactly when
+// something is wrong.
+//
+// An empty set returns no rows rather than every row: the caller computed its
+// own filter to empty, and answering "everything" to a query for nothing is how
+// a watchdog acts on a task it never meant to name.
+func (s *Store) DelegationTasksInStates(states ...string) ([]DelegationTask, error) {
+	if len(states) == 0 {
+		return nil, nil
+	}
+	q := "SELECT " + dtaskCols + " FROM delegation_tasks WHERE state IN (?" +
+		strings.Repeat(",?", len(states)-1) + ") ORDER BY updated_at, run_id, task_id"
+	args := make([]any, len(states))
+	for i, st := range states {
+		args[i] = st
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DelegationTask
+	for rows.Next() {
+		t, err := scanDelegationTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // UpsertDelegationArtifact records a published artifact: tracked, committed,
@@ -556,6 +797,113 @@ func (s *Store) ListDelegationArtifacts(runID int64) ([]DelegationArtifact, erro
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// AppendDelegationAmendment adds one amendment to a run and returns its seq.
+// §11.3: append-only, never a mutation of the on-disk manifest — Loom does not
+// own that file and the author may have it open.
+//
+// The next seq is computed inside the INSERT rather than by SELECT-then-INSERT.
+// The two-statement version reads the max, and a writer in another Loom instance
+// commits between the read and the write; both then insert the same seq and one
+// of them loses — either to a PK violation (visible, annoying) or, if the table
+// had used an unconstrained id, silently to a duplicated ordinal that makes the
+// replay order ambiguous. As one statement the read is part of the write, so
+// SQLite's single-writer lock is the serialization and no second mechanism is
+// needed.
+//
+// There is no Update and no Delete, deliberately: the effective graph is the
+// manifest snapshot plus these rows replayed in order, so a rewritable amendment
+// rewrites a plan a child may already be parked against. A withdrawn amendment
+// is a NEW amendment that supersedes it, which leaves the history legible.
+func (s *Store) AppendDelegationAmendment(runID int64, kind, body string, now int64) (int64, error) {
+	var seq int64
+	err := s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT INTO delegation_amendments (`+damdCols+`)
+			SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, 0, 0, ?
+			  FROM delegation_amendments WHERE run_id=?`,
+			runID, kind, body, now, runID); err != nil {
+			return err
+		}
+		return tx.QueryRow("SELECT MAX(seq) FROM delegation_amendments WHERE run_id=?", runID).Scan(&seq)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return seq, nil
+}
+
+// ListDelegationAmendments returns a run's amendments in seq order — the order
+// they must be replayed in to build the effective graph (§11.3). Whole-run
+// rather than paged: §4.5's cycle detection re-runs over the WHOLE amended graph
+// on every amendment, and a partial read there answers "no cycle" for a graph
+// that has one.
+func (s *Store) ListDelegationAmendments(runID int64) ([]DelegationAmendment, error) {
+	rows, err := s.db.Query(
+		"SELECT "+damdCols+" FROM delegation_amendments WHERE run_id=? ORDER BY seq", runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DelegationAmendment
+	for rows.Next() {
+		a, err := scanDelegationAmendment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetDelegationAmendment(runID, seq int64) (DelegationAmendment, bool, error) {
+	a, err := scanDelegationAmendment(s.db.QueryRow(
+		"SELECT "+damdCols+" FROM delegation_amendments WHERE run_id=? AND seq=?", runID, seq))
+	if err == sql.ErrNoRows {
+		return DelegationAmendment{}, false, nil
+	}
+	if err != nil {
+		return DelegationAmendment{}, false, err
+	}
+	return a, true, nil
+}
+
+// ApproveDelegationAmendmentCAS records the human's yes, once. §11.3's
+// authorization amendment is "human-approved, never auto-granted", and approval
+// has a side effect — it rewrites the child's brief.md and re-seeds it — so a
+// second approval would re-seed a child that is already working. claimed=false
+// means someone (or another Loom instance) already approved it, and the caller
+// must not perform the side effect.
+//
+// approved_at=0 is the guard rather than a separate status column: an approval
+// is a timestamp or it is nothing, and two representations of the same fact is
+// how they come to disagree.
+func (s *Store) ApproveDelegationAmendmentCAS(runID, seq, now int64) (claimed bool, err error) {
+	// rejected_at=0 is in the guard, not only approved_at: a human who said no
+	// and a human who said yes are contending for the same decision, and an
+	// approval that overwrote a rejection would perform the side effect the
+	// rejection existed to prevent. Enforced INSIDE the UPDATE — a check the
+	// caller makes first is advisory, and this file's whole discipline is that
+	// two Loom instances are supported.
+	return s.casExec(
+		"UPDATE delegation_amendments SET approved_at=? WHERE run_id=? AND seq=? AND approved_at=0 AND rejected_at=0",
+		now, runID, seq)
+}
+
+// RejectDelegationAmendmentCAS records the human's NO, once (§11.3).
+//
+// The mirror of ApproveDelegationAmendmentCAS and guarded identically. It is a
+// CAS and not a plain UPDATE for the same reason approval is: the two decisions
+// race, the loser must be TOLD rather than silently overwriting, and a caller
+// that read the row a second ago is holding a snapshot.
+//
+// The row is not deleted. delegation_amendments is append-only because the
+// effective graph is a replay of it, and an amendment that vanished would erase
+// the record of a decision a parked child is waiting on the far side of.
+func (s *Store) RejectDelegationAmendmentCAS(runID, seq, now int64) (claimed bool, err error) {
+	return s.casExec(
+		"UPDATE delegation_amendments SET rejected_at=? WHERE run_id=? AND seq=? AND approved_at=0 AND rejected_at=0",
+		now, runID, seq)
 }
 
 // casExec is the shared compare-and-swap tail: run the guarded UPDATE, report
@@ -618,6 +966,13 @@ func scanDelegationTask(row rowScanner) (DelegationTask, error) {
 	err := row.Scan(&t.RunID, &t.TaskID, &t.State, &t.SessionName, &t.RepoLabel,
 		&t.Worktree, &t.Branch, &t.BaseSHA, &t.BaseProducers, &t.CheckStatus,
 		&t.CheckExit, &t.CheckOut, &t.CheckAt, &t.BranchHead, &t.BlockJSON,
-		&t.PendingSeed, &t.Divergence, &t.SpawnSnapshot, &t.Flags, &t.UpdatedAt)
+		&t.PendingSeed, &t.Divergence, &t.SpawnSnapshot, &t.NeedsSnapshot,
+		&t.SeedOwedSince, &t.CertifiedSHA, &t.Flags, &t.UpdatedAt)
 	return t, err
+}
+
+func scanDelegationAmendment(row rowScanner) (DelegationAmendment, error) {
+	var a DelegationAmendment
+	err := row.Scan(&a.RunID, &a.Seq, &a.Kind, &a.Body, &a.ApprovedAt, &a.RejectedAt, &a.CreatedAt)
+	return a, err
 }

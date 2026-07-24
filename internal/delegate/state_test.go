@@ -45,10 +45,18 @@ func TestTaskStateHoldsAChild(t *testing.T) {
 // HoldsAChild's set deliberately (see both comments). Duplication is only safe
 // if something notices when the two drift, so this is that something.
 func TestActiveChildrenAgreesWithHoldsAChild(t *testing.T) {
+	// Every declared TaskState must appear here. A state missing from this list
+	// does not fail the test — it silently stops being compared, which is how
+	// `integrating` and `mergeable` were added to HoldsAChild while
+	// ActiveChildren's switch went on ignoring them and this test stayed green.
+	// The length assertion below is what turns that silence into a failure.
 	all := []TaskState{
 		StatePending, StateReady, StateApproved, StateSpawning, StateRunning,
-		StateBlocked, StateChecking, StateVerified, StateFailed, StateMerged,
-		StateAbandoned,
+		StateBlocked, StateChecking, StateVerified, StateFailed,
+		StateIntegrating, StateMergeable, StateMerged, StateAbandoned,
+	}
+	if len(all) != numTaskStates {
+		t.Fatalf("all covers %d states but %d are declared; add the new state here", len(all), numTaskStates)
 	}
 	for _, st := range all {
 		want := 0
@@ -59,12 +67,15 @@ func TestActiveChildrenAgreesWithHoldsAChild(t *testing.T) {
 			t.Errorf("ActiveChildren(%q) = %d but HoldsAChild = %v", st, got, st.HoldsAChild())
 		}
 	}
-	// And it counts, rather than merely detects.
+	// And it counts, rather than merely detects. `integrating` and `mergeable`
+	// are in the mix because §6.6's cap is what they threaten: a queue of
+	// mergeable tasks waiting on a human must keep consuming slots.
 	n := ActiveChildren(map[string]TaskState{
 		"a": StateRunning, "b": StateBlocked, "c": StateReady, "d": StateChecking,
+		"e": StateIntegrating, "f": StateMergeable, "g": StateVerified,
 	})
-	if n != 3 {
-		t.Errorf("ActiveChildren = %d, want 3", n)
+	if n != 5 {
+		t.Errorf("ActiveChildren = %d, want 5", n)
 	}
 }
 

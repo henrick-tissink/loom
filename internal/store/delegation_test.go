@@ -1,6 +1,10 @@
 package store
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
 
 func newRun(t *testing.T, s *Store) DelegationRun {
 	t.Helper()
@@ -152,7 +156,8 @@ func TestDelegationTaskRoundtrip(t *testing.T) {
 		CheckStatus: "pass", CheckExit: 0, CheckOut: "ok", CheckAt: 1200,
 		BranchHead: "a41f0c2", BlockJSON: `{"kind":"needs-decision"}`,
 		PendingSeed: "continue", Divergence: `["x.go"]`, SpawnSnapshot: `{"d":[]}`,
-		Flags: `["orphaned"]`, UpdatedAt: 1300,
+		NeedsSnapshot: `{"account-schema":{"fingerprint":"f1","commit":"c1"}}`,
+		Flags:         `["orphaned"]`, UpdatedAt: 1300,
 	}
 	if err := s.InsertDelegationTask(full); err != nil {
 		t.Fatal(err)
@@ -739,5 +744,468 @@ func TestAdvanceTaskFromAnyCASIsSingletonUnderContention(t *testing.T) {
 	}
 	if won != 1 {
 		t.Fatalf("%d of 8 claims won; exactly one may — §8.2 binds at most one check in flight per task", won)
+	}
+}
+
+// TestDelegationAmendmentsAreAppendOnly is §11.3 made literal: an amendment is
+// an append-only row on the run, never a mutation of the on-disk manifest and
+// never a mutation of a row already written. The effective graph is the manifest
+// snapshot replayed with these rows in seq order, so an amendment that could be
+// rewritten would rewrite a plan a child is already parked against.
+func TestDelegationAmendmentsAreAppendOnly(t *testing.T) {
+	s := open(t)
+	r := newRun(t, s)
+	other := newRun(t, s)
+
+	seq1, err := s.AppendDelegationAmendment(r.ID, "needs-artifact",
+		`{"consumer":"auth-api","artifact":"account-schema"}`, 1100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq2, err := s.AppendDelegationAmendment(r.ID, "needs-scope", `{"paths":["internal/db"]}`, 1200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq1 != 1 || seq2 != 2 {
+		t.Fatalf("seqs = %d %d, want 1 2", seq1, seq2)
+	}
+	// seq is per RUN, not global: the replay order that builds the effective
+	// graph is per run, and a global counter makes "the first amendment on this
+	// run" a query rather than a value.
+	oseq, err := s.AppendDelegationAmendment(other.ID, "needs-artifact", `{}`, 1300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oseq != 1 {
+		t.Fatalf("first amendment of a second run got seq %d, want 1", oseq)
+	}
+
+	list, err := s.ListDelegationAmendments(r.ID)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("ListDelegationAmendments = %+v %v", list, err)
+	}
+	want := []DelegationAmendment{
+		{RunID: r.ID, Seq: 1, Kind: "needs-artifact",
+			Body: `{"consumer":"auth-api","artifact":"account-schema"}`, CreatedAt: 1100},
+		{RunID: r.ID, Seq: 2, Kind: "needs-scope", Body: `{"paths":["internal/db"]}`, CreatedAt: 1200},
+	}
+	for i, w := range want {
+		if list[i] != w {
+			t.Fatalf("amendment %d = %+v, want %+v", i, list[i], w)
+		}
+	}
+
+	// Approval touches approved_at and nothing else: the recorded proposal is
+	// evidence, and evidence that changes when someone agrees with it is not.
+	if ok, err := s.ApproveDelegationAmendmentCAS(r.ID, 1, 1400); err != nil || !ok {
+		t.Fatalf("approve: %v %v", ok, err)
+	}
+	got, ok, err := s.GetDelegationAmendment(r.ID, 1)
+	if err != nil || !ok {
+		t.Fatalf("GetDelegationAmendment: %v %v", ok, err)
+	}
+	frozen := want[0]
+	frozen.ApprovedAt = 1400
+	if got != frozen {
+		t.Fatalf("approval rewrote the amendment: %+v, want %+v", got, frozen)
+	}
+	if _, ok, err := s.GetDelegationAmendment(r.ID, 99); ok || err != nil {
+		t.Fatalf("unknown seq = %v %v, want false nil", ok, err)
+	}
+
+	// A superseding amendment is a NEW row. Appending the same (kind, body)
+	// again must never collapse onto the existing one — that would silently
+	// erase the intervening history the replay depends on.
+	seq3, err := s.AppendDelegationAmendment(r.ID, "needs-artifact",
+		`{"consumer":"auth-api","artifact":"account-schema"}`, 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq3 != 3 {
+		t.Fatalf("re-appending an identical amendment got seq %d, want a new row at 3", seq3)
+	}
+	if list, _ := s.ListDelegationAmendments(r.ID); len(list) != 3 {
+		t.Fatalf("%d amendments after three appends", len(list))
+	}
+}
+
+// The append-only property has to hold against the API SURFACE, not merely
+// against today's callers: a later slice that adds SetAmendmentBody or
+// DeleteAmendment breaks §11.3 without failing any behavioural test above,
+// because the defect is the existence of the method. Pinned here so unparking
+// that work is a deliberate edit to this list rather than an accident.
+func TestNoAmendmentMutatorsExist(t *testing.T) {
+	allowed := map[string]bool{
+		"AppendDelegationAmendment":     true,
+		"ListDelegationAmendments":      true,
+		"GetDelegationAmendment":        true,
+		"ApproveDelegationAmendmentCAS": true, // approved_at only, guarded on 0
+		// v16's mirror. It writes rejected_at and nothing else, guarded on both
+		// decision columns being 0, so it is a DECISION and not a mutation: kind,
+		// body, seq and created_at stay untouchable and the row stays in the
+		// replay. §11.3 needs a durable NO — without one a refused amendment is
+		// indistinguishable from an offer nobody has looked at yet, and comes
+		// back on every poll forever.
+		"RejectDelegationAmendmentCAS": true,
+	}
+	typ := reflect.TypeOf(&Store{})
+	for i := 0; i < typ.NumMethod(); i++ {
+		n := typ.Method(i).Name
+		if strings.Contains(n, "Amendment") && !allowed[n] {
+			t.Errorf("%s: amendments are append-only (§11.3); a mutator needs a spec change, not a method", n)
+		}
+	}
+}
+
+// ApproveDelegationAmendmentCAS is a CAS because approval has a SIDE EFFECT —
+// §11.3's authorization amendment rewrites brief.md and re-seeds the child — and
+// a second approval would re-seed a child that is already working.
+func TestApproveDelegationAmendmentCASIsSingleton(t *testing.T) {
+	s := open(t)
+	r := newRun(t, s)
+	if _, err := s.AppendDelegationAmendment(r.ID, "needs-scope", `{}`, 1000); err != nil {
+		t.Fatal(err)
+	}
+	won := 0
+	for i := 0; i < 5; i++ {
+		ok, err := s.ApproveDelegationAmendmentCAS(r.ID, 1, int64(2000+i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			won++
+		}
+	}
+	if won != 1 {
+		t.Fatalf("%d of 5 approvals won; exactly one may", won)
+	}
+	if got, _, _ := s.GetDelegationAmendment(r.ID, 1); got.ApprovedAt != 2000 {
+		t.Fatalf("ApprovedAt = %d, want the FIRST approval's timestamp 2000", got.ApprovedAt)
+	}
+	// An amendment that does not exist is not an approval that failed to race:
+	// claimed=false, no error, nothing written.
+	if ok, err := s.ApproveDelegationAmendmentCAS(r.ID, 7, 3000); ok || err != nil {
+		t.Fatalf("approving a missing amendment = %v %v, want false nil", ok, err)
+	}
+}
+
+// §11.3's NO is durable, exclusive with the YES, and decided INSIDE the UPDATE.
+//
+// Before v16 the only durable answer was yes: approved_at=0 meant "proposed", so
+// a rejection was indistinguishable from an offer nobody had read, and the offer
+// came back on every poll forever. Table-driven over the four orders two Loom
+// instances can produce, because "the loser is told" is the whole property.
+func TestAmendmentDecisionIsExclusiveAndDurable(t *testing.T) {
+	tests := []struct {
+		name string
+		// decide returns (claimed, whichDecision) for each press in order.
+		presses   []string // "approve" | "reject"
+		wantWon   []bool
+		wantAppr  int64
+		wantRejec int64
+	}{
+		{"reject once", []string{"reject"}, []bool{true}, 0, 2000},
+		{"reject twice: the second is told", []string{"reject", "reject"}, []bool{true, false}, 0, 2000},
+		{"a rejection blocks a later approval", []string{"reject", "approve"}, []bool{true, false}, 0, 2000},
+		{"an approval blocks a later rejection", []string{"approve", "reject"}, []bool{true, false}, 2000, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := open(t)
+			r := newRun(t, s)
+			if _, err := s.AppendDelegationAmendment(r.ID, "needs-scope", `{}`, 1000); err != nil {
+				t.Fatal(err)
+			}
+			for i, press := range tc.presses {
+				var ok bool
+				var err error
+				// Every press carries the SAME timestamp deliberately: the
+				// assertion below is that the loser wrote nothing, and a distinct
+				// timestamp per press would let a lost write pass unnoticed.
+				if press == "approve" {
+					ok, err = s.ApproveDelegationAmendmentCAS(r.ID, 1, 2000)
+				} else {
+					ok, err = s.RejectDelegationAmendmentCAS(r.ID, 1, 2000)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ok != tc.wantWon[i] {
+					t.Fatalf("press %d (%s) claimed = %v, want %v", i+1, press, ok, tc.wantWon[i])
+				}
+			}
+			got, found, err := s.GetDelegationAmendment(r.ID, 1)
+			if err != nil || !found {
+				t.Fatalf("GetDelegationAmendment: %v %v", found, err)
+			}
+			if got.ApprovedAt != tc.wantAppr || got.RejectedAt != tc.wantRejec {
+				t.Fatalf("approved_at/rejected_at = %d/%d, want %d/%d",
+					got.ApprovedAt, got.RejectedAt, tc.wantAppr, tc.wantRejec)
+			}
+			// Append-only: the decision touched nothing else.
+			if got.Kind != "needs-scope" || got.Body != `{}` || got.CreatedAt != 1000 {
+				t.Fatalf("the decision rewrote the amendment: %+v", got)
+			}
+		})
+	}
+}
+
+// Rejecting an amendment that does not exist is not a race that was lost.
+func TestRejectDelegationAmendmentCASOnAMissingRow(t *testing.T) {
+	s := open(t)
+	r := newRun(t, s)
+	if ok, err := s.RejectDelegationAmendmentCAS(r.ID, 7, 3000); ok || err != nil {
+		t.Fatalf("rejecting a missing amendment = %v %v, want false nil", ok, err)
+	}
+}
+
+// SetDelegationRunIntegrationCAS guards a MAP over repos: two integration passes
+// for two different repos can complete concurrently, and a plain setter would
+// have the later writer erase the earlier repo's baseline. §10.2's blame table
+// then reads a missing baseline as "no previous result" and blames a child for a
+// red the environment caused.
+func TestSetDelegationRunIntegrationCASRejectsStaleSnapshot(t *testing.T) {
+	s := open(t)
+	r := newRun(t, s)
+	if r.Integration != "" {
+		t.Fatalf("fresh run Integration = %q, want empty", r.Integration)
+	}
+	first := `{"bankenstein":{"head":"a1","status":"pass","at":1100}}`
+	ok, err := s.SetDelegationRunIntegrationCAS(r.ID, "", first, 1100)
+	if err != nil || !ok {
+		t.Fatalf("first write: %v %v", ok, err)
+	}
+	// a writer holding the pre-first snapshot must be refused, not merged over
+	stale := `{"ballista":{"head":"b1","status":"fail","at":1200}}`
+	ok, err = s.SetDelegationRunIntegrationCAS(r.ID, "", stale, 1200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("a stale snapshot claimed the write; the other repo's baseline would be gone")
+	}
+	got, _, _ := s.GetDelegationRun(r.ID)
+	if got.Integration != first {
+		t.Fatalf("Integration = %q, want %q untouched", got.Integration, first)
+	}
+	if got.UpdatedAt != 1100 {
+		t.Fatalf("UpdatedAt = %d; a refused CAS must leave the row COMPLETELY untouched", got.UpdatedAt)
+	}
+	both := `{"bankenstein":{"head":"a1","status":"pass","at":1100},"ballista":{"head":"b1","status":"fail","at":1200}}`
+	if ok, err := s.SetDelegationRunIntegrationCAS(r.ID, first, both, 1300); err != nil || !ok {
+		t.Fatalf("re-read-and-reapply: %v %v", ok, err)
+	}
+	if got, _, _ := s.GetDelegationRun(r.ID); got.Integration != both {
+		t.Fatalf("Integration = %q, want %q", got.Integration, both)
+	}
+}
+
+// ClaimTaskIntegrationCAS enforces §10.2's "one integration at a time, run-wide"
+// INSIDE the UPDATE. Two concurrent passes in one repo means one captures `pre`
+// and the other runs `git reset --hard <pre>`, discarding a sibling's verified
+// merge from the staging branch.
+func TestClaimTaskIntegrationCASSerializesPerRun(t *testing.T) {
+	s := open(t)
+	r := newRun(t, s)
+	for _, id := range []string{"schema", "auth-api", "web"} {
+		task := newTask(r.ID, id)
+		task.State = "verified"
+		if err := s.InsertDelegationTask(task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	from := []string{"verified", "integration_blocked"}
+	ok, prev, err := s.ClaimTaskIntegrationCAS(r.ID, "schema", from, 2000)
+	if err != nil || !ok || prev != "verified" {
+		t.Fatalf("first claim = %v %q %v", ok, prev, err)
+	}
+	// every sibling is refused while one is integrating
+	for _, id := range []string{"auth-api", "web"} {
+		ok, _, err := s.ClaimTaskIntegrationCAS(r.ID, id, from, 2100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			t.Fatalf("%s claimed a second concurrent integration", id)
+		}
+		if got, _, _ := s.GetDelegationTask(r.ID, id); got.State != "verified" {
+			t.Fatalf("%s state = %q; a refused claim must leave the row untouched", id, got.State)
+		}
+	}
+	// including the holder itself: a double-claim is a refusal, not a no-op
+	// that would run the same merge sequence twice.
+	if ok, _, _ := s.ClaimTaskIntegrationCAS(r.ID, "schema", []string{"integrating"}, 2200); ok {
+		t.Fatal("the integrating task re-claimed its own integration")
+	}
+	// a run's exclusion must not reach across runs — §3 scopes a run to one
+	// project's repos and two runs stage into different worktrees.
+	r2 := newRun(t, s)
+	t2 := newTask(r2.ID, "schema")
+	t2.State = "verified"
+	if err := s.InsertDelegationTask(t2); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _, err := s.ClaimTaskIntegrationCAS(r2.ID, "schema", from, 2300); err != nil || !ok {
+		t.Fatalf("another run's integration was blocked by this one: %v %v", ok, err)
+	}
+	// released, the next sibling gets its turn
+	if ok, err := s.AdvanceTaskCAS(r.ID, "schema", "integrating", "mergeable", 2400); err != nil || !ok {
+		t.Fatalf("release: %v %v", ok, err)
+	}
+	if ok, _, err := s.ClaimTaskIntegrationCAS(r.ID, "auth-api", from, 2500); err != nil || !ok {
+		t.Fatalf("claim after release: %v %v", ok, err)
+	}
+	// an empty source set claims nothing rather than degrading to an unguarded
+	// update, exactly as AdvanceTaskFromAnyCAS does
+	if ok, _, err := s.ClaimTaskIntegrationCAS(r.ID, "web", nil, 2600); ok || err != nil {
+		t.Fatalf("empty source set = %v %v, want false nil", ok, err)
+	}
+}
+
+// The two spawn-time snapshots are the inputs §§10.5 and 12.3.3 compare against
+// LATER, so they have to survive as written. NeedsSnapshot exists at all because
+// UpsertDelegationArtifact keeps only the newest publication: this test performs
+// the republication that destroys the old fingerprint and shows the snapshot is
+// the only surviving copy.
+func TestSpawnTimeSnapshotsSurviveRepublication(t *testing.T) {
+	s := open(t)
+	r := newRun(t, s)
+	if err := s.InsertDelegationTask(newTask(r.ID, "auth-api")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertDelegationArtifact(DelegationArtifact{RunID: r.ID,
+		ArtifactID: "account-schema", TaskID: "schema", Path: "db/0007.sql",
+		Fingerprint: "fp1", CommitSHA: "c1", PublishedAt: 1100}); err != nil {
+		t.Fatal(err)
+	}
+	snap := `{"account-schema":{"fingerprint":"fp1","commit":"c1"}}`
+	if err := s.SetTaskNeedsSnapshot(r.ID, "auth-api", snap, 1200); err != nil {
+		t.Fatal(err)
+	}
+	dirty := `{"/w/bankenstein":[{"path":"a.go","mtime":9,"size":3}]}`
+	if err := s.SetTaskSpawnSnapshot(r.ID, "auth-api", dirty, 1200); err != nil {
+		t.Fatal(err)
+	}
+
+	// §10.3 sends the producer back; it republishes the same artifact id at a
+	// new commit with a new fingerprint, overwriting the row.
+	if err := s.UpsertDelegationArtifact(DelegationArtifact{RunID: r.ID,
+		ArtifactID: "account-schema", TaskID: "schema", Path: "db/0007.sql",
+		Fingerprint: "fp2", CommitSHA: "c2", PublishedAt: 1400}); err != nil {
+		t.Fatal(err)
+	}
+	art, _, _ := s.GetDelegationArtifact(r.ID, "account-schema")
+	if art.Fingerprint != "fp2" {
+		t.Fatalf("artifact fingerprint = %q, want the republished fp2", art.Fingerprint)
+	}
+	got, _, _ := s.GetDelegationTask(r.ID, "auth-api")
+	if got.NeedsSnapshot != snap {
+		t.Fatalf("NeedsSnapshot = %q, want %q — §10.5's alarm has nothing to compare against without it",
+			got.NeedsSnapshot, snap)
+	}
+	if got.SpawnSnapshot != dirty {
+		t.Fatalf("SpawnSnapshot = %q, want %q", got.SpawnSnapshot, dirty)
+	}
+	if got.UpdatedAt != 1200 {
+		t.Fatalf("UpdatedAt = %d, want 1200", got.UpdatedAt)
+	}
+	// both are replaceable wholesale (a re-spawn re-snapshots), and an empty
+	// value is a real value meaning "nothing dirty", not "not captured"
+	if err := s.SetTaskSpawnSnapshot(r.ID, "auth-api", "", 1500); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := s.GetDelegationTask(r.ID, "auth-api"); got.SpawnSnapshot != "" {
+		t.Fatalf("SpawnSnapshot = %q, want cleared", got.SpawnSnapshot)
+	}
+}
+
+// DelegationTasksInStates backs §12.2's watchdogs, which are run-agnostic on
+// purpose: the sweep matters most when something is wrong, and iterating runs
+// first skips a task whose run row is unreadable.
+func TestDelegationTasksInStates(t *testing.T) {
+	s := open(t)
+	r1, r2 := newRun(t, s), newRun(t, s)
+	seed := func(runID int64, id, state string, at int64) {
+		task := newTask(runID, id)
+		task.State, task.UpdatedAt = state, at
+		if err := s.InsertDelegationTask(task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed(r1.ID, "a", "spawning", 300)
+	seed(r1.ID, "b", "running", 200)
+	seed(r2.ID, "c", "spawning", 100)
+	seed(r2.ID, "d", "merged", 400)
+
+	for _, tc := range []struct {
+		name   string
+		states []string
+		want   []string
+	}{
+		{"one state, across runs, oldest first", []string{"spawning"}, []string{"c", "a"}},
+		{"several states", []string{"spawning", "running"}, []string{"c", "b", "a"}},
+		{"no matches", []string{"blocked"}, nil},
+		// A watchdog that computed its filter to empty has a bug, and the safe
+		// reading of a bug in a sweep is "name nothing", never "name everything".
+		{"empty set names nothing", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.DelegationTasksInStates(tc.states...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, g := range got {
+				ids = append(ids, g.TaskID)
+			}
+			if len(ids) != len(tc.want) {
+				t.Fatalf("ids = %v, want %v", ids, tc.want)
+			}
+			for i := range ids {
+				if ids[i] != tc.want[i] {
+					t.Fatalf("ids = %v, want %v", ids, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// A flag that is the only record of a failure cannot be written with a
+// read-modify-write over the whole JSON set: a watchdog clearing `stalled` at
+// the same moment erases it, and §12's premise is that failures stay VISIBLE.
+func TestSetTaskFlagsCASRejectsStaleSnapshot(t *testing.T) {
+	s := open(t)
+	r := newRun(t, s)
+	if err := s.InsertDelegationTask(newTask(r.ID, "schema")); err != nil {
+		t.Fatal(err)
+	}
+	// the watchdog writes first, from the empty set it read
+	if ok, err := s.SetTaskFlagsCAS(r.ID, "schema", "", `["stalled"]`, 1100); err != nil || !ok {
+		t.Fatalf("first flag write: %v %v", ok, err)
+	}
+	// the seed deliverer, still holding the empty set, must be refused rather
+	// than allowed to write `["seed-failed"]` over `["stalled"]`
+	ok, err := s.SetTaskFlagsCAS(r.ID, "schema", "", `["seed-failed"]`, 1200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("a stale flag set claimed the write; the other writer's flag would be gone")
+	}
+	got, _, _ := s.GetDelegationTask(r.ID, "schema")
+	if got.Flags != `["stalled"]` || got.UpdatedAt != 1100 {
+		t.Fatalf("refused CAS touched the row: %+v", got)
+	}
+	if ok, err := s.SetTaskFlagsCAS(r.ID, "schema", `["stalled"]`,
+		`["stalled","seed-failed"]`, 1300); err != nil || !ok {
+		t.Fatalf("re-read-and-merge: %v %v", ok, err)
+	}
+	// the unconditional setter is still there for a badge a later poll would
+	// recompute anyway, and it still wins unconditionally
+	if err := s.SetTaskFlags(r.ID, "schema", `["diverged"]`, 1400); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := s.GetDelegationTask(r.ID, "schema"); got.Flags != `["diverged"]` {
+		t.Fatalf("Flags = %q, want the unconditional write to land", got.Flags)
 	}
 }

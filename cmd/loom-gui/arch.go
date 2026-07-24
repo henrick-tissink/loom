@@ -9,6 +9,7 @@ import (
 
 	"github.com/henricktissink/loom/internal/arch"
 	"github.com/henricktissink/loom/internal/delegate"
+	"github.com/henricktissink/loom/internal/gitdiff"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/store"
 )
@@ -30,8 +31,9 @@ import (
 //     remaining chain) and is GIVEN everything else. The manifest and the task
 //     rows are the authority; nothing here re-derives a fact one of them
 //     already states, and the ready set specifically routes through
-//     delegate.Ready rather than a second scheduler that could disagree with
-//     the one that actually spawns children.
+//     delegate.EffectiveGraph — the graph the runner itself schedules on —
+//     rather than a second scheduler that could disagree with the one that
+//     actually spawns children.
 //
 // ProjectDocuments and ProjectDocument — §3.1's other two gated entry points —
 // live in orchestration.go and go through internal/arch. They are exercised by
@@ -102,13 +104,27 @@ type RunRefDTO struct {
 }
 
 // RunHeadDTO is the selected run's header.
+//
+// RedKind and BaselineFaults are DelegationRunDTO's two fields, repeated here
+// deliberately. Status `deadlocked` has two readings — §10.2's baseline fault
+// and §12.1's deadlock — and without the discriminator on the payload the seam
+// has to call ProjectDelegation a second time the instant a run goes red, just
+// to learn which sentence to render. That is a round trip on the one tick the
+// user is least patient, and a failure mode: the second call can be refused,
+// can race the switcher, or can simply not be bound, leaving the escalation
+// band rendering an EMPTY wait-for cycle for every baseline fault — the exact
+// misrender DelegationRunDTO.RedKind exists to prevent. Both values are derived
+// by runRedKind from the run row alone, so this is a fold over a row already
+// read and costs no query.
 type RunHeadDTO struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Slug      string `json:"slug"`
-	Status    string `json:"status"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	ID             int64              `json:"id"`
+	Name           string             `json:"name"`
+	Slug           string             `json:"slug"`
+	Status         string             `json:"status"`
+	CreatedAt      int64              `json:"createdAt"`
+	UpdatedAt      int64              `json:"updatedAt"`
+	RedKind        string             `json:"redKind"`
+	BaselineFaults []BaselineFaultDTO `json:"baselineFaults"`
 }
 
 // GraphNodeDTO is one node's LAYOUT-STABLE half: identity and the fields that
@@ -179,12 +195,36 @@ type NodeStatusDTO struct {
 	CheckAt     int64  `json:"checkAt"`
 	CheckOut    string `json:"checkOut"`
 
-	Flags       []string `json:"flags"`
-	PendingSeed bool     `json:"pendingSeed"`
-	SeedFailed  bool     `json:"seedFailed"`
-	Blocked     bool     `json:"blocked"` // the child declared a block (§8)
-	Ready       bool     `json:"ready"`
-	UpdatedAt   int64    `json:"updatedAt"`
+	Flags []string `json:"flags"`
+	// Divergence is §12.3.1-2's file lists, read from the COLUMN.
+	//
+	// On the per-tick half despite §7.5's cost ceiling, because it costs nothing:
+	// the report was computed and persisted at the two moments §12.3 names — every
+	// check run, and immediately before every merge — and this is a decode of a
+	// string already read, not a git call. §12.3.1 is written as "`diverged` flag
+	// WITH THE FILE LIST"; a payload that carried the flag alone would say a task
+	// diverged and make the human open the merge gate to learn from what, which
+	// puts the evidence behind the very gate it is supposed to inform.
+	//
+	// A hidden node carries the zero value. File paths are the most identifying
+	// thing on this struct.
+	Divergence DivergenceDTO `json:"divergence"`
+	// FlagDetails is the same set with §12.2's and §12.3's sentences attached
+	// and a `loud` bit for the ones the spec requires be loud. Composed in Go —
+	// see DelegationTaskDTO.FlagDetails for why the wording cannot live in a
+	// frontend dictionary: two of these sentences are BINDING, and the second
+	// place they get written is where the hedge gets dropped.
+	FlagDetails []FlagDetailDTO `json:"flagDetails"`
+	// PendingSeed is §11.4's debt read from the COLUMN, not from the
+	// `seed-pending` flag. §10.3's park writes the column and the flag both, but
+	// the column is the debt itself and the flag is a badge a later pass can
+	// clear; a view keyed on the flag would show a parked child with nothing
+	// saying Loom owes it a message.
+	PendingSeed bool  `json:"pendingSeed"`
+	SeedFailed  bool  `json:"seedFailed"`
+	Blocked     bool  `json:"blocked"` // the child declared a block (§8)
+	Ready       bool  `json:"ready"`
+	UpdatedAt   int64 `json:"updatedAt"`
 }
 
 // GraphEdgeDTO is one derived producer→consumer dependency. Artifact is
@@ -192,15 +232,40 @@ type NodeStatusDTO struct {
 // task ids — an author cannot express a dependency without naming the thing
 // that satisfies it, and erasing that in the DTO would erase the whole point.
 //
-// There is no `kind` field. §5.1's plan/park distinction needs park edges, and
-// park is the rendezvous path — 3a-deferred (delegate/doc.go). A constant
-// "plan" on every edge would be a field that looks answered and is not.
+// Kind is §5.1's table: `plan` for an edge the manifest declared, `park` for one
+// discovered mid-task — an accepted amendment (§11.3) or a live `needs-artifact`
+// block (§11.1). It is derived from delegate.Effective, which is the same graph
+// the scheduler and the deadlock detector run on, and NOT from the manifest plus
+// a second opinion.
+//
+// The rejected alternative is what shipped first and it is worth naming: the
+// frontend synthesized park edges itself from live TaskPark reads. Three things
+// were wrong with it. The edges vanished the moment a park resolved, so §2.6's
+// run-health count — "a run that accumulates park edges is a run whose plan was
+// wrong" — could only ever report the standing parks and never the accepted
+// amendments, which are the parks that WORKED. The Go layout engine never saw
+// them, so §5.6 could not route them through the back-edge band and §5.1's
+// "drawn above the ranks" was a client-side elbow over server-side coordinates
+// that had ranked the graph as if the edge did not exist. And it was a second
+// derivation of "what does this run actually depend on", living in the one place
+// with no test runner.
+//
+// There is no `gate` kind yet: §5.1's third row is the node → integration-node
+// edge, and this payload synthesizes no integration nodes. A constant on every
+// edge would be a field that looks answered and is not.
 type GraphEdgeDTO struct {
 	From     string `json:"from"`
 	To       string `json:"to"`
 	Artifact string `json:"artifact"`
+	Kind     string `json:"kind"` // plan | park
 	Cycle    bool   `json:"cycle"`
 }
+
+// The two edge kinds this payload can produce (§5.1).
+const (
+	EdgePlan = "plan"
+	EdgePark = "park"
+)
 
 // LayoutDTO is the stage's geometry (§5.6). The card size travels with the
 // coordinates rather than living as a frontend constant: the painter needs it
@@ -229,9 +294,13 @@ type StripDTO struct {
 	Edges       int `json:"edges"`
 	Merged      int `json:"merged"`
 	Verified    int `json:"verified"`
-	Ready       int `json:"ready"`
-	Running     int `json:"running"`
-	Failed      int `json:"failed"`
+	// Mergeable is §5.2's queue: green in isolation AND green combined with its
+	// verified siblings, waiting on a human press. Its own figure because it is
+	// the only one on this strip the human can act on directly.
+	Mergeable int `json:"mergeable"`
+	Ready     int `json:"ready"`
+	Running   int `json:"running"`
+	Failed    int `json:"failed"`
 
 	// Repos and SharedRepos are §2.7's cohesion read — an INDICATOR, not a
 	// measurement. Edge density and the number of nodes touching one repo
@@ -318,6 +387,7 @@ func (a *App) OrchestrationSnapshot(root string, runID int64, sinceRev uint64) (
 	}
 	out.Run = &RunHeadDTO{ID: run.ID, Name: run.Name, Slug: run.Slug,
 		Status: run.Status, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt}
+	out.Run.RedKind, out.Run.BaselineFaults = runRedKind(run)
 
 	// Decoded here rather than through orchestration.go's decodeSnapshot
 	// because that helper flattens the error with %v, and §9 binds a parse
@@ -350,7 +420,20 @@ func (a *App) OrchestrationSnapshot(root string, runID int64, sinceRev uint64) (
 		return out
 	}
 
-	a.buildGraphPayload(&out, res, man, tasks, arts, sinceRev)
+	// The amendment log, so the drawn graph is the EFFECTIVE one. A read failure
+	// is a WARNING and not a fatal: the declared graph is still a true picture of
+	// the plan, and refusing to draw anything because one supplementary table
+	// would not read is a blank panel §9 has no row for. It is said out loud
+	// because a graph silently missing its accepted edges is a graph that
+	// disagrees with the scheduler about what is ready.
+	amds, err := a.st.ListDelegationAmendments(run.ID)
+	if err != nil {
+		amds = nil
+		out.Warnings = append(out.Warnings,
+			"could not read this run's amendments; the graph shows the declared plan only: "+err.Error())
+	}
+
+	a.buildGraphPayload(&out, res, man, delegate.EffectiveFromRows(man, amds, tasks), tasks, arts, sinceRev)
 	return out
 }
 
@@ -391,7 +474,8 @@ func selectRun(runs []store.DelegationRun, want int64) (store.DelegationRun, boo
 // buildGraphPayload is everything after the gate: nodes, edges, the per-node
 // visibility filter, the analysis and the strip.
 func (a *App) buildGraphPayload(out *OrchestrationDTO, res *projects.Resolver,
-	man delegate.Manifest, tasks []store.DelegationTask, arts []store.DelegationArtifact, sinceRev uint64) {
+	man delegate.Manifest, e delegate.EffectiveGraph,
+	tasks []store.DelegationTask, arts []store.DelegationArtifact, sinceRev uint64) {
 
 	byTask := make(map[string]store.DelegationTask, len(tasks))
 	for _, t := range tasks {
@@ -473,10 +557,30 @@ func (a *App) buildGraphPayload(out *OrchestrationDTO, res *projects.Resolver,
 	}
 
 	// --- edges, plus §9's ghost row -----------------------------------------
-	g := delegate.BuildGraph(man)
-	for _, e := range g.Edges {
+	//
+	// The drawn graph is e.WaitFor(): declared edges + accepted amendments + the
+	// wait-for edges live `needs-artifact` blocks contribute. That is §12.1(a)'s
+	// graph, and drawing it is the point — the picture must show what the run is
+	// ACTUALLY waiting on, including the dependency nobody planned. The declared
+	// set below is only the discriminator for §5.1's `kind`.
+	g := e.WaitFor()
+	planned := make(map[[2]string]bool, len(e.Declared().Edges))
+	for _, ed := range e.Declared().Edges {
+		planned[[2]string{ed.From, ed.To}] = true
+	}
+	for _, ed := range g.Edges {
+		// Keyed on the ENDPOINTS and not on the whole Edge: a park that names the
+		// same pair of tasks as a declared edge, over a different artifact id, is
+		// the plan's dependency by another name. Counting it as a park would
+		// inflate §2.6's "the plan was wrong" figure with a run whose plan was
+		// right, and the whole value of that number is that it is not inflated.
+		kind := EdgePark
+		if planned[[2]string{ed.From, ed.To}] {
+			kind = EdgePlan
+		}
 		out.Edges = append(out.Edges, GraphEdgeDTO{
-			From: ids[e.From], To: ids[e.To], Artifact: artifactLabel(e.Artifact, hidden[e.From] || hidden[e.To]),
+			From: ids[ed.From], To: ids[ed.To], Kind: kind,
+			Artifact: artifactLabel(ed.Artifact, hidden[ed.From] || hidden[ed.To]),
 		})
 	}
 	ghosts := 0
@@ -500,18 +604,23 @@ func (a *App) buildGraphPayload(out *OrchestrationDTO, res *projects.Resolver,
 			}
 			out.Nodes = append(out.Nodes, gh)
 			out.Edges = append(out.Edges, GraphEdgeDTO{
-				From: gid, To: ids[t.ID], Artifact: artifactLabel(need, hidden[t.ID]),
+				From: gid, To: ids[t.ID], Kind: EdgePlan,
+				Artifact: artifactLabel(need, hidden[t.ID]),
 			})
 		}
 	}
-	if cyc := delegate.DetectCycle(g, man.Name); cyc != nil {
+	// e.WaitCycle(), not DetectCycle over the declared graph: §4.5 makes a
+	// DECLARED cycle impossible at load, so a cycle drawn here is one an
+	// amendment or a block closed at runtime — which is precisely §12.1(a)'s
+	// mutual wait, and precisely the picture the human needs to re-plan from.
+	if cyc := e.WaitCycle(); cyc != nil {
 		// §9: the graph still draws. The cycle's edges are flagged and named;
 		// layout never fails on account of one.
 		in := map[[2]string]bool{}
 		var members []string
-		for _, e := range cyc.Path {
-			in[[2]string{ids[e.From], ids[e.To]}] = true
-			members = append(members, ids[e.From])
+		for _, ed := range cyc.Path {
+			in[[2]string{ids[ed.From], ids[ed.To]}] = true
+			members = append(members, ids[ed.From])
 		}
 		for i := range out.Edges {
 			if in[[2]string{out.Edges[i].From, out.Edges[i].To}] {
@@ -535,18 +644,31 @@ func (a *App) buildGraphPayload(out *OrchestrationDTO, res *projects.Resolver,
 			published[art.ArtifactID] = true
 		}
 	}
-	// §5.2: the ready set is delegate.Ready, not a second implementation. A
+	// §5.2: the ready set is the SCHEDULER's, not a second implementation. A
 	// scheduler in the view that disagreed with the scheduler that spawns
 	// children would show a task as offerable that the gate refuses — the
 	// exact class of "confident and wrong" the whole arc is written against.
+	//
+	// EffectiveGraph.Ready and not delegate.Ready over the declared graph, which
+	// is what shipped first: Runner.Tick's step 3b promotes pending → ready over
+	// the EFFECTIVE graph, so the declared-graph version here was the second
+	// scheduler that comment names — blind to an accepted amendment's edge and to
+	// a live block, and therefore lighting up a node the runner will not promote
+	// and the gate will refuse.
 	ready := map[string]bool{}
-	for _, id := range delegate.Ready(g, states, published) {
+	for _, id := range e.Ready(states, published) {
 		ready[id] = true
 	}
 
 	for _, t := range man.Tasks {
 		row := byTask[t.ID]
-		st := NodeStatusDTO{ID: ids[t.ID], State: row.State, UpdatedAt: row.UpdatedAt}
+		st := NodeStatusDTO{ID: ids[t.ID], State: row.State, UpdatedAt: row.UpdatedAt,
+			// Non-nil even for a hidden placeholder: the frontend indexes these
+			// without a guard, and a null where a list is expected is a crash
+			// there rather than a blank. The empty divergence is the same
+			// argument — and for a hidden node it is also the whole payload.
+			FlagDetails: []FlagDetailDTO{},
+			Divergence:  divergenceDTO(gitdiff.Divergence{})}
 		if row.State == "" {
 			st.State = string(delegate.StatePending)
 		}
@@ -561,6 +683,7 @@ func (a *App) buildGraphPayload(out *OrchestrationDTO, res *projects.Resolver,
 		st.SessionName = row.SessionName
 		st.SessionStatus = a.nodeSessionStatus(row.SessionName)
 		st.CheckStatus, st.CheckExit, st.CheckAt, st.CheckOut = row.CheckStatus, row.CheckExit, row.CheckAt, row.CheckOut
+		st.Divergence = divergenceDTO(delegate.DecodeDivergence(row.Divergence))
 		st.PendingSeed = row.PendingSeed != ""
 		st.SeedFailed = strings.TrimSpace(row.BlockJSON) != "" && row.State == string(delegate.StateBlocked)
 		st.Blocked = row.State == string(delegate.StateBlocked)
@@ -572,6 +695,7 @@ func (a *App) buildGraphPayload(out *OrchestrationDTO, res *projects.Resolver,
 			}
 		}
 		sort.Strings(st.Flags) // map iteration order is not a rendering order
+		st.FlagDetails = flagDetails(st.Flags)
 		out.Statuses = append(out.Statuses, st)
 	}
 
@@ -628,7 +752,12 @@ func placeLayout(out *OrchestrationDTO) {
 	}
 	edges := make([]arch.LayoutEdge, 0, len(out.Edges))
 	for _, e := range out.Edges {
-		edges = append(edges, arch.LayoutEdge{From: e.From, To: e.To, Cycle: e.Cycle})
+		// Band is §5.1's park row: the layout keeps it out of the ranking so the
+		// planned columns do not shift when a child parks and shift back when the
+		// park clears. The edge is still laid out and still drawn.
+		edges = append(edges, arch.LayoutEdge{
+			From: e.From, To: e.To, Cycle: e.Cycle, Band: e.Kind == EdgePark,
+		})
 	}
 	placed, w, h := arch.Layout(nodes, edges)
 	at := make(map[string]arch.Placement, len(placed))
@@ -690,9 +819,18 @@ func (a *App) nodeSessionStatus(sessionName string) string {
 // returns the action that unblocks it, because a list of problems with no verb
 // is a list the user reads and then leaves.
 //
-// The merge row is 3a-shaped: the merge gate is a human reading the check
-// result and running `git merge` themselves (delegate/doc.go), so `verified` is
-// literally "waiting for you", not a stage Loom will advance on its own.
+// The merge row is `mergeable`, NOT `verified`, and that is a correction §10
+// forced. While the merge gate was a human reading a check result and running
+// `git merge` themselves, `verified` was literally "waiting for you". It is not
+// any more: §10.2 is triggered when a task becomes verified and Loom enters
+// integration without being asked, so `verified` is transient and Loom-driven —
+// Progress.InFlight lists it for exactly that reason. `mergeable` is the state
+// §5.2's gate shows, and StateMergeable's own comment is the rule: "reaching it
+// is entirely Loom's doing while leaving it is entirely the human's".
+//
+// Listing `verified` here instead would put a row saying "waiting for you"
+// above a task Loom is actively integrating, with a merge button that refuses —
+// a list of problems whose verb does not work is worse than no list.
 func humanBlock(s NodeStatusDTO) (reason, action string) {
 	switch {
 	case s.Blocked:
@@ -703,8 +841,8 @@ func humanBlock(s NodeStatusDTO) (reason, action string) {
 		return "seed pending", "seed"
 	case s.CheckStatus == "fail":
 		return "check failed", "check"
-	case s.State == string(delegate.StateVerified):
-		return "verified — awaiting your merge", "merge"
+	case s.State == string(delegate.StateMergeable):
+		return "green in isolation and combined — awaiting your merge", "merge"
 	case s.SessionStatus == "needs_you":
 		return "needs you", "attach"
 	}
@@ -723,7 +861,19 @@ func buildStrip(out *OrchestrationDTO, man delegate.Manifest, g delegate.Graph,
 			s.Merged++
 		case string(delegate.StateVerified):
 			s.Verified++
-		case string(delegate.StateRunning), string(delegate.StateChecking), string(delegate.StateSpawning):
+		case string(delegate.StateMergeable):
+			// §5.2's queue, counted separately from `verified` because the two
+			// differ in WHO is holding the task: `verified` is Loom about to
+			// integrate, `mergeable` is a human who has not pressed yet. Folding
+			// them together would hide the only figure on this strip that the
+			// human can act on directly.
+			s.Mergeable++
+		case string(delegate.StateRunning), string(delegate.StateChecking),
+			string(delegate.StateSpawning), string(delegate.StateIntegrating):
+			// `integrating` is in flight and Loom-driven (§10.2, serialized
+			// run-wide). Before §10 shipped it fell through this switch and a task
+			// mid-integration was counted as nothing at all — present in the node
+			// count and absent from every figure that explains it.
 			s.Running++
 		case string(delegate.StateFailed):
 			s.Failed++
@@ -882,7 +1032,11 @@ func topologyRev(out *OrchestrationDTO) uint64 {
 			strings.Join(n.Warnings, "\x00"))
 	}
 	for _, e := range out.Edges {
-		w("e", e.From, e.To, e.Artifact, fmt.Sprint(e.Cycle))
+		// Kind is folded in: a park edge appearing or clearing genuinely changes
+		// the topology — it changes the ranking, because a banded edge is excluded
+		// from it — so it must move the rev or the graph keeps the stale columns
+		// until something unrelated changes.
+		w("e", e.From, e.To, e.Artifact, e.Kind, fmt.Sprint(e.Cycle))
 	}
 	for _, s := range out.Warnings {
 		w("w", s)

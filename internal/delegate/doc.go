@@ -41,7 +41,7 @@
 // construction. 3a exists to MEASURE that precondition on one real initiative
 // before the expensive half is built.
 //
-// In this package today:
+// The 3a half, which was built first and has run:
 //
 //   - §4 the manifest — format, loader, validation, three-colour cycle
 //     detection (manifest.go, graph and vocabulary in state.go)
@@ -53,33 +53,73 @@
 //   - §14.1 the attribution override, without which every child is invisible the
 //     moment anything is hidden (attribute.go)
 //
-// NOT in this package, and not to be added "because it is small": §§9-12 —
-// integration worktrees, git merge run by Loom, cross-repo checks, the
-// rendezvous/park-and-resume path, dynamic manifest amendments, the deadlock
-// detector, the watchdogs, and any scheduling beyond "which tasks have no unmet
-// edges" (Ready). In 3a the merge gate is a human reading the check result and
-// running `git merge` themselves — Loom prints the command and does not execute
-// it — and an unforeseen dependency is handled by the human attaching to the
-// child and typing.
+// §§9-12 are no longer deferred and are no longer declarations either: the
+// bodies, the CAS discipline and the tests are all here. §9 is same-repo
+// producer materialization and the dependency graph, §10 the integration
+// worktree and the merges Loom itself runs, §11 the rendezvous/park-and-resume
+// path and dynamic amendments, §12 the divergence comparator, the deadlock
+// detector and the watchdogs:
 //
-// The deferral is why several obvious fields are absent. delegation_runs.
-// integration and delegation_tasks.spawn_snapshot exist in migration v12 and
-// have no writer here; the `integration` block of the manifest JSON parses to
-// nothing and is not validated; TaskState omits `integrating` and `mergeable`.
-// A field nobody sets is worse than a field added when it becomes real.
+//	graph.go       §9.1-9.3: EffectiveGraph, amendments, Ready, Progress, BasePlan
+//	block.go       §11.1-11.3: the block declaration a child writes, its
+//	               detector, and the amendment PROPOSALS a block produces
+//	rendezvous.go  §11.4: pending seeds and their delivery to a live child
+//	integrate.go   §10: the integration worktree, the merge sequence, cross-repo
+//	               checks, and the reset path
+//	snapshot.go    §12.3.3 + §10.5: spawn snapshots and the stale-contract alarm
+//	watchdog.go    §12.1-12.2: the pure watchdog pass, §6.3's dead-child row, the
+//	               spawn-orphan resolver and the deadlock diagnosis
+//	run.go         §2 and the ORDER: the Runner that sequences all of the above,
+//	               and the measurements §2's kill criterion is read off
 //
-// # Ownership of the files, for the wave that fills them in
+// NOT in this package, and each absence is a decision rather than an oversight:
+//
+//   - Nothing SPAWNS on its own. Tick computes what is ready and stops; §5.1's
+//     human gate is the only path to a child (§16). A scheduler that could start
+//     work would make that sentence false, and this is the file that would have
+//     to be edited to break it.
+//   - No rendering and no IPC. Every DTO, every gate on a project root and every
+//     button lives in cmd/loom-gui; this package returns facts and errors.
+//   - No projects.Resolver. §14's hiding bit and the repo-label→path map arrive
+//     as FUNCTIONS on Runner (Hidden, Repos) — §14.1's warning is that a
+//     delegation child's cwd matches no project target, so a raw resolver fails
+//     closed and hides every child the moment anything is hidden.
+//   - The manifest's `integration` block is still decoded through IntegrationOf
+//     rather than being a validated field of Manifest. §4.4 rule 7 has to apply
+//     to it verbatim, and that means editing the frozen loader; it is a named
+//     handoff in run.go.
+//   - There is no flag-add/flag-clear CAS. Two Looms' watchdogs can lose each
+//     other's flags through a read-modify-write; DecodeFlags' unknown-flag
+//     tolerance degrades that to a lost BADGE rather than a corrupted set, and
+//     FlagSeedPending — the one flag that is a durable CLAIM — goes through
+//     SetTaskFlagsCAS for exactly that reason.
+//
+// # Ownership of the files
 //
 //	state.go      vocabulary: TaskState, Flags, the shared sentinel errors
 //	manifest.go   §4: types, LoadAll, validation, Graph, cycle detection, Ready
-//	worktree.go   §6: git plumbing, meta dir, seed files, bootstrap, cleanup
+//	worktree.go   §6 + §9.2's execution half: git plumbing, meta dir, seed
+//	              files, bootstrap, cleanup, MergeProducers
 //	check.go      §8: the subprocess runner and the published-artifact gate
 //	spawn.go      §5.1 + §6.6 + §7: the gate preview, the brief, the launch
 //	attribute.go  §14.1: the delegation-aware attribution wrapper
+//	graph.go      §9: the effective graph, the amendment log's semantics
+//	block.go      §11.1-11.3: block files, their detector, their proposals
+//	rendezvous.go §11.4: the seed, its delivery, and the cross-repo relaunch
+//	integrate.go  §10: integration worktrees and every merge Loom runs
+//	snapshot.go   §12.3.3, §10.5: the out-of-worktree tripwire and contracts
+//	watchdog.go   §12.1-12.2: the pure pass and the deadlock diagnosis
+//	run.go        §2, and the ORDER every one of the above is applied in
 //
 // state.go and manifest.go are one agent's scope — the graph types and the
 // vocabulary are the seam every other file codes against, and splitting them
 // across two authors is how two definitions of "ready" get written.
+//
+// The one duplication to leave alone: ActiveChildren's switch (spawn.go) and
+// TaskState.HoldsAChild (state.go) enumerate the same set on purpose, and
+// state_test.go's TestActiveChildrenAgreesWithHoldsAChild is what catches the
+// drift. It caught it already — `integrating` and `mergeable` reached
+// HoldsAChild one wave before they reached ActiveChildren.
 //
 // # Position in the dependency graph
 //

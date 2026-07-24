@@ -657,21 +657,24 @@ func TestDuplicateColumnSwallowIsScopedToStandaloneALTER(t *testing.T) {
 	}
 }
 
-// TestMigrationV10ToV13FromStaleUserVersion is the orchestration arc's
+// TestMigrationV10ToV18FromStaleUserVersion is the orchestration arc's
 // re-entrancy test, run against a REAL DB rather than a fresh one: the new
 // objects are left in place (or selectively removed) and only user_version is
 // rewound, which is the shape that catches a CREATE missing IF NOT EXISTS and
 // an ALTER folded in beside one.
 //
-// Four slots land together — v10 orchestrators, v11 projects.notes_dir, v12 the
-// delegation tables, v13 sessions.delegation — so the replay crosses two
-// standalone ALTERs with re-entrant CREATE slots on both sides of each. That is
-// exactly the arrangement that breaks if either ALTER is ever folded into a
-// neighbouring slot: `duplicate column name` is only swallowed for a slot that
-// is nothing BUT an ALTER (isStandaloneAddColumn), and a multi-statement slot
-// would strand every statement after the failing one while bumping the version
-// over the damage.
-func TestMigrationV10ToV13FromStaleUserVersion(t *testing.T) {
+// Nine slots land together — v10 orchestrators, v11 projects.notes_dir, v12
+// the delegation tables, v13 sessions.delegation, v14 delegation_amendments,
+// v15 delegation_tasks.needs_snapshot, v16 delegation_amendments.rejected_at,
+// v17 delegation_tasks.seed_owed_since, v18 delegation_tasks.certified_sha —
+// so the replay alternates standalone ALTERs with re-entrant CREATE slots three
+// times over, and finishes on three consecutive ALTERs against a table five
+// slots older. That is exactly the arrangement
+// that breaks if any ALTER is ever folded into a neighbouring slot: `duplicate
+// column name` is only swallowed for a slot that is nothing BUT an ALTER
+// (isStandaloneAddColumn), and a multi-statement slot would strand every
+// statement after the failing one while bumping the version over the damage.
+func TestMigrationV10ToV18FromStaleUserVersion(t *testing.T) {
 	cases := []struct {
 		name string
 		// unapply rewinds a fully-migrated DB to look like a v9-era one, to
@@ -682,21 +685,25 @@ func TestMigrationV10ToV13FromStaleUserVersion(t *testing.T) {
 		keepsEdits bool
 	}{
 		{
-			name:       "version only", // all four slots replayed against live objects
+			name:       "version only", // all nine slots replayed against live objects
 			unapply:    []string{"PRAGMA user_version = 9"},
 			keepsEdits: true,
 		},
 		{
-			name: "both new ALTER columns rewound",
+			name: "every new ALTER column rewound",
 			unapply: []string{
 				"ALTER TABLE projects DROP COLUMN notes_dir",
 				"ALTER TABLE sessions DROP COLUMN delegation",
+				"ALTER TABLE delegation_tasks DROP COLUMN needs_snapshot",
+				"ALTER TABLE delegation_amendments DROP COLUMN rejected_at",
+				"ALTER TABLE delegation_tasks DROP COLUMN seed_owed_since",
+				"ALTER TABLE delegation_tasks DROP COLUMN certified_sha",
 				"PRAGMA user_version = 9",
 			},
 		},
 		{
-			// One CREATE slot's objects gone, the other's intact: v10 must
-			// rebuild and v12 must no-op through IF NOT EXISTS in the same
+			// One CREATE slot's objects gone, the others' intact: v10 must
+			// rebuild and v12/v14 must no-op through IF NOT EXISTS in the same
 			// replay. keepsEdits is false because the dropped table took its
 			// row with it — that is the rewind, not a replay defect.
 			name: "orchestrators dropped, delegation tables kept",
@@ -706,9 +713,23 @@ func TestMigrationV10ToV13FromStaleUserVersion(t *testing.T) {
 			},
 		},
 		{
+			// v14 alone gone: the amendments table must come back without v12's
+			// CREATEs or v13/v15's ALTERs failing on their way past it — and
+			// v16's ALTER must then land on the table v14 just recreated, which
+			// is the ordering an ALTER against a young table depends on.
+			name: "amendments dropped, everything else kept",
+			// keepsEdits is false for the same reason as the case above: the
+			// dropped table took its amendment row with it.
+			unapply: []string{
+				"DROP TABLE delegation_amendments",
+				"PRAGMA user_version = 9",
+			},
+		},
+		{
 			name: "genuine pre-v10 database", // nothing to collide with
 			unapply: []string{
 				"DROP TABLE orchestrators",
+				"DROP TABLE delegation_amendments",
 				"DROP TABLE delegation_artifacts",
 				"DROP TABLE delegation_tasks",
 				"DROP TABLE delegation_runs",
@@ -721,6 +742,7 @@ func TestMigrationV10ToV13FromStaleUserVersion(t *testing.T) {
 			name: "all the way back to v6", // the slice-1 replay still works underneath
 			unapply: []string{
 				"DROP TABLE orchestrators",
+				"DROP TABLE delegation_amendments",
 				"DROP TABLE delegation_artifacts",
 				"DROP TABLE delegation_tasks",
 				"DROP TABLE delegation_runs",
@@ -755,6 +777,14 @@ func TestMigrationV10ToV13FromStaleUserVersion(t *testing.T) {
 			}
 			run, err := s.InsertDelegationRun("atlas", "/w/a", "{}", "{}", 1000)
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.InsertDelegationTask(DelegationTask{RunID: run.ID, TaskID: "seed",
+				State: "pending", RepoLabel: "r", NeedsSnapshot: `{"a":{"fingerprint":"f1"}}`,
+				UpdatedAt: 1000}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AppendDelegationAmendment(run.ID, "needs-artifact", `{"e":1}`, 1000); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.Close(); err != nil {
@@ -803,6 +833,17 @@ func TestMigrationV10ToV13FromStaleUserVersion(t *testing.T) {
 				if err != nil || !ok || got.Slug != run.Slug {
 					t.Fatalf("delegation run clobbered by the replay: %+v %v %v", got, ok, err)
 				}
+				task, ok, err := s2.GetDelegationTask(run.ID, "seed")
+				if err != nil || !ok || task.NeedsSnapshot != `{"a":{"fingerprint":"f1"}}` {
+					t.Fatalf("needs_snapshot clobbered by the replay: %+v %v %v", task, ok, err)
+				}
+				// An amendment is append-only history the effective graph is
+				// replayed from; a migration that rewrote or dropped one would
+				// silently change a plan a child is parked against.
+				am, err := s2.ListDelegationAmendments(run.ID)
+				if err != nil || len(am) != 1 || am[0].Seq != 1 || am[0].Body != `{"e":1}` {
+					t.Fatalf("amendments clobbered by the replay: %+v %v", am, err)
+				}
 			}
 
 			// every new object is usable after the replay, not merely present
@@ -826,6 +867,12 @@ func TestMigrationV10ToV13FromStaleUserVersion(t *testing.T) {
 				State: "pending", RepoLabel: "r", UpdatedAt: 2000}); err != nil {
 				t.Fatalf("delegation_tasks unusable after the v12 replay: %v", err)
 			}
+			if err := s2.SetTaskNeedsSnapshot(r2.ID, "t", `{"x":{}}`, 2000); err != nil {
+				t.Fatalf("needs_snapshot unusable after the v15 replay: %v", err)
+			}
+			if seq, err := s2.AppendDelegationAmendment(r2.ID, "needs-scope", `{}`, 2000); err != nil || seq != 1 {
+				t.Fatalf("delegation_amendments unusable after the v14 replay: %d %v", seq, err)
+			}
 			if err := s2.UpsertDelegationArtifact(DelegationArtifact{RunID: r2.ID,
 				ArtifactID: "a", TaskID: "t", Path: "p"}); err != nil {
 				t.Fatalf("delegation_artifacts unusable after the v12 replay: %v", err)
@@ -834,24 +881,24 @@ func TestMigrationV10ToV13FromStaleUserVersion(t *testing.T) {
 	}
 }
 
-// TestUserVersionIsThirteen asserts the ABSOLUTE migration head, which the
+// TestUserVersionIsEighteen asserts the ABSOLUTE migration head, which the
 // orchestrator spec §13 asks for by name and for a specific reason: revision 1
 // of that spec allocated an already-occupied slot, and migrate() loops
 // `for i := v; i < len(migrations)`, so a DB sitting at the colliding version
 // would skip the new slot entirely and open cleanly WITHOUT it — green on every
 // fresh-DB test, broken on every real one. A relative assertion cannot catch
 // that. When a later slice adds a slot, this number moves with it deliberately.
-func TestUserVersionIsThirteen(t *testing.T) {
+func TestUserVersionIsEighteen(t *testing.T) {
 	s := open(t)
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 13 {
-		t.Fatalf("user_version = %d, want 13", v)
+	if v != 18 {
+		t.Fatalf("user_version = %d, want 18", v)
 	}
 	for _, obj := range []string{"orchestrators", "delegation_runs", "delegation_tasks",
-		"delegation_artifacts"} {
+		"delegation_artifacts", "delegation_amendments"} {
 		var name string
 		if err := s.db.QueryRow(
 			"SELECT name FROM sqlite_master WHERE type='table' AND name=?", obj).Scan(&name); err != nil {
@@ -865,14 +912,77 @@ func TestUserVersionIsThirteen(t *testing.T) {
 			t.Fatalf("%s missing: %v", idx, err)
 		}
 	}
-	// delegation_amendments belongs to the deferred §§9-12 block. An empty
-	// table is an invitation to write to it, so its absence is deliberate and
-	// pinned here — unparking that work must add a slot, not discover one.
-	var name string
-	if err := s.db.QueryRow(
-		"SELECT name FROM sqlite_master WHERE type='table' AND name='delegation_amendments'",
-	).Scan(&name); err != sql.ErrNoRows {
-		t.Fatalf("delegation_amendments exists (%q, %v); slice 3a does not ship it", name, err)
+}
+
+// TestDelegationAmendmentsShape pins v14's SHAPE plus v16's column, and
+// replaces the assertion
+// that used to pin the table's ABSENCE while §§9-12 were parked. The shape is
+// what the append-only property rests on: (run_id, seq) as the PK is what makes
+// a duplicate ordinal a visible constraint violation instead of an ambiguous
+// replay order, and `approved_at INTEGER NOT NULL DEFAULT 0` is what makes
+// "proposed but not approved" a value every existing row already has rather
+// than a NULL every reader has to remember to handle.
+func TestDelegationAmendmentsShape(t *testing.T) {
+	s := open(t)
+	want := []struct {
+		name    string
+		typ     string
+		notNull bool
+		dflt    string
+		pk      int
+	}{
+		{"run_id", "INTEGER", true, "", 1},
+		{"seq", "INTEGER", true, "", 2},
+		{"kind", "TEXT", true, "", 0},
+		{"body", "TEXT", true, "", 0},
+		{"approved_at", "INTEGER", true, "0", 0},
+		{"created_at", "INTEGER", true, "", 0},
+		// v16, and it is LAST because ALTER appends: a rejection is a timestamp
+		// beside the approval, defaulted to 0 so every pre-v16 row already reads
+		// as "no decision" rather than as a NULL each caller must remember.
+		{"rejected_at", "INTEGER", true, "0", 0},
+	}
+	rows, err := s.db.Query("PRAGMA table_info(delegation_amendments)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	i := 0
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if i >= len(want) {
+			t.Fatalf("unexpected extra column %q", name)
+		}
+		w := want[i]
+		if name != w.name || typ != w.typ || (notNull == 1) != w.notNull ||
+			dflt.String != w.dflt || pk != w.pk {
+			t.Errorf("column %d = %q %q notnull=%d default=%q pk=%d; want %+v",
+				i, name, typ, notNull, dflt.String, pk, w)
+		}
+		i++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if i != len(want) {
+		t.Fatalf("delegation_amendments has %d columns, want %d", i, len(want))
+	}
+
+	// The PK is the enforcement, not a convention: a duplicated (run_id, seq)
+	// must be refused by the database, because the replay order it would make
+	// ambiguous is what the effective graph is built from.
+	if _, err := s.AppendDelegationAmendment(1, "needs-artifact", "{}", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(
+		"INSERT INTO delegation_amendments (run_id, seq, kind, body, created_at) VALUES (1,1,'x','{}',1)",
+	); err == nil {
+		t.Fatal("a duplicate (run_id, seq) was accepted")
 	}
 }
 
@@ -963,7 +1073,15 @@ func TestProjectNotesDirSurvivesRepoint(t *testing.T) {
 // means a slot was added, and the question to answer is whether every
 // already-migrated DB in existence will still receive it.
 func TestMigrationHeadIsPinned(t *testing.T) {
-	const wantHead = 13
+	// 18 since §§9-12 were unparked and their failure modes closed: v14
+	// delegation_amendments, v15 delegation_tasks.needs_snapshot, v16
+	// delegation_amendments.rejected_at (§11.3's durable NO), v17
+	// delegation_tasks.seed_owed_since (§12.2's `block-stale` clock, which
+	// updated_at could not be), v18 delegation_tasks.certified_sha (§5.2's "the
+	// diff shown is the diff applied"). Confirmed rather than assumed — a DB
+	// already at 13 enters the loop at i=13 and receives all five, which
+	// TestMigrationV10ToV18FromStaleUserVersion exercises against a real file.
+	const wantHead = 18
 
 	s := open(t)
 	var v int
@@ -1063,6 +1181,15 @@ func TestMigrationsReplayFromEveryStaleVersion(t *testing.T) {
 			}
 			if _, err := s2.ListProjects(); err != nil {
 				t.Fatalf("projects unusable after replay from %d: %v", stale, err)
+			}
+			// v14/v15's objects, which is also the proof that a DB sitting at
+			// the previous head (13) receives both new slots rather than
+			// skipping them.
+			if _, err := s2.ListDelegationAmendments(1); err != nil {
+				t.Fatalf("delegation_amendments unusable after replay from %d: %v", stale, err)
+			}
+			if _, err := s2.DelegationTasksInStates("spawning"); err != nil {
+				t.Fatalf("delegation_tasks unusable after replay from %d: %v", stale, err)
 			}
 		})
 	}

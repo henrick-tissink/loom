@@ -79,7 +79,15 @@ func ActiveChildren(states map[string]TaskState) int {
 		// (§13.3), so not counting it lets the cap be exceeded by exactly the
 		// number of launches in flight.
 		switch st {
-		case StateSpawning, StateRunning, StateBlocked, StateChecking:
+		case StateSpawning, StateRunning, StateBlocked, StateChecking,
+			// `integrating` and `mergeable` hold a child for the reasons
+			// HoldsAChild spells out: §10.2 runs against the INTEGRATION
+			// worktree so the task's own child is idle at its prompt (and §10.3
+			// seeds it, which needs it alive), and §10.4 does not remove the
+			// worktree until the human merges. Omitting them here while
+			// HoldsAChild counts them is the precise drift this switch's
+			// duplication is supposed to make a reader notice.
+			StateIntegrating, StateMergeable:
 			n++
 		}
 	}
@@ -360,6 +368,23 @@ func (s *Spawner) Approve(runID int64, taskID string) (claimed bool, err error) 
 // child is real and is running, so this returns the session name AND an error
 // rather than swallowing either.
 func (s *Spawner) Spawn(run store.DelegationRun, m Manifest, t Task) (sessionName string, err error) {
+	// The zero BasePlan is "branch from the run's pinned base with no producers
+	// to merge", which is every 3a run and every leaf task. It is NOT a special
+	// case inside SpawnWith — a zero plan simply contributes nothing — so there
+	// is one spawn sequence rather than two that drift.
+	return s.SpawnWith(run, m, t, BasePlan{})
+}
+
+// SpawnWith is Spawn with §9.2's computed base. run.go's Approve calls it with
+// PlanBase's result so the worktree is branched from the run base with every
+// same-repo producer already merged in, and the two snapshot columns §12.3.3 and
+// §10.5 depend on are captured from that plan.
+//
+// A separate entry point rather than a changed signature on Spawn: Spawn's
+// sequence is the one proven against §13.3's races, and the safest way to add
+// the plan was to add the parameter where the caller that has one can pass it
+// while every existing caller keeps the sequence it was tested with.
+func (s *Spawner) SpawnWith(run store.DelegationRun, m Manifest, t Task, plan BasePlan) (sessionName string, err error) {
 	if s.Store == nil || s.Worktrees == nil || s.Launcher == nil {
 		return "", errors.New("delegate: Spawner needs a Store, a Worktrees and a Launcher")
 	}
@@ -393,6 +418,13 @@ func (s *Spawner) Spawn(run store.DelegationRun, m Manifest, t Task) (sessionNam
 	}
 
 	planned := s.plan(run, t)
+	// §9.2's plan overrides the run's pinned base only when it HAS one. A plan
+	// computed from a run whose base_shas column is malformed carries "", and
+	// letting that overwrite the value the row already had would replace a loud
+	// `git worktree add` refusal with a child branched from somewhere else.
+	if plan.Base != "" {
+		planned.Base = plan.Base
+	}
 
 	// Step 1 (§13.3): CAS approved→spawning, recording the deterministic
 	// worktree, branch and base in the SAME statement. THE CLAIM PRECEDES EVERY
@@ -405,7 +437,8 @@ func (s *Spawner) Spawn(run store.DelegationRun, m Manifest, t Task) (sessionNam
 	// moves the state. A refusal is therefore indistinguishable here from a lost
 	// approval race, and the error says both rather than guessing: the row is
 	// untouched either way and the remedy — look at the run — is the same.
-	claimed, err := s.Store.ClaimTaskSpawnCAS(run.ID, t.ID, planned.Dir, planned.Branch, planned.Base, "", capN, now.Unix())
+	claimed, err := s.Store.ClaimTaskSpawnCAS(run.ID, t.ID, planned.Dir, planned.Branch, planned.Base,
+		EncodeProducers(plan.Merge), capN, now.Unix())
 	if err != nil {
 		return "", err
 	}
@@ -430,7 +463,10 @@ func (s *Spawner) Spawn(run store.DelegationRun, m Manifest, t Task) (sessionNam
 		RepoPath:  m.RepoPaths[t.Repo],
 		Base:      planned.Base,
 		Setup:     m.Repos[t.Repo],
-		Brief:     Brief(run, m, t, planned, AddDirs(planned)),
+		Brief:     Brief(run, m, t, planned, addDirsFor(planned, plan)),
+		// Merged INSIDE Create, between `worktree add` and bootstrap — see
+		// Request.Merge for why the caller must not do it afterwards.
+		Merge: plan.Merge,
 	})
 	if err != nil {
 		// Nothing was launched — Create's own precondition (§6.2 step 3) and
@@ -445,6 +481,16 @@ func (s *Spawner) Spawn(run store.DelegationRun, m Manifest, t Task) (sessionNam
 		return "", fmt.Errorf("delegate: task %q: worktree: %w", t.ID, err)
 	}
 
+	// Step 2b: the two baselines, taken BEFORE the launch. Before, because both
+	// exist to answer "what did this look like when the child started", and one
+	// taken after the child exists has already lost the thing it is.
+	//
+	// Both failures degrade rather than abort: the child's worktree is built and
+	// refusing to launch over a missing tripwire trades a real hour of work for a
+	// detector. The absence is not silent either way — §12.3.3's comparator
+	// reports NoBaseline and §10.5's Preview renders "no baseline recorded".
+	s.recordBaselines(run, m, t, plan, now)
+
 	// Step 3: launch. From here the child is REAL, so every subsequent failure
 	// returns the session name alongside its error — a caller that saw only an
 	// error would report "no child" while a claude burns quota in a worktree.
@@ -455,7 +501,10 @@ func (s *Spawner) Spawn(run store.DelegationRun, m Manifest, t Task) (sessionNam
 		Model:        effective(t.Model, m.Defaults.Model),
 		Mode:         effective(t.Mode, m.Defaults.Mode),
 		Seed:         SeedPointer(filepath.Join(created.MetaDir, briefFile)),
-		AddDirs:      AddDirs(created),
+		// §9.2's cross-repo half: the producers' integration worktrees, granted
+		// read-and-write by --add-dir (spike-disclosed) and checked pre-merge by
+		// §12.3.3. The child cannot see what it declares it needs without them.
+		AddDirs: addDirsFor(created, plan),
 	}, w, h, now)
 	if err != nil {
 		// The task stays in `spawning` deliberately. §13.3's recovery resolves
@@ -572,10 +621,12 @@ func Brief(run store.DelegationRun, m Manifest, t Task, c Created, addDirs []str
 	b.WriteString("Do not report completion in prose — there is no message you can send that means done.\n")
 	b.WriteString("You are encouraged to run that same command yourself while you work.\n\n")
 
-	// §11.1's protocol, adapted for 3a: the block file is written and the child
-	// stops, but there is no rendezvous machinery to resume it — a human reads
-	// the file and attaches. That is stated plainly rather than promising an
-	// automatic unblock that does not exist in this release.
+	// §11.1's protocol in full. 3a's version of this comment said there was no
+	// rendezvous machinery and a human would attach by hand; rendezvous.go now
+	// exists, so the brief states what actually happens rather than under-
+	// promising. The distinction is kept per kind and not smoothed away: only
+	// needs-artifact resumes on its own, and telling a child that every block
+	// clears automatically is a different lie from the one just removed.
 	b.WriteString("## 6. If you cannot proceed — the STOP protocol\n\n")
 	b.WriteString("Do not work around a block. Do not modify paths outside your authorization to unblock\nyourself. Do not exit.\n\n")
 	fmt.Fprintf(&b, "Write `%s` with this shape:\n\n", filepath.Join(c.MetaDir, blockFile))
@@ -584,11 +635,29 @@ func Brief(run store.DelegationRun, m Manifest, t Task, c Created, addDirs []str
 	fmt.Fprintf(&b, "  \"run\": %q,\n  \"task\": %q,\n", run.Slug, t.ID)
 	b.WriteString("  \"at\": \"<RFC3339 timestamp>\",\n")
 	b.WriteString("  \"kind\": \"needs-artifact | needs-decision | needs-scope | blocked-external\",\n")
+	// `need` and `paths` are printed even though they are per-kind, because the
+	// template is the ONLY specification the child ever sees and both fields are
+	// load-bearing rather than decorative. A needs-artifact block with no
+	// `need.artifact` can never satisfy Unblocked, so the park is PERMANENT; a
+	// needs-scope block with no `paths` yields a scope amendment that ApplyScope
+	// refuses as "grants no paths", so the widening can never be granted. In
+	// both cases the child stopped correctly and visibly and the run still cannot
+	// resume — the exact silent outcome §11.2 forbids, caused by the brief and
+	// not by the agent.
+	b.WriteString("  \"need\": { \"artifact\": \"<artifact id>\", \"from\": \"<task id you believe owns it>\" },\n")
+	b.WriteString("  \"paths\": [\"<glob you need authorization for>\"],\n")
 	b.WriteString("  \"summary\": \"one line\",\n")
 	b.WriteString("  \"detail\": \"what you were doing and what stopped you\",\n")
 	b.WriteString("  \"resume_when\": \"the condition that would unblock you\" }\n")
 	b.WriteString("```\n\n")
-	b.WriteString("Then STOP at your prompt and say nothing further. An idle session costs nothing and\nkeeps your context; a human will read that file and reply here.\n")
+	b.WriteString("`need` is REQUIRED for `needs-artifact` — without `need.artifact` nothing can detect\nthat your block cleared, and you will wait forever. `paths` is REQUIRED for\n`needs-scope` — a widening that names nothing cannot be granted. Omit each for the\nother kinds. If you do not know the producing task, give `need.artifact` alone.\n\n")
+	// SUPERSEDED, deliberately rewritten: the 3a text promised only that a human
+	// would read the file and reply. §11.4 now materializes the artifact and
+	// re-seeds the child automatically for needs-artifact, and telling the child
+	// to expect a human is how it decides, after a compaction, that nobody came
+	// and it should proceed on its own — which is the scope overreach the STOP
+	// protocol exists to prevent.
+	b.WriteString("Then STOP at your prompt and say nothing further. An idle session costs nothing and\nkeeps your context. You will be replied to here — for `needs-artifact` Loom does this\nautomatically once the artifact is published; the other kinds wait for a human. Either\nway the reply arrives in this session, so do not act until it does.\n")
 	b.WriteString("A `needs-scope` block is the correct and encouraged response to discovering that this\ntask's boundary was drawn wrong.\n")
 	return b.String()
 }
@@ -657,6 +726,72 @@ func AddDirs(c Created) []string {
 		return nil
 	}
 	return []string{c.MetaDir}
+}
+
+// addDirsFor is AddDirs plus §9.2's cross-repo grants: the child's own meta dir,
+// then the integration worktree of every repo it needs an artifact out of.
+//
+// The meta dir stays FIRST and the plan's dirs are de-duplicated against it, so
+// the list a brief renders and the list Launch passes are the same list in the
+// same order. A brief that names a different set from the one actually granted
+// is worse than no list at all — the authorization text is the only thing
+// constraining a grant that cannot be technically narrowed.
+func addDirsFor(c Created, plan BasePlan) []string {
+	out := AddDirs(c)
+	seen := map[string]bool{}
+	for _, d := range out {
+		seen[d] = true
+	}
+	for _, d := range plan.AddDirs {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
+}
+
+// recordBaselines writes the two spawn-time columns §12.3.3 and §10.5 compare
+// against. Errors are DEGRADED, not returned: see the call site.
+func (s *Spawner) recordBaselines(run store.DelegationRun, m Manifest, t Task, plan BasePlan, now time.Time) {
+	// §12.3.3's tripwire: the dirty-file fingerprint of every in-scope primary
+	// work tree and every add-dir'd integration worktree. This is the ONLY thing
+	// that can see a child writing outside its worktree by absolute path, because
+	// --add-dir's grant covers write and cannot be revoked (spike).
+	if snap := EncodeSnapshot(TakeSnapshot(SnapshotDirs(m, plan))); snap != "" {
+		_ = s.Store.SetTaskSpawnSnapshot(run.ID, t.ID, snap, now.Unix())
+	}
+
+	// §10.5's stale-contract baseline: the fingerprint and commit of every
+	// artifact this task NEEDS, as they stand right now. A COPY and not a
+	// reference — delegation_artifacts holds only the latest publication, so
+	// without this the alarm would compare the current value with itself and
+	// never fire.
+	if len(t.Needs) == 0 {
+		return
+	}
+	arts, err := s.Store.ListDelegationArtifacts(run.ID)
+	if err != nil {
+		return
+	}
+	byID := make(map[string]store.DelegationArtifact, len(arts))
+	for _, a := range arts {
+		byID[a.ArtifactID] = a
+	}
+	base := map[string]NeedsBaseline{}
+	for _, id := range t.Needs {
+		a, ok := byID[id]
+		if !ok || a.Fingerprint == "" {
+			// Nothing published yet. Recording an empty fingerprint would be
+			// indistinguishable from a recorded one at compare time, and
+			// needsWithoutBaseline exists precisely so "we cannot tell" is a
+			// rendered warning rather than a silent pass.
+			continue
+		}
+		base[id] = NeedsBaseline{Fingerprint: a.Fingerprint, Commit: a.CommitSHA}
+	}
+	_ = s.Store.SetTaskNeedsSnapshot(run.ID, t.ID, EncodeNeedsBaselines(base), now.Unix())
 }
 
 // DelegationTag is the sessions.tags value, matching the `wf:` convention:

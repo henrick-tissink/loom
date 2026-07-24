@@ -251,16 +251,18 @@ func (s *Store) migrate() error {
 		// edited or deleted underneath it. base_shas pins one commit per repo at
 		// run creation so every child of a run branches from the same place.
 		//
-		// delegation_runs.integration and delegation_tasks.spawn_snapshot carry
-		// no writer in slice 3a — §§10 and 12.3.3 are deferred until 3a has run
-		// on a real initiative. They are declared here anyway because adding a
-		// column later costs a standalone ALTER slot, and the whole point of
-		// landing the schema in one pass is that no later slice has to touch
-		// the migration list.
+		// delegation_runs.integration and delegation_tasks.spawn_snapshot were
+		// declared here with no writer, ahead of §§10 and 12.3.3 — precisely so
+		// that unparking them would cost no migration slot. They have writers
+		// now (SetDelegationRunIntegrationCAS, SetTaskSpawnSnapshot) and this
+		// slot is untouched, which is the payoff.
 		//
-		// delegation_amendments (§11.3) is deliberately ABSENT: amendments are
-		// part of the deferred §§9-12 block, and an empty table is an invitation
-		// to write to it. It gets its own slot when that work is unparked.
+		// delegation_amendments (§11.3) was deliberately absent from this slot
+		// while §§9-12 were parked, on the grounds that an empty table is an
+		// invitation to write to it. It arrives in v14 rather than being folded
+		// in here: editing an applied migration would leave every existing
+		// database at v13 with no amendments table and no slot left to create
+		// one.
 		`CREATE TABLE IF NOT EXISTS delegation_runs (
 			id            INTEGER PRIMARY KEY AUTOINCREMENT,
 			slug          TEXT NOT NULL UNIQUE,
@@ -322,6 +324,125 @@ func (s *Store) migrate() error {
 		//
 		// Own slot: ALTER has no IF NOT EXISTS, same reason as v2/v3/v8/v9/v11.
 		`ALTER TABLE sessions ADD COLUMN delegation TEXT NOT NULL DEFAULT ''`,
+		// v14: manifest amendments (delegation spec §11.3), unparked with the
+		// rest of §§9-12. An unforeseen dependency is recorded as an APPEND-ONLY
+		// row on the run and never as a mutation of the on-disk manifest, which
+		// Loom does not own and which the author may have open in an editor;
+		// `delegation_runs.manifest_json` is likewise a snapshot and stays
+		// frozen, so the effective graph is snapshot + amendments replayed in
+		// `seq` order.
+		//
+		// seq is a per-run counter in the PK rather than a global AUTOINCREMENT
+		// id: the replay order that produces the effective graph is per run, and
+		// a global id makes "the third amendment on this run" a query instead of
+		// a value. The rejected alternative — updating one `amendments` JSON blob
+		// on delegation_runs — loses the append: two Loom instances recording two
+		// blocks at once would each write a whole blob and the later write would
+		// silently drop the earlier amendment, which is precisely the edge a
+		// child is parked waiting on (§11.4). A row per amendment makes the
+		// concurrent case a PK conflict the writer can see instead of a lost
+		// edge nobody can.
+		//
+		// approved_at=0 means "proposed, not yet approved". §11.3 requires human
+		// approval for a `needs-scope` authorization amendment and it is stored
+		// rather than implied so a restart cannot forget that the human already
+		// said yes — the same durability argument as pending_seed.
+		`CREATE TABLE IF NOT EXISTS delegation_amendments (
+			run_id      INTEGER NOT NULL,
+			seq         INTEGER NOT NULL,
+			kind        TEXT NOT NULL,
+			body        TEXT NOT NULL,
+			approved_at INTEGER NOT NULL DEFAULT 0,
+			created_at  INTEGER NOT NULL,
+			PRIMARY KEY (run_id, seq)
+		)`,
+		// v15: the fingerprints a consumer was spawned against (§10.5's
+		// stale-contract alarm), as JSON {artifactID: {fingerprint, commit}}.
+		//
+		// NOT IN THE SPEC'S SCHEMA, and required by it: §10.5 says "if a
+		// fingerprint changed after the consumer was spawned, the consumer is
+		// flagged stale-contract naming the artifact and BOTH commits". The
+		// pre-change value is unrecoverable without this column —
+		// UpsertDelegationArtifact is keyed (run_id, artifact_id) and overwrites
+		// fingerprint/commit_sha on republication, which is exactly what a
+		// producer sent back by §10.3 does before the consumer verifies. The
+		// alarm would then compare the current fingerprint with itself and never
+		// fire, i.e. the one automatic cross-repo detector this design has would
+		// be silently dead.
+		//
+		// The rejected alternative was making delegation_artifacts history —
+		// PK (run_id, artifact_id, commit_sha) — which breaks §9.1's "resolve
+		// each `needs` against the newest publication" into a per-edge
+		// max-by-published_at subquery on every scheduler tick, and still does
+		// not say WHICH publication a given consumer saw. Recording the answer
+		// on the consumer at spawn does, in one read.
+		//
+		// Own slot: ALTER has no IF NOT EXISTS, same reason as v2/v3/v8/v9/v11/v13.
+		`ALTER TABLE delegation_tasks ADD COLUMN needs_snapshot TEXT NOT NULL DEFAULT ''`,
+		// v16: a human's NO on an amendment, made durable (§11.3).
+		//
+		// §11.3's authorization amendment is "human-approved, never
+		// auto-granted", and until this column the only durable answer was YES:
+		// approved_at=0 meant "proposed", so a rejection was indistinguishable
+		// from an offer nobody had looked at yet. The offer therefore came back
+		// on the next poll, forever, and the one gate in this design that exists
+		// to be REFUSABLE could not record a refusal.
+		//
+		// A timestamp rather than a status column, matching approved_at exactly:
+		// a decision is when it was made or it is nothing, and two spellings of
+		// the same fact is how they come to disagree. The pair is mutually
+		// exclusive by CAS, not by constraint — each transition guards on BOTH
+		// being 0, so an approval and a rejection racing from two Loom instances
+		// resolve to whichever UPDATE the single writer lock admitted first, and
+		// the loser is told.
+		//
+		// A rejected amendment is NOT deleted and NOT rewritten: the table is
+		// append-only because the effective graph is a replay, and an amendment
+		// that vanished would erase the record of a decision a child may already
+		// be parked against. Accept keeps ignoring it — a rejection makes the
+		// ignoring permanent rather than provisional.
+		//
+		// Own slot: ALTER has no IF NOT EXISTS.
+		`ALTER TABLE delegation_amendments ADD COLUMN rejected_at INTEGER NOT NULL DEFAULT 0`,
+		// v17: when a continuation seed became OWED, as its own durable stamp
+		// (delegation spec §12.2's `block-stale` row).
+		//
+		// It exists because updated_at cannot serve and looked as if it could.
+		// The watchdog row is "blocked, unblock condition satisfied >5m, seed not
+		// delivered", and the age was read from delegation_tasks.updated_at — a
+		// column every delivery ATTEMPT rewrites, because SetTaskPendingSeed
+		// stamps it. The poll re-attempts every couple of seconds, so the debt was
+		// permanently zero seconds old and the 5-minute threshold was unreachable
+		// in exactly the case it was written for: a child that never returns to a
+		// prompt and therefore never consumes the seed. The one escalation a park
+		// has could not fire.
+		//
+		// Set once, on the transition from "no seed owed" to "a seed is owed", and
+		// cleared to 0 by the delivering CAS. That is why the writer is a CASE
+		// expression rather than an assignment: a re-attempt must not restart the
+		// clock, which is the entire defect.
+		//
+		// Own slot: ALTER has no IF NOT EXISTS.
+		`ALTER TABLE delegation_tasks ADD COLUMN seed_owed_since INTEGER NOT NULL DEFAULT 0`,
+		// v18: the exact task-branch commit a green §10.2 integration pass
+		// certified, so §5.2's gate can prove the diff it showed is the diff it
+		// applies.
+		//
+		// Loom resolved `loom/<slug>/<task>` BY NAME at merge time. Nothing stops
+		// a child committing after its task reaches `mergeable` — Tick re-checks
+		// `running` and `blocked` tasks, never `mergeable` ones — so the branch
+		// head moves and the merge lands commits that no check, no integration
+		// pass and no preview ever saw. Inside the task's declared paths there is
+		// not even a divergence signal. §5.2's "the diff shown is the diff applied"
+		// was therefore false, on the one gate where a human authorises a machine
+		// to write to a tree they own.
+		//
+		// A column and not a recomputation: the certified sha is a FACT about a
+		// pass that has already finished, and re-deriving it later would be
+		// re-deriving it from the branch that moved.
+		//
+		// Own slot: ALTER has no IF NOT EXISTS.
+		`ALTER TABLE delegation_tasks ADD COLUMN certified_sha TEXT NOT NULL DEFAULT ''`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {

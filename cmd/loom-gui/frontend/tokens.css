@@ -506,6 +506,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .dg-fig b { font-family: var(--font-mono); font-size: 15px; font-weight: 600; color: var(--text); }
 .dg-fig i { font-style: normal; font-size: 10.5px; letter-spacing: 0.04em; color: var(--text-faint); }
 .dg-fig.dg-f-bad b { color: #a5453a; }
+/* The one figure on the strip that is waiting on a human press (§5.2's gate).
+   Accent rather than alarm: it is work that went well and now needs a decision,
+   which reads differently from a failure. */
+.dg-fig.dg-f-act b { color: var(--accent-ink); }
 .dg-chain-fig { cursor: help; }
 .dg-chain-fig:hover b { color: var(--accent-ink); }
 .dg-chiprow, .dg-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -681,6 +685,159 @@ button.dg-chip { cursor: pointer; }
 .doc-table { border-collapse: collapse; font-size: 12px; }
 .doc-table th, .doc-table td { border: 1px solid var(--edge); padding: 5px 9px; text-align: left; }
 .doc-table th { background: var(--bg); color: var(--text); font-weight: 600; }
+
+/* The §§9-12 surfaces in the node inspector and the run block. Flag lines and
+   amendment offers reuse the existing fact/warn vocabulary rather than growing
+   a third: a `loud` flag is a .po-warn because that is what loud already looks
+   like everywhere else in this app. */
+.dgi-flagline { font-size: 11.5px; color: var(--text-dim); margin: 2px 0; }
+.dgi-flagline code, .dgi-amend code { font-family: var(--font-mono); font-size: 11px; }
+.dgi-amend { border: 1px solid var(--edge); border-radius: 8px; padding: 8px 10px; margin: 0 0 6px; background: var(--surface); }
+.dgi-amend .modal-actions { margin-top: 6px; }
+.dgi-amend b { color: var(--text); font-weight: 600; }
+
+/* A SCOPE amendment widens a child's authorization, which is the one press on
+   this page that hands out permission rather than recording a fact. It gets the
+   attention ink and a left rule the other two kinds do not, so that "approve"
+   and "widen what this agent may write" can never be read as the same gesture.
+   A re-plan gets the opposite treatment: nothing to approve, so nothing that
+   looks pressable. */
+.dgi-amend-scope { border-color: var(--accent-line); background: var(--accent-soft); border-left: 3px solid var(--accent); }
+.dg-scopemark {
+  font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--accent-ink); font-weight: 700; margin-bottom: 3px;
+}
+.dg-scopebtn { color: var(--accent-ink); border-color: var(--accent-line); background: var(--surface); }
+.dg-scopebtn:hover { background: var(--stage); border-color: var(--accent); }
+.dgi-amend-replan { border-style: dashed; }
+.dg-asof { font-size: 10.5px; color: var(--text-faint); padding-top: 2px; }
+
+/* ---- §12.1 / §10.2: the escalation band ----
+   The loudest surface in the app, and deliberately so: a deadlocked run and a
+   run making progress draw the same graph, so a subtle escalation is a failed
+   one. No new hues — the same warn ink every other refusal already uses, given
+   more room and a heavier frame. */
+.dg-escalate {
+  display: flex; flex-direction: column; gap: 7px;
+  border: 1px solid #E7B3A9; border-left: 4px solid #a5453a; border-radius: 9px;
+  background: #F7E4E0; padding: 12px 14px;
+}
+.dg-escalate + .dg-escalate { margin-top: 10px; }
+.dg-esc-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.dg-esc-head h3 { margin: 0; font-size: 13.5px; font-weight: 600; color: #7d332b; letter-spacing: 0; text-transform: none; }
+.dg-esc-mark {
+  font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase; font-weight: 700;
+  color: #a5453a; background: var(--surface); border: 1px solid #E7B3A9; border-radius: 999px; padding: 2px 9px;
+}
+.dg-esc-body { font-size: 12.5px; line-height: 1.55; color: #7d332b; }
+.dg-esc-body b { font-weight: 600; }
+.dg-esc-sec { font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: #a5453a; font-weight: 700; padding-top: 4px; }
+.dg-esc-row { font-size: 12px; color: #7d332b; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.dg-esc-row code, .dg-esc-edge code { font-family: var(--font-mono); font-size: 11px; }
+.dg-esc-edge {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
+  font-size: 12.5px; color: #7d332b;
+  background: var(--surface); border: 1px solid #EFD3CD; border-radius: 8px; padding: 6px 10px;
+}
+.dg-esc-task { font-family: var(--font-mono); font-size: 12px; color: #8f3a30; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.dg-esc-task:hover { color: #a5453a; }
+.dg-esc-arrow { font-size: 11px; color: var(--text-faint); }
+.dg-esc-art { font-size: 11.5px; color: var(--text-dim); }
+.dg-esc-kind { font-family: var(--font-mono); font-size: 10.5px; color: #a5453a; background: #F7E4E0; border: 1px solid #E7B3A9; border-radius: 999px; padding: 1px 8px; }
+.dg-esc-verdict { font-family: var(--font-mono); font-size: 11.5px; color: #a5453a; }
+.dg-esc-dim { font-size: 11px; color: var(--text-faint); }
+.dg-escalate .dgi-pre { background: var(--surface); border-color: #EFD3CD; }
+.dg-escalate .modal-actions { justify-content: flex-start; }
+/* The baseline fault is a DIFFERENT fault from the deadlock beside it: nobody
+   is to blame and the repair is to the repo. It reads cooler on purpose — the
+   deadlock asks for a re-plan, this asks the human to go and fix their tree. */
+.dg-escalate-baseline { border-left-color: #9C4E38; background: #F8E7DF; }
+.dg-escalate-baseline .dg-esc-head h3, .dg-escalate-baseline .dg-esc-body { color: #82412c; }
+.dg-escalate-baseline .dg-esc-mark { color: #9C4E38; border-color: #E7C2AE; }
+
+/* §10.2's attribution, wherever an integration result is rendered. The two rows
+   of that table have OPPOSITE remedies, so they never share a frame. */
+.dg-blame { border-radius: 8px; padding: 8px 10px; margin: 5px 0; font-size: 12px; line-height: 1.5; }
+.dg-blame-head { font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 700; margin-bottom: 3px; }
+.dg-blame-baseline { background: #F8E7DF; border: 1px solid #E7C2AE; border-left: 4px solid #9C4E38; color: #82412c; }
+.dg-blame-baseline .dg-blame-head { color: #9C4E38; }
+.dg-blame-task { background: #F7E4E0; border: 1px solid #E7B3A9; border-left: 4px solid #a5453a; color: #7d332b; }
+.dg-blame-task .dg-blame-head { color: #a5453a; }
+
+/* §10.1's staging area, one chip per repo. The THIRD value — no verdict yet —
+   is neutral on purpose: green would certify on the absence of a result and red
+   would blame every first integration. */
+.dg-stagerow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.dg-stagelabel { font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); font-weight: 700; }
+.dg-stagechip {
+  font-size: 11px; color: var(--text-dim);
+  background: var(--surface); border: 1px solid var(--edge); border-radius: 999px; padding: 2px 9px;
+  display: inline-flex; gap: 6px; align-items: baseline;
+}
+.dg-stagechip code { font-family: var(--font-mono); font-size: 10.5px; color: var(--text); }
+.dg-stagechip i { font-style: normal; font-size: 10px; color: #a5453a; }
+.dg-stage-ok { border-color: #C8DEC9; }
+.dg-stage-bad { color: #a5453a; background: #F7E4E0; border-color: #E7B3A9; }
+.dg-stage-none { color: var(--text-faint); border-style: dashed; }
+
+/* ---- §11: parked children ---- */
+.dg-parklist { gap: 6px; }
+.dg-park {
+  display: flex; flex-direction: column; gap: 4px;
+  border: 1px solid var(--edge); border-left: 3px solid var(--accent-line); border-radius: 9px;
+  background: var(--surface); padding: 9px 12px;
+}
+.dg-parkhead { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+.dg-parkhead .dg-esc-task { color: var(--text); }
+.dg-parkkind {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  background: var(--bg); border: 1px solid var(--edge); border-radius: 999px; padding: 1px 8px;
+}
+/* needs-scope is the park that says the task's boundary was drawn wrong, and it
+   is the one that leads to an authorization change. Same ink as the amendment
+   it will raise, so the two are recognisably one thread. */
+.dg-park-scope { border-left-color: var(--accent); }
+.dg-parkkind-scope { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent-line); }
+.dg-park-bad { border-left-color: #a5453a; }
+.dg-parkkind-bad { color: #a5453a; background: #F7E4E0; border-color: #E7B3A9; }
+.dg-parksum { font-size: 12.5px; color: var(--text-dim); }
+.dg-parkacts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 2px; }
+.dg-park .dg-since { margin-left: auto; }
+
+/* §12.2 / §12.3 on the card. Under the node, opposite the bottleneck mark, so
+   it never competes with the badge — which §2.1 reserves for the check result. */
+.dg-flags { fill: var(--text-faint); font-family: var(--font-ui); font-size: 9.5px; }
+.dg-flags-loud { fill: #a5453a; font-weight: 600; }
+.dg-node.dg-flagged .dg-card { stroke: #E7B3A9; }
+/* A park edge is DASHED and quieter than a plan edge: it is a real dependency,
+   drawn over the top of the ranks because it was never in the plan. */
+.dg-edge-park { stroke: var(--accent-line); stroke-dasharray: 2 4; }
+
+/* Stage 4d: the mermaid subset, painted from Go coordinates. Deliberately the
+   SAME ink as the delegation graph — one visual language for two pictures —
+   with the diagram sitting inside the code block's existing frame so a drawn
+   fence and a source fence still read as the same construct. */
+.doc-dg { padding: 10px; background: var(--surface); overflow-x: auto; }
+.doc-dgsvg { display: block; width: 100%; height: auto; max-height: 460px; }
+.doc-dgcard { fill: var(--surface); stroke: var(--edge); stroke-width: 1; }
+.doc-dgtitle { font-family: var(--font-ui, inherit); font-size: 12px; fill: var(--text); }
+.doc-dgedge { stroke: var(--edge); stroke-width: 1.5; fill: none; }
+.doc-dge-dotted { stroke-dasharray: 3 4; }
+.doc-dge-thick { stroke-width: 3; }
+.doc-dgedge-cycle { stroke: #a5453a; stroke-dasharray: 5 3; }
+.doc-dghead { fill: var(--edge); stroke: none; }
+.doc-dgelabel { font-size: 10.5px; fill: var(--text-faint); }
+.doc-dgbandbox { fill: var(--bg); stroke: var(--edge); stroke-dasharray: 4 4; }
+.doc-dgbandtitle { font-size: 11px; fill: var(--text-dim); }
+/* An unrecognised shape or edge style is LOUD. A vocabulary this build does not
+   know must never be drawn as though it were the default one: silently turning
+   a decision node into a box changes what the diagram says. */
+.doc-dgunknown .doc-dgcard { stroke: #a5453a; stroke-dasharray: 4 3; }
+.doc-dge-unknown { stroke: #a5453a; }
+.doc-dgmark { font-size: 9.5px; fill: #a5453a; }
+.doc-dgsrc { border-top: 1px solid var(--edge); }
+.doc-dgsrc > summary { cursor: pointer; padding: 4px 10px; font-size: 10.5px; color: var(--text-faint); list-style: none; }
+.doc-dgsrc > summary::-webkit-details-marker { display: none; }
 
 .doc-sec { display: flex; flex-direction: column; gap: 4px; }
 .doc-card { border: 1px solid var(--edge); border-radius: 9px; background: var(--surface); padding: 8px 12px; }

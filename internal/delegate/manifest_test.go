@@ -1,6 +1,7 @@
 package delegate
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -728,5 +729,138 @@ func TestNewResolver(t *testing.T) {
 func TestManifestDir(t *testing.T) {
 	if got, want := ManifestDir("/p/inno"), filepath.Join("/p/inno", ".loom", "manifests"); got != want {
 		t.Errorf("ManifestDir = %q, want %q", got, want)
+	}
+}
+
+// --- §10's integration block, carried on the Manifest ----------------------
+
+// integ wraps a task set with an `integration` object, so the cases below read
+// as the block and nothing else.
+func integ(block string, tasks ...string) string {
+	if len(tasks) == 0 {
+		tasks = []string{okTask}
+	}
+	return wrap(strings.Join(tasks, ","), `"integration":`+block+`,`)
+}
+
+// TestLoadOne_IntegrationBlock is the load half of the note that put
+// Integration on Manifest: a malformed §10 block is refused HERE, at the
+// gesture that caused it, and not an hour later at the first integration —
+// where the alternative outcome is a gate that skips step 3 and reports green.
+func TestLoadOne_IntegrationBlock(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string // "" = must load
+	}{
+		{"absent block is legal", wrap(okTask), ""},
+		{"empty block is legal", integ(`{}`), ""},
+		{"per-repo gate loads", integ(`{"per_repo":{"bankenstein":{"cmd":["go","test","./..."]}}}`), ""},
+		{"per-repo with no command", integ(`{"per_repo":{"bankenstein":{"cmd":[]}}}`), `per_repo["bankenstein"] has no command`},
+		{"per-repo bad timeout", integ(`{"per_repo":{"bankenstein":{"cmd":["go"],"timeout":"soon"}}}`), `per_repo["bankenstein"]`},
+		{"cross loads", integ(`{"cross":[{"id":"contract","repo":"bankenstein","cmd":["make","contract"],"needs_repos":["ballista"]}]}`), ""},
+		{"cross with no id", integ(`{"cross":[{"repo":"bankenstein","cmd":["make"]}]}`), "cross[0] has no id"},
+		{"cross with no command", integ(`{"cross":[{"id":"c","repo":"bankenstein"}]}`), `cross["c"] has no command`},
+		{"cross with no repo", integ(`{"cross":[{"id":"c","cmd":["make"]}]}`), `cross["c"] names no repo`},
+		{"duplicate cross id", integ(`{"cross":[{"id":"c","repo":"bankenstein","cmd":["a"]},{"id":"c","repo":"bankenstein","cmd":["b"]}]}`), `cross["c"] is declared twice`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, gotErr := loadSingle(t, "m", tc.body)
+			switch {
+			case tc.wantErr == "" && gotErr != "":
+				t.Fatalf("want load, got error: %s", gotErr)
+			case tc.wantErr != "" && !strings.Contains(gotErr, tc.wantErr):
+				t.Fatalf("err = %q, want it to contain %q", gotErr, tc.wantErr)
+			case tc.wantErr != "":
+				return
+			}
+			_ = m
+		})
+	}
+}
+
+// TestLoadOne_IntegrationTimeoutsResolveAtLoad: nothing downstream may re-parse
+// a duration string an agent wrote, so the load must leave every integration
+// check with a resolved timeout — including the ones that declared none, which
+// inherit `defaults.check_timeout` rather than a second independent default.
+func TestLoadOne_IntegrationTimeoutsResolveAtLoad(t *testing.T) {
+	body := wrap(okTask+`,{"id":"api","repo":"ballista","authorization":"z","produces":[{"id":"api-x","path":"a"}],"check":{"cmd":["go"]}}`,
+		`"defaults":{"check_timeout":"5m"},`,
+		`"integration":{"per_repo":{"bankenstein":{"cmd":["go"]},"ballista":{"cmd":["go"],"timeout":"90s"}},
+		  "cross":[{"id":"c","repo":"bankenstein","cmd":["make"]}]},`)
+	m, err := loadSingle(t, "m", body)
+	if err != "" {
+		t.Fatalf("load: %s", err)
+	}
+	if got := m.Integration.PerRepo["bankenstein"].ResolvedTimeout; got != 5*time.Minute {
+		t.Errorf("bankenstein inherited %v, want the manifest default %v", got, 5*time.Minute)
+	}
+	if got := m.Integration.PerRepo["ballista"].ResolvedTimeout; got != 90*time.Second {
+		t.Errorf("ballista timeout = %v, want 90s", got)
+	}
+	if len(m.Integration.Cross) != 1 || m.Integration.Cross[0].ResolvedTimeout != 5*time.Minute {
+		t.Errorf("cross timeouts = %+v", m.Integration.Cross)
+	}
+}
+
+// TestLoadOne_IntegrationSurvivesTheSnapshot is the actual defect the handoff
+// named: a run's manifest snapshot is json.Marshal(Manifest), and IntegrationOf
+// reads §10's gates back out of exactly those bytes. If the field does not
+// round-trip, every §10.2 pass skips step 3 and reports green on no evidence.
+func TestLoadOne_IntegrationSurvivesTheSnapshot(t *testing.T) {
+	m, err := loadSingle(t, "m", integ(
+		`{"per_repo":{"bankenstein":{"cmd":["go","test","./..."],"timeout":"90s"}},
+		  "cross":[{"id":"contract","repo":"bankenstein","cmd":["make","contract"],"needs_repos":["ballista"]}]}`))
+	if err != "" {
+		t.Fatalf("load: %s", err)
+	}
+	snapshot, mErr := json.Marshal(m)
+	if mErr != nil {
+		t.Fatal(mErr)
+	}
+	spec, sErr := IntegrationOf(string(snapshot))
+	if sErr != nil {
+		t.Fatalf("IntegrationOf: %v", sErr)
+	}
+	got, ok := spec.PerRepo["bankenstein"]
+	if !ok {
+		t.Fatalf("the per-repo gate did not survive the snapshot: %+v", spec)
+	}
+	if strings.Join(got.Cmd, " ") != "go test ./..." || got.ResolvedTimeout != 90*time.Second {
+		t.Errorf("per-repo gate = %+v", got)
+	}
+	if len(spec.Cross) != 1 || spec.Cross[0].ID != "contract" {
+		t.Fatalf("the cross check did not survive the snapshot: %+v", spec.Cross)
+	}
+	if strings.Join(spec.Cross[0].Needs, " ") != "ballista" {
+		t.Errorf("needs_repos = %v", spec.Cross[0].Needs)
+	}
+}
+
+// TestWarnings_IntegrationLabels: a gate that cannot run is a warning, not an
+// error. It costs a check nobody gets; a MALFORMED gate, which is refused
+// above, costs a green nobody earned.
+func TestWarnings_IntegrationLabels(t *testing.T) {
+	cases := []struct{ name, body, want string }{
+		{"per-repo gate outside the project", integ(`{"per_repo":{"zeta":{"cmd":["go"]}}}`),
+			`integration.per_repo["zeta"] is not a repo of project`},
+		{"per-repo gate for a repo no task uses", integ(`{"per_repo":{"ballista":{"cmd":["go"]}}}`),
+			`no task uses that repo`},
+		{"cross check outside the project", integ(`{"cross":[{"id":"c","repo":"zeta","cmd":["go"]}]}`),
+			`runs in repo "zeta", which is not a repo of project`},
+		{"cross needs_repos outside the project", integ(`{"cross":[{"id":"c","repo":"bankenstein","cmd":["go"],"needs_repos":["zeta"]}]}`),
+			`can never become eligible`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, gotErr := loadSingle(t, "m", tc.body)
+			if gotErr != "" {
+				t.Fatalf("want a warning, got a load error: %s", gotErr)
+			}
+			if !hasWarning(m, tc.want) {
+				t.Fatalf("want warning containing %q, got %+v", tc.want, m.Warnings)
+			}
+		})
 	}
 }

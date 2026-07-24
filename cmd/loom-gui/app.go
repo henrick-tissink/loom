@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/henricktissink/loom/internal/arch"
+	"github.com/henricktissink/loom/internal/delegate"
 	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/orchestrator"
 	"github.com/henricktissink/loom/internal/projects"
@@ -69,6 +70,20 @@ type App struct {
 	// per-call cache would re-read every declared document on every tick and
 	// the cache would never hit.
 	docs *arch.Cache
+
+	// deleg is delegation §§9-12's runner, built once and kept.
+	//
+	// LONG-LIVED and not per-call, which is the whole reason it is a field:
+	// delegate.Detector remembers the last block.json fingerprint per (run,
+	// task), and that memory is what stops a block already recorded from
+	// re-firing its running→blocked transition on every 2s tick. A Runner rebuilt
+	// per tick would carry an empty fingerprint map and report every standing
+	// block as new, forever.
+	//
+	// Guarded because the poll goroutine and the bound methods both reach it,
+	// for the same reason lastRes is.
+	delegMu sync.Mutex
+	deleg   *delegate.Runner
 
 	// auto-summarize guards: sumTried marks sessions already attempted this
 	// process (so a failed/empty summary isn't retried forever); sumBusy keeps

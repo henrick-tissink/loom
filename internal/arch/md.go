@@ -52,6 +52,13 @@ type Block struct {
 	// with no explanation is indistinguishable from a renderer that broke.
 	Note string
 
+	// Diagram is set on a `mermaid` fence and ONLY there. Non-nil always — a
+	// fence outside the subset or malformed carries a Diagram whose Status says
+	// which, so the renderer's decision is "draw or show source", never "did
+	// the parser run". Text stays populated in every case: the source block is
+	// the permanent fallback (view spec §6) and it is the same block either way.
+	Diagram *Diagram
+
 	Ordered bool // list
 	Items   []ListItem
 
@@ -231,13 +238,20 @@ func parseFence(lines []string, i int) (Block, int) {
 		b.Note = "unterminated code fence — rendered to end of file"
 	}
 	if b.Lang == "mermaid" {
-		// Stage 4d parses a mermaid subset onto the graph layout engine. Until
-		// then a fence is source, and the chip says so rather than leaving the
-		// user to wonder whether Loom tried and failed.
-		b.Note = "mermaid — shown as source"
+		// An unterminated fence is not parsed at all: its body is whatever was
+		// left in the file, so a "successful" parse of it would be a diagram of
+		// a truncated document. The fence note is the only honest answer.
 		if b.Unclosed {
+			d := errDiagram("unterminated code fence", 0)
+			b.Diagram = &d
 			b.Note = "mermaid — shown as source; unterminated code fence"
+			return b, j
 		}
+		d := ParseMermaid(b.Text)
+		b.Diagram = &d
+		// Note stays EMPTY on a drawn diagram — a chip beside a picture that
+		// rendered fine reads as an apology for it.
+		b.Note = d.Note()
 	}
 	return b, j
 }

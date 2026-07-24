@@ -315,13 +315,23 @@ export function createGraph(host, opts = {}) {
   }
 
   function paintEdge(e) {
-    const path = svgEl("path", "dg-edge" + (e.cycle ? " dg-edge-cycle" : ""));
+    // §5.1's two edge kinds are drawn differently because the difference is the
+    // run-health signal: a `plan` edge is a dependency the author foresaw, a
+    // `park` edge is one a child discovered by stopping. Rendering both as one
+    // solid line erases the only cheap read there is on whether the plan held.
+    const park = e.kind === "park";
+    const path = svgEl("path", "dg-edge" + (e.cycle ? " dg-edge-cycle" : "") + (park ? " dg-edge-park" : ""));
     const a = geom.pos.get(e.from), b = geom.pos.get(e.to);
-    if (a && b) path.setAttribute("d", elbow(a, b));
+    // Park edges are routed through the back-edge band whichever way they point.
+    // They are frequently backward — that is what makes them park edges — and a
+    // park edge that happens to run forward would otherwise be drawn straight
+    // through the ranks it was discovered across, reading as a planned one.
+    if (a && b) path.setAttribute("d", elbow(a, b, park));
     path.setAttribute("marker-end", e.cycle ? "url(#dg-arrow-bad)" : "url(#dg-arrow)");
-    if (e.artifact) {
+    if (e.artifact || park) {
       const t = svgEl("title");
-      t.textContent = "artifact: " + e.artifact;
+      t.textContent = (park ? "park edge — discovered mid-task, not in the plan" : "") +
+        (e.artifact ? (park ? " · " : "") + "artifact: " + e.artifact : "");
       path.appendChild(t);
     }
     edgeLayer.appendChild(path);
@@ -392,12 +402,49 @@ export function createGraph(host, opts = {}) {
     bneck.setAttribute("y", NODE_H + 14);
     g.appendChild(bneck);
 
+    // §12.2's watchdogs and §12.3's divergence, ON THE CARD. They are a
+    // SEPARATE AXIS from the lifecycle badge — a task is `running` AND
+    // `diverged`, never one or the other — so they get their own mark under the
+    // card rather than competing with the badge, which §2.1 reserves for the
+    // recorded check result and nothing else. Below the card because a stalled
+    // child is still a running child and the badge must keep saying so.
+    const flags = svgEl("text", "dg-flags");
+    flags.setAttribute("x", NODE_W - 12);
+    flags.setAttribute("y", NODE_H + 14);
+    flags.setAttribute("text-anchor", "end");
+    g.appendChild(flags);
+
     if (!n.hidden && opts.onNode) {
       g.addEventListener("click", () => opts.onNode(n.id));
       g.addEventListener("keydown", (e) => { if (e.key === "Enter") opts.onNode(n.id); });
     }
     nodeLayer.appendChild(g);
-    return { g, card, title, sub, badge, dot, warn, bneck };
+    return { g, card, title, sub, badge, dot, warn, bneck, flags };
+  }
+
+  // flagMark composes the per-node flag glyph from what Go already decided.
+  //
+  // The NAMES are rendered and the SENTENCES are not: the sentences are binding
+  // wording (§12.3.3's drift says "changed since spawn", never "the child wrote
+  // this") and they live on the inspector, where there is room to read them.
+  // What the card owes is that the flag EXISTS and whether it is one of the loud
+  // ones — the two that mean the isolation boundary may have been crossed, and
+  // the one that means a child may be parked forever.
+  function flagMark(st) {
+    const details = (st && st.flagDetails) || [];
+    const names = details.length ? details.map((d) => d.name) : ((st && st.flags) || []);
+    if (!names.length) return { text: "", loud: false, title: "" };
+    const loud = details.some((d) => d.loud);
+    const text = "⚑ " + (names.length === 1 ? names[0] : names.length);
+    return {
+      text: clip(text, 18),
+      loud,
+      // The full set, plus every sentence Go attached — a hover on the card is
+      // the cheapest way to read a flag without leaving the picture.
+      title: details.length
+        ? details.map((d) => d.name + " — " + (d.note || "")).join("\n")
+        : names.join(" · "),
+    };
   }
 
   // patch is §7.3's status tick: attributes only, on the SAME DOM nodes, with
@@ -425,6 +472,17 @@ export function createGraph(host, opts = {}) {
         // dot is the honest render; a grey one would claim a session exists.
         ref.dot.style.display = "none";
       }
+      const fm = flagMark(st);
+      ref.flags.textContent = fm.text;
+      ref.flags.setAttribute("class", "dg-flags" + (fm.loud ? " dg-flags-loud" : ""));
+      let ft = ref.flags.querySelector("title");
+      if (fm.text) {
+        if (!ft) { ft = svgEl("title"); ref.flags.appendChild(ft); }
+        ft.textContent = fm.title;
+      } else if (ft) {
+        ft.remove();
+      }
+      ref.g.classList.toggle("dg-flagged", fm.loud);
       ref.g.classList.toggle("dg-blocked", !!(st && (st.blocked || st.seedFailed || st.pendingSeed)));
       ref.g.classList.toggle("dg-ready", !!(st && st.ready && !isDone(st && st.state)));
       ref.g.classList.toggle("dg-done", isDone(st && st.state));
@@ -452,7 +510,14 @@ export function createGraph(host, opts = {}) {
       const consumerDone = isDone(to && to.state);
       const parked = !!to && (to.state === "blocked" || (!to.ready && !LIVE_STATES.has(to.state)));
       const working = !!to && to.sessionStatus === "running";
-      const lit = !producerDone && !consumerDone && parked && !working;
+      // One exception, and it is the same meaning rather than a second one: a
+      // park edge whose producer IS finished but whose consumer is still owed
+      // its seed (§11.4 materializes, THEN seeds) is costing time right now —
+      // the child is sitting at a prompt waiting for a message Loom has not
+      // delivered. Dropping the producer condition there is what keeps the
+      // animation meaning "this is costing you", not "this is unfinished".
+      const owed = !!to && (to.pendingSeed || to.seedFailed);
+      const lit = !consumerDone && parked && !working && (!producerDone || (ref.edge.kind === "park" && owed));
       ref.path.classList.toggle("lit", lit);
     }
   }
@@ -542,10 +607,10 @@ function markers() {
 // so many-into-one reads as a bundle rather than a fan (§5.6). A backward edge
 // — which in 3a only ever comes from a cycle — is routed over the top of the
 // graph rather than back through the cards.
-function elbow(a, b) {
+function elbow(a, b, forceBand) {
   const sx = a.x + NODE_W, sy = a.y + NODE_H / 2;
   const ex = b.x, ey = b.y + NODE_H / 2;
-  if (ex <= sx) {
+  if (forceBand || ex <= sx) {
     const band = -22;
     return `M${sx},${sy} L${sx + 18},${sy} L${sx + 18},${band} L${ex - 18},${band} L${ex - 18},${ey} L${ex},${ey}`;
   }

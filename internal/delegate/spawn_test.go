@@ -565,3 +565,42 @@ func TestSpawnApproveIsSingletonUnderConcurrency(t *testing.T) {
 		t.Fatalf("%d of %d concurrent approvals claimed the task; exactly one may", won, racers)
 	}
 }
+
+// The block template is the ONLY specification of block.json the child ever
+// sees, and two of its fields are load-bearing rather than decorative:
+//
+//   - `need.artifact` is what Rendezvous.Unblocked reads. A needs-artifact block
+//     without it can never satisfy the resume condition, so the park is
+//     PERMANENT — the child stopped correctly and visibly and the run still
+//     never moves, which is exactly the silent outcome §11.2 forbids.
+//   - `paths` is what Propose turns into a scope amendment. Without it
+//     ApplyScope refuses the widening as "grants no paths", so the one correct
+//     response to a boundary drawn wrong (§11.3) cannot be granted.
+//
+// This test fails if either is ever dropped from the template, which is the only
+// way the defect is visible: nothing at spawn time can tell that a brief is
+// about to cost a future block its remedy.
+func TestSpawnBriefTemplateCarriesTheFieldsTheProtocolActuallyReads(t *testing.T) {
+	f := newFixture(t, StateApproved)
+	c := Created{Dir: "/wt/schema", MetaDir: "/wt/schema.meta", Branch: "b", Base: "abc"}
+	b := Brief(f.run, f.m, f.task, c, AddDirs(c))
+
+	for _, tc := range []struct{ field, why string }{
+		{`"need"`, "Rendezvous.Unblocked reads need.artifact; without it the park is permanent"},
+		{`"artifact"`, "the artifact id is the machine-checkable half of the resume condition"},
+		{`"paths"`, "ApplyScope refuses a scope amendment that grants no paths"},
+		{`"kind"`, "ParseBlock refuses a block that names no kind"},
+		{`"task"`, "ParseBlock refuses a block that names no task"},
+	} {
+		if !strings.Contains(b, tc.field) {
+			t.Errorf("brief's block template omits %s — %s", tc.field, tc.why)
+		}
+	}
+
+	// The 3a text promised a human would read the file and reply. §11.4 now
+	// resumes needs-artifact automatically, and a child told to expect a human
+	// is a child that decides after a compaction that nobody came.
+	if strings.Contains(b, "a human will read that file") {
+		t.Error("brief still promises the superseded 3a human-only reply")
+	}
+}

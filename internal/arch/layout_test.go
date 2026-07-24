@@ -17,14 +17,16 @@ func nodesOf(ids ...string) []LayoutNode {
 	return out
 }
 
-// edgesOf parses "a>b" pairs, with a trailing "!" marking a cycle edge.
+// edgesOf parses "a>b" pairs, with a trailing "!" marking a cycle edge and a
+// trailing "~" marking a back-edge band member (§5.1's `park`).
 func edgesOf(specs ...string) []LayoutEdge {
 	out := make([]LayoutEdge, 0, len(specs))
 	for _, s := range specs {
 		cyc := strings.HasSuffix(s, "!")
-		s = strings.TrimSuffix(s, "!")
+		band := strings.HasSuffix(s, "~")
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "!"), "~")
 		parts := strings.SplitN(s, ">", 2)
-		out = append(out, LayoutEdge{From: parts[0], To: parts[1], Cycle: cyc})
+		out = append(out, LayoutEdge{From: parts[0], To: parts[1], Cycle: cyc, Band: band})
 	}
 	return out
 }
@@ -67,6 +69,22 @@ func TestLayoutRanking(t *testing.T) {
 			// one column per cycle edge for no reason a reader can see.
 			nodes: nodesOf("a", "b"), edges: edgesOf("a>b", "b>a!"),
 			want: map[string]int{"a": 0, "b": 1}},
+		{name: "a band-flagged park edge does not push a rank",
+			// §5.1: a park edge is drawn "in the back-edge band above the
+			// ranks". It is not in the plan, so it must not re-shape the
+			// planned columns — a graph that shifted right the moment a child
+			// parked, and back when the park cleared, is the re-layout §7.3
+			// forbids arriving through the data.
+			nodes: nodesOf("a", "b"), edges: edgesOf("a>b~"),
+			want: map[string]int{"a": 0, "b": 0}},
+		{name: "a park edge alongside the plan leaves the planned ranks alone",
+			nodes: nodesOf("a", "b", "c"), edges: edgesOf("a>b", "b>c", "c>a~"),
+			want: map[string]int{"a": 0, "b": 1, "c": 2}},
+		{name: "a forward park edge is still banded, not ranked",
+			// Park edges are frequently backward but need not be; the kind
+			// decides the routing, never the direction it happens to run.
+			nodes: nodesOf("a", "b", "c"), edges: edgesOf("a>b", "a>c~"),
+			want: map[string]int{"a": 0, "b": 1, "c": 0}},
 		{name: "an edge naming an unknown node is ignored, not fatal",
 			nodes: nodesOf("a", "b"), edges: edgesOf("a>b", "ghost>b", "a>nowhere"),
 			want: map[string]int{"a": 0, "b": 1}},

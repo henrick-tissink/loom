@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -166,6 +167,16 @@ type Request struct {
 	// lives in spawn.go: this type writes bytes and does not know what a brief
 	// says.
 	Brief string
+	// Merge is §9.2's same-repo producers, ascending by task id — BasePlan.Merge
+	// verbatim. Empty is the common case and is not special-cased.
+	//
+	// It is merged INSIDE Create, between `worktree add` and bootstrap, rather
+	// than by the caller afterwards. A caller-side merge leaves a window in
+	// which a complete-looking worktree missing its declared dependencies exists
+	// on disk, and every crash-recovery path that re-derives state from disk
+	// would have to know that window exists. Bootstrap also has to see the
+	// merged tree: producers are exactly what changes a lockfile.
+	Merge []ProducerRef
 }
 
 // Created is the result of a successful Create, and it is what the spawn gate
@@ -312,6 +323,19 @@ func (w *Worktrees) Create(req Request) (Created, error) {
 		}
 	}
 
+	// 3b. §9.2's producer merges, BEFORE anything hands this directory to a
+	// child. A ProducerConflict is returned with Task filled in here because
+	// MergeProducers is given a directory and a list and does not know whose
+	// worktree it is; the conflict is reported against the CONSUMER, which is
+	// the task that will not spawn.
+	if err := MergeProducers(dir, req.Merge); err != nil {
+		var conflict *ProducerConflict
+		if errors.As(err, &conflict) {
+			conflict.Task = req.TaskID
+		}
+		return Created{}, err
+	}
+
 	// 4. The meta dir BESIDE the worktree. 0o700/0o600 because the brief carries
 	// the authorization text and block.json carries whatever the child put in it.
 	// This is not a security boundary — slice 1 §6.5 states Loom's
@@ -337,6 +361,87 @@ func (w *Worktrees) Create(req Request) (Created, error) {
 		return c, err
 	}
 	return c, nil
+}
+
+// MergeProducers is §9.2's EXECUTION half: it merges each same-repo producer
+// into the freshly created worktree, in the order given. The PLAN — which
+// producers and in which order — is PlanBase's and is pure; this function runs
+// git and nothing else. The split is deliberate: the ordering is the part
+// revision 1 got wrong, and it is testable from a literal with no repo on disk
+// only if no git lives in it.
+//
+// Each producer is merged BY SHA, not by branch, even though both are recorded.
+// The branch is a moving target — a failed integration sends a producer back to
+// work (§10.3) and its branch head advances — so merging the branch would give
+// two children of one run different trees depending on when they spawned, and
+// would make a re-spawn irreproducible. The sha is what §12.3's divergence
+// computes against, so it is what must actually be in the tree.
+//
+// --no-ff even in the degenerate single-producer case, for the reason BasePlan
+// gives: a chain of length one is fast-forward-shaped, and letting it take a
+// different path is a second code path exercised only by the rare shape.
+//
+// A conflict is a HARD STOP and returns *ProducerConflict with every conflicting
+// file, after aborting the merge so the worktree is left clean rather than
+// half-merged with a child about to be pointed at it. Between carries the
+// producers merged SO FAR plus the one that failed, in merge order, so the
+// message can name which one was already in the tree.
+//
+// A merge that fails with NO conflicted files is not a ProducerConflict and is
+// returned raw. That distinction matters: ProducerConflict routes to a human as
+// a planning decision (§9.2), and dressing up "the sha is not in this repo" or a
+// broken index as a disagreement between two producers would send the human to
+// argue about a design question they do not have.
+func MergeProducers(dir string, refs []ProducerRef) error {
+	for i, ref := range refs {
+		sha := strings.TrimSpace(ref.SHA)
+		if sha == "" {
+			return fmt.Errorf("delegate: producer %s has no recorded sha", ref.Task)
+		}
+		if _, err := gitOut(dir, "rev-parse", "--verify", sha+"^{commit}"); err != nil {
+			return fmt.Errorf("delegate: producer %s sha %s missing from %s: %w", ref.Task, sha, dir, err)
+		}
+		msg := "loom: merge producer " + ref.Task
+		if ref.Branch != "" {
+			msg += " (" + ref.Branch + ")"
+		}
+		// Already-merged is exit 0 ("Already up to date"), which is what makes
+		// this idempotent on the re-spawn path where the branch already carries
+		// the merges — Create must be re-runnable from (run, task) alone.
+		if err := gitRun(dir, "merge", "--no-ff", "--no-edit", "-m", msg, sha); err != nil {
+			files := conflictedFiles(dir)
+			if len(files) == 0 {
+				return fmt.Errorf("delegate: merging producer %s into %s: %w", ref.Task, dir, err)
+			}
+			// Abort before returning: the alternative is handing a child a
+			// worktree with conflict markers in it, which is the one outcome
+			// worse than not spawning.
+			_ = gitRun(dir, "merge", "--abort")
+			return &ProducerConflict{
+				Between: append([]ProducerRef(nil), refs[:i+1]...),
+				Files:   files,
+			}
+		}
+	}
+	return nil
+}
+
+// conflictedFiles is the unmerged-path list after a failed merge. It degrades to
+// nil rather than erroring: its only caller is already returning a failure and
+// is not improved by losing the failure to a second one.
+func conflictedFiles(dir string) []string {
+	out, err := gitOut(dir, "diff", "--name-only", "--diff-filter=U")
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.TrimSpace(line); f != "" {
+			files = append(files, f)
+		}
+	}
+	sort.Strings(files)
+	return files
 }
 
 // Remove takes the worktree directory away and KEEPS the branch and the meta

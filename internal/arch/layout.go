@@ -44,12 +44,25 @@ const (
 type LayoutNode struct{ ID string }
 
 // LayoutEdge is one directed edge. Cycle marks an edge the caller already
-// identified as part of a dependency cycle; those are excluded from ranking
-// (§5.6 routes `park`-like backward edges through a band rather than letting
-// them push ranks) but are still laid out and still drawn.
+// identified as part of a dependency cycle; those are excluded from ranking but
+// are still laid out and still drawn.
+//
+// Band marks §5.1's `park` edge: a dependency discovered mid-task, drawn dashed
+// "in the back-edge band above the ranks". It is excluded from ranking for that
+// reason and not as an approximation — a park edge is by construction absent
+// from the plan, so letting it push a rank would re-shape the planned picture
+// every time a child parked and un-shape it when the park resolved, which is the
+// re-layout-under-the-cursor §7.3 forbids arriving through the data instead of
+// through the render.
+//
+// Band edges DO still feed the barycenter sweeps (see adjacency, which filters
+// neither kind): they do not decide which column a node lands in, but two nodes
+// that wait on each other are better drawn near each other, and the sweep is the
+// only thing that can say so.
 type LayoutEdge struct {
 	From, To string
 	Cycle    bool
+	Band     bool
 }
 
 // Placement is one node's computed position.
@@ -186,8 +199,9 @@ func Layout(nodes []LayoutNode, edges []LayoutEdge) (placed []Placement, width, 
 // inside a strongly connected component, with no special case and no
 // possibility of a hang.
 //
-// Edges the caller flagged as part of a cycle are skipped, which usually leaves
-// the remainder acyclic; the clamp exists for the case where it does not.
+// Edges the caller flagged as part of a cycle — or as a back-edge band member —
+// are skipped, which usually leaves the remainder acyclic; the clamp exists for
+// the case where it does not.
 func rankOf(nodes []LayoutNode, edges []LayoutEdge) map[string]int {
 	rank := make(map[string]int, len(nodes))
 	for _, n := range nodes {
@@ -195,7 +209,7 @@ func rankOf(nodes []LayoutNode, edges []LayoutEdge) map[string]int {
 	}
 	live := make([]LayoutEdge, 0, len(edges))
 	for _, e := range edges {
-		if e.Cycle || e.From == e.To {
+		if e.Cycle || e.Band || e.From == e.To {
 			continue
 		}
 		if _, ok := rank[e.From]; !ok {

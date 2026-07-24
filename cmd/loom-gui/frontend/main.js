@@ -352,7 +352,7 @@ function appendProjectIndex(shownRoots) {
     .filter((p) => !p.ungrouped && !shownRoots.has(p.root) && projectVisible(p))
     .sort((a, b) => a.name.localeCompare(b.name));
   if (!rest.length) return;
-  const key = " index"; // not a real root, so it can never collide
+  const key = "\0index"; // not a real root, so it can never collide
   const isCollapsed = collapsedRoots.has(key);
   const head = document.createElement("li");
   head.className = "psec psec-index" + (isCollapsed ? " collapsed" : "");
@@ -813,7 +813,54 @@ const orch = {
   graph: null, graphRun: 0, expanded: false, changed: false,
   stripSig: "", blockedSig: "", chipSig: "", msgSig: "",
   inspectorUpdate: null,
+
+  // ---- §§9-12, and every one of these is fetched from a READ-ONLY binding ----
+  //
+  // OrchestrationSnapshot is the per-tick payload and it now carries the run's
+  // red KIND and §5.1's edge kinds itself. What it still does not carry is the
+  // wait-for cycle and the park DECLARATIONS, and the sources below fill those
+  // in WITHOUT putting a write on the poll — TickDelegationRun runs checks,
+  // integrations and seed deliveries, so a view that called it every 1.5s would
+  // be executing agent-authored argv because a tab is open.
+  //
+  //   redKind/baselineFaults — from RunHeadDTO, in the snapshot. They used to
+  //     cost a second ProjectDelegation call the instant a run went red; the
+  //     values are a fold over the run row Go had already read, so the round
+  //     trip bought nothing but a way for the discriminator to be missing.
+  //     §10.2 vs §12.1 is the whole point: `deadlocked` means two completely
+  //     different things and blaming a task for a broken baseline is the
+  //     failure §10.2 exists to prevent.
+  //   deadlock — RunDeadlock, a READ-ONLY binding that runs delegate's detector
+  //     over already-persisted state. Fetched only while the run is red.
+  //   parks — TaskPark per blocked child. Server-parsed, never re-parsed here:
+  //     a JS copy of delegate.ParseBlock is a second definition of what a valid
+  //     declaration is, and the second one is where the validation gets dropped.
+  //   tick — the last TickReport a HUMAN asked for, kept so §11.3's amendment
+  //     log survives the re-render that follows the press.
+  redKind: "", baselineFaults: [],
+  deadlock: null, redSig: "", redFetch: false,
+  parks: new Map(), parkSig: "", parkOver: 0, parkFetch: false,
+  tick: null, tickAt: 0,
+  // baselineAlert is a §10.2 run-level fault observed THIS session, from an
+  // integration or a merge. Held beside redKind because the two arrive by
+  // different routes and the durable one can lag a press by a poll.
+  baselineAlert: null,
+  // The last RunIntegration read, for the strip's staging row. A read and not a
+  // poll: the call re-fingerprints artifacts and §7.5 caps what a tick may do.
+  integration: null,
+  escSig: "", parkedSig: "", amendSig: "", topoSig: "",
 };
+
+// resetRunLocal drops everything keyed to ONE run. Called on a run switch as
+// well as on a project change: a park declaration, a red kind and a tick report
+// all name task ids that do not exist in the other run's graph, and carrying
+// them across would render another run's deadlock over this one's picture.
+function resetRunLocal() {
+  orch.redKind = ""; orch.baselineFaults = []; orch.redSig = ""; orch.deadlock = null;
+  orch.parks = new Map(); orch.parkSig = ""; orch.parkOver = 0;
+  orch.tick = null; orch.tickAt = 0; orch.baselineAlert = null; orch.integration = null;
+  orch.escSig = orch.parkedSig = orch.amendSig = orch.topoSig = "";
+}
 
 function resetOrchestration(root) {
   if (orch.root === root) return;
@@ -826,6 +873,7 @@ function resetOrchestration(root) {
   orch.graph = null; orch.graphRun = 0; orch.expanded = false; orch.changed = false;
   orch.stripSig = orch.blockedSig = orch.chipSig = orch.msgSig = "";
   orch.inspectorUpdate = null;
+  resetRunLocal();
 }
 
 function statusMap() {
@@ -844,23 +892,438 @@ function mountOrchestration() {
   if (!seam) return;
   seam.innerHTML = `
     <div id="dg-hidden" class="dg-hiddenline"></div>
+    <!-- §12.1's escalation, and it is FIRST because a silent all-blocked run
+         looks exactly like healthy progress. Not a chip and not a toast: the
+         whole hazard is that the state is quiet, so the render is a panel that
+         names every task and artifact in the wait-for cycle. -->
+    <div id="dg-escalate"></div>
     <div id="dg-strip"></div>
     <div id="dg-blocked"></div>
+    <div id="dg-parked"></div>
     <section class="po-block" id="dg-graphblock" hidden>
       <div class="po-bhead"><h3>Delegation graph</h3><span class="dg-chips" id="dg-chips"></span></div>
       <div id="dg-msgs"></div>
       <div class="dg-host" id="dg-host"></div>
       <div class="dg-legend">drag to pan · ⌘-scroll to zoom · click a node for its brief, scope and check</div>
     </section>
+    <section class="po-block" id="dg-runblock" hidden>
+      <div class="po-bhead"><h3>Integration &amp; the plan</h3>
+        <span class="dg-chips">
+          <button class="tact" id="dg-runint">Integration &amp; limits</button>
+          <button class="tact" id="dg-runtick">Advance run</button>
+        </span>
+      </div>
+      <div id="dg-amend"></div>
+      <div id="dg-runbody"></div>
+    </section>
     <section class="po-block" id="po-docs"></section>`;
   orch.graph = null;
+  // Every rendered signature, because the host elements were just replaced: a
+  // surviving signature would compare equal against a container that no longer
+  // holds the markup and leave the block permanently blank.
   orch.stripSig = orch.blockedSig = orch.chipSig = orch.msgSig = "";
+  orch.escSig = orch.parkedSig = orch.amendSig = orch.topoSig = "";
   renderOrchestration();
   renderDocuments();
   // Both are fire-and-forget on the render path, so both swallow their own
   // failure: a rejected promise here must cost the seam, never the window.
+  wireRunActions();
   refreshOrchestration().catch((e) => console.error("orchestration", e));
   refreshDocuments().catch((e) => console.error("documents", e));
+}
+
+// The two RUN-level presses, and they are presses rather than poll output on
+// purpose.
+//
+// "Integration & limits" is a read, but an expensive one — it re-fingerprints
+// every interface artifact a consumer needs — and §7.5's cost ceiling forbids
+// paying that on the 1.5s tick. "Advance run" is a WRITE: a tick runs checks,
+// integrations, seed deliveries and the watchdogs, and a surface that ran it on
+// render would be executing agent-authored argv because someone opened a tab.
+//
+// Both are deliberately visible as buttons for the same reason: they are the
+// two things a human does to an otherwise idle run, and a run that only moves
+// when something invisible happens is a run nobody can unstick.
+function wireRunActions() {
+  const body = () => document.getElementById("dg-runbody");
+  const runID = () => (orch.run ? orch.run.id : 0);
+  const intBtn = document.getElementById("dg-runint");
+  if (intBtn) intBtn.addEventListener("click", async () => {
+    const call = bound("RunIntegration");
+    const host = body();
+    if (!call || !runID() || !host) return;
+    intBtn.disabled = true;
+    try {
+      const d = await call(runID());
+      host.innerHTML = runIntegrationHtml(d);
+      // Kept for the strip's staging row. The verdicts are what §5.2's approval
+      // rests on and they belong beside the run's own figures, not only inside
+      // the panel someone pressed a button to open; the full panel — the
+      // captured output and §10.5's limits — stays behind the press because
+      // re-fingerprinting every interface artifact is what §7.5 caps.
+      if (d && !d.hidden) { orch.integration = d; orch.stripSig = ""; renderOrchestration(); }
+    }
+    catch (e) { host.innerHTML = `<div class="po-warn">${esc(String(e))}</div>`; }
+    intBtn.disabled = false;
+  });
+  const tickBtn = document.getElementById("dg-runtick");
+  if (tickBtn) tickBtn.addEventListener("click", async () => {
+    const call = bound("TickDelegationRun");
+    const host = body();
+    if (!call || !runID() || !host) return;
+    tickBtn.disabled = true;
+    tickBtn.textContent = "Advancing…";
+    try {
+      const rep = await call(runID());
+      // KEPT, not just painted. The report is the only source of §12.1's
+      // wait-for cycle and of §11.3's amendment log, and both are rendered by
+      // the seam's own blocks — which re-render on every poll and would lose
+      // them the moment this handler's markup was overwritten.
+      if (rep && !rep.hidden) { orch.tick = rep; orch.tickAt = Math.floor(Date.now() / 1000); }
+      host.innerHTML = tickHtml(rep);
+    } catch (e) { host.innerHTML = `<div class="po-warn">${esc(String(e))}</div>`; }
+    tickBtn.disabled = false;
+    tickBtn.textContent = "Advance run";
+    await refreshOrchestration();
+    renderOrchestration();
+  });
+}
+
+// ---- §§10-12: the three read-only sources the snapshot does not carry -------
+
+// A run whose status is one of these is a run that has STOPPED, and §10.2 and
+// §12.1 are the two completely different reasons why. The fetch below is gated
+// on this set rather than run unconditionally: ProjectDelegation reads every
+// task row of every run in the project, and paying that on a 1.5s tick for a
+// run that is progressing normally is exactly the cost §7.5 caps.
+//
+// One entry, and it is exhaustive against the Go side rather than defensive:
+// `delegation_runs.status` is only ever written `planning` (store/delegation.go),
+// `running` (run.go) or `deadlocked` (run.go, integrate.go). A speculative
+// "failed"/"abandoned" here would be dead weight in the cheap direction and
+// actively wrong in the loud one — it would title an abandoned run "deadlocked
+// — the tasks are waiting on each other" and demand a re-plan for a run a human
+// deliberately stopped. A status a newer Loom adds falls through and escalates
+// nothing, which is the failure worth having: the run strip still renders it
+// verbatim beside the run name.
+const RED_RUN_STATUSES = new Set(["deadlocked"]);
+
+// The two readings of `deadlocked`, spelled exactly as orchestration.go exports
+// them. They are compared, never composed: an unknown value from a newer Loom
+// must fall through to the deadlock rendering rather than match nothing.
+const RED_BASELINE = "baseline-fault";
+
+// refreshRunDeadlock reads §12.1's wait-for cycle on the POLL.
+//
+// WHICH red a red run is comes free with the snapshot now (applySnapshot reads
+// RunHeadDTO.redKind), so this call is only ever about the cycle itself — the
+// thing a human needs in order to re-plan, and the thing that used to be
+// reachable only through TickDelegationRun, i.e. only by advancing the run in
+// order to draw it.
+//
+// It runs only while the run is red, and at most once per (run, status,
+// updatedAt): the detector is pure over persisted rows, so re-asking without a
+// row having moved cannot produce a different answer.
+async function refreshRunDeadlock() {
+  const run = orch.run;
+  if (!run || !RED_RUN_STATUSES.has(run.status)) {
+    if (orch.deadlock) {
+      // The run recovered — or the switcher moved. Clearing is not cosmetic: a
+      // stale cycle would keep the loudest panel on the page on screen for a
+      // run that is now green.
+      orch.deadlock = null; orch.redSig = "";
+      renderOrchestration();
+    }
+    return;
+  }
+  const call = bound("RunDeadlock");
+  if (!call) return;
+  const sig = `${run.id}:${run.status}:${run.updatedAt || 0}`;
+  if (sig === orch.redSig || orch.redFetch) return;
+  orch.redFetch = true;
+  try {
+    const d = await call(run.id);
+    if (!d || d.hidden || !orch.run || orch.run.id !== run.id) return;
+    // A null deadlock with no error means the detector says the run is moving,
+    // and the panel falls back to the derived picture below. An error is NOT
+    // treated as "no deadlock": a run we could not diagnose must not render as
+    // a healthy one.
+    orch.deadlock = d.deadlock || null;
+    orch.redSig = d.error ? "" : sig;
+    renderOrchestration();
+  } catch (e) {
+    console.error("run deadlock", e);
+  } finally {
+    orch.redFetch = false;
+  }
+}
+
+// §11's declarations are read one per parked child, and never more than this
+// many. The cap is stated on screen rather than silently applied — a park list
+// that quietly stops at twelve is a child parked forever with nobody told, in
+// the one place §11.2 says that must not happen.
+const PARK_CAP = 12;
+
+function parkedIds() {
+  return (orch.statuses || [])
+    // The STATE and the declaration disagree in both directions and each
+    // disagreement is a finding (ParkDTO.Parked's comment): `blocked` with no
+    // file is a cleared block, a file on a running task is a park the detector
+    // has not acted on yet. Both are worth fetching.
+    .filter((s) => s.state === "blocked" || s.blocked)
+    .map((s) => s.id)
+    .sort();
+}
+
+// refreshParks reads each parked child's own declaration through TaskPark.
+//
+// Server-parsed, deliberately. The raw block.json is on the wire in other DTOs
+// and parsing it here would be quicker — and would be a second implementation of
+// delegate.ParseBlock, which decides what a valid declaration IS. The malformed
+// case is the one that matters most (§11.2: a swallowed block is a child parked
+// forever) and it is the case a hand-rolled JSON.parse gets wrong most quietly.
+async function refreshParks() {
+  const ids = parkedIds();
+  const sig = ids.join(",");
+  if (sig === orch.parkSig || orch.parkFetch) return;
+  const runID = orch.run ? orch.run.id : 0;
+  const call = bound("TaskPark");
+  // An unbound TaskPark no longer needs saying on the chip: the park EDGES come
+  // off the snapshot now, so what is lost without this call is the declarations
+  // block, which renders its own absence.
+  if (!call || !runID) return;
+  if (!ids.length) {
+    orch.parks = new Map(); orch.parkSig = sig; orch.parkOver = 0;
+    renderOrchestration();
+    return;
+  }
+  orch.parkFetch = true;
+  const wanted = ids.slice(0, PARK_CAP);
+  const out = new Map();
+  try {
+    for (const id of wanted) {
+      try {
+        const p = await call(runID, id);
+        // A hidden payload is dropped rather than rendered as an absent park:
+        // §3.1's marker carries nothing, and there is nothing to show.
+        if (p && !p.hidden && (p.hasBlock || p.parked)) out.set(id, p);
+      } catch (e) { console.error("task park", id, e); }
+    }
+  } finally {
+    orch.parkFetch = false;
+  }
+  if (!orch.run || orch.run.id !== runID) return; // the switcher moved under us
+  orch.parks = out;
+  orch.parkSig = sig;
+  orch.parkOver = Math.max(0, ids.length - wanted.length);
+  renderOrchestration();
+}
+
+// §11.3's two decisions. Both are CAS-guarded server-side, so a second press —
+// or the other Loom instance — is REFUSED and says so; nothing here tries to
+// predict which way that goes.
+function wireAmendmentButtons(host, runID) {
+  for (const b of host.querySelectorAll("[data-amend]")) {
+    b.addEventListener("click", async () => {
+      const seq = parseInt(b.getAttribute("data-amend"), 10);
+      const call = bound(b.getAttribute("data-act") === "reject"
+        ? "RejectDelegationAmendment" : "ApproveDelegationAmendment");
+      if (!call || !seq) return;
+      b.disabled = true;
+      try {
+        const res = await call(runID, seq);
+        const note = res && (res.note || res.error || "");
+        const line = document.createElement("div");
+        line.className = (res && (res.approved || res.rejected)) ? "dgi-outcome" : "po-warn";
+        line.textContent = note || (res && res.approved ? "approved" : "declined");
+        b.parentElement.appendChild(line);
+        // Both decisions return the run RE-TICKED, so the new edge's
+        // consequences are on screen in the same gesture. It replaces the held
+        // report rather than only repainting: the amendment block re-renders on
+        // the next poll from orch.tick, and a stale report there would put the
+        // offer straight back with an Approve button that now refuses.
+        if (res && res.tick && !res.tick.hidden) {
+          orch.tick = res.tick;
+          orch.tickAt = Math.floor(Date.now() / 1000);
+          // Deferred one frame so the outcome line above is read before the
+          // list it sits in is rebuilt.
+          setTimeout(() => { orch.amendSig = ""; renderOrchestration(); }, 900);
+        }
+      } catch (e) {
+        const line = document.createElement("div");
+        line.className = "po-warn";
+        line.textContent = String(e);
+        b.parentElement.appendChild(line);
+      }
+      b.disabled = false;
+      await refreshOrchestration();
+    });
+  }
+}
+
+// runIntegrationHtml renders §10.5, LIMITS INCLUDED and not as a footnote.
+//
+// The limits come from Go and are always non-empty, deliberately: no VCS
+// operation can surface a cross-repo interface break, and a screen that showed
+// green per-repo baselines and said nothing else IS the misreading this section
+// exists to prevent.
+function runIntegrationHtml(d) {
+  if (!d) return "";
+  if (d.hidden) return `<div class="po-warn">hidden</div>`;
+  if (d.error) return `<div class="po-warn">${esc(d.error)}</div>`;
+  const bits = [];
+  for (const r of d.repos || []) {
+    bits.push(`<div class="dgi-checkline ${r.red ? "bad" : "ok"}">${esc(r.repo)} · ` +
+      esc(r.status || "no verdict recorded") + `</div>`);
+    bits.push(fact("branch", r.branch));
+    bits.push(fact("worktree", r.worktree));
+    if (!r.hasCheck) {
+      // A REAL degradation, named as one: the task's own check is then the
+      // only evidence behind §5.2's precondition.
+      bits.push(`<div class="po-warn">no integration.per_repo check for this repo — ` +
+        `the task's own check is the only evidence there is</div>`);
+    } else {
+      bits.push(fact("gate", (r.checkArgv || []).join(" ")));
+    }
+    if (r.out) bits.push(`<pre class="dgi-pre dgi-out">${esc(r.out)}</pre>`);
+  }
+  if ((d.cross || []).length) {
+    bits.push(`<div class="dgi-sec">Cross-repo checks</div>`);
+    for (const c of d.cross) {
+      bits.push(fact(c.id, (c.argv || []).join(" ")));
+      if ((c.needsRepos || []).length) bits.push(fact("waits for", c.needsRepos.join(", ")));
+    }
+  }
+  if ((d.drifts || []).length) {
+    bits.push(`<div class="dgi-sec">Stale contracts — an interface moved after a consumer was built against it</div>`);
+    for (const dr of d.drifts) {
+      bits.push(`<div class="po-warn">${esc(dr.taskId)} needs ${esc(dr.artifact)} ` +
+        `(from ${esc(dr.producer)}): ${esc(dr.wasCommit)} → ${esc(dr.nowCommit)}</div>`);
+    }
+  }
+  bits.push(`<div class="dgi-sec">What this does and does not prove</div>`);
+  for (const l of d.limits || []) bits.push(`<div class="dgi-outcome">${esc(l)}</div>`);
+  return bits.join("");
+}
+
+// tickHtml renders one scheduler pass: what moved and what the watchdogs saw.
+//
+// §11.3's amendments and §12.1's deadlock are deliberately NOT here. They
+// outlive the press — an offer is a standing question and a deadlock is a
+// permanent state — and both are rendered by the seam's own blocks off the held
+// report, so that the poll's next re-render cannot wipe them off the screen.
+function tickHtml(rep) {
+  if (!rep) return "";
+  if (rep.hidden) return `<div class="po-warn">hidden</div>`;
+  const bits = [];
+  if (rep.error) bits.push(`<div class="po-warn">${esc(rep.error)}</div>`);
+  const moved = [
+    ["checked", rep.checked], ["integrated", rep.integrated],
+    ["resumed", rep.resumed], ["ready", rep.ready], ["blocked", rep.blocked],
+  ].filter(([, v]) => (v || []).length);
+  if (moved.length) {
+    bits.push(`<div class="dgi-sec">This pass</div>`);
+    for (const [label, v] of moved) bits.push(fact(label, v.join(", ")));
+  }
+  for (const f of rep.findings || []) {
+    // NOTHING here killed anything: §12.2's actions are flag, offer-retry,
+    // resolve and stop-spawns, and a `stalled` child is a label on a child that
+    // is still running.
+    bits.push(`<div class="po-warn">${esc(f.taskId)}: ${esc(f.kind)} — ${esc(f.detail || f.action || "")}</div>`);
+  }
+  for (const s of rep.suppressed || []) {
+    // §12.2's `run-budget` and §10.2's stopped spawning arrive here. An action
+    // Loom declined to take is not a no-op the human can be left to infer.
+    bits.push(`<div class="dgi-outcome">${esc(s.taskId)}: ${esc(s.action)} not offered — ${esc(s.reason)}</div>`);
+  }
+  for (const e of rep.errs || []) {
+    bits.push(`<div class="po-warn">${esc(e.taskId)} failed at ${esc(e.stage)}: ${esc(e.error)}</div>`);
+  }
+  if (rep.verdict) bits.push(`<div class="dgi-outcome">${esc(rep.verdict)}</div>`);
+  if (!bits.length) bits.push(`<div class="po-empty">nothing moved this pass</div>`);
+  return bits.join("");
+}
+
+// ---- §11.3: the amendment log, rendered where it can be answered ------------
+//
+// An amendment is the ONLY path from "a child found a dependency the plan did
+// not have" to an edge, and Loom never applies one itself. So the three lists
+// stay separate: a decided amendment is not a standing offer, and a declined one
+// that disappeared would be re-decided by the next human to read the run.
+function renderAmendments(host) {
+  if (!host) return;
+  const rep = orch.tick;
+  const runID = orch.run ? orch.run.id : 0;
+  if (!rep || !runID || rep.hidden) {
+    // Said out loud rather than left blank. The log is only readable through a
+    // tick, the tick is a write, and a human who does not know that reads an
+    // empty amendment block as "no child has asked for anything".
+    const html = runID
+      ? `<div class="dgi-sec">Amendments</div><div class="po-empty">not read yet — ` +
+        `the amendment log travels with a scheduler pass. Press “Advance run”.</div>`
+      : "";
+    if (html !== orch.amendSig) { orch.amendSig = html; host.innerHTML = html; }
+    return;
+  }
+  const html =
+    amendmentListHtml("Offers — a child hit a dependency the plan did not have", rep.offers, true) +
+    amendmentListHtml("Granted", rep.granted, false) +
+    amendmentListHtml("Declined", rep.declined, false) +
+    (((rep.offers || []).length + (rep.granted || []).length + (rep.declined || []).length)
+      ? `<div class="dg-asof">as of the pass ${esc(elapsedSince(orch.tickAt))} ago</div>`
+      : `<div class="dgi-sec">Amendments</div><div class="po-empty">no child has raised one</div>`);
+  if (html === orch.amendSig) return;
+  orch.amendSig = html;
+  host.innerHTML = html;
+  wireAmendmentButtons(host, runID);
+}
+
+function amendmentListHtml(title, list, decidable) {
+  if (!(list || []).length) return "";
+  const bits = [`<div class="dgi-sec">${esc(title)}</div>`];
+  for (const a of list) {
+    // A SCOPE amendment is not one offer among several and is not rendered as
+    // one. Approving it rewrites the child's brief and re-seeds it — it widens
+    // an authorization a human wrote deliberately, and §11.3 is explicit that it
+    // is never auto-granted. The other two kinds add an edge or ask a question;
+    // this one hands out permission, so it carries its own frame, its own ink
+    // and the sentence saying what the press does.
+    const scope = a.kind === "scope";
+    const what = a.replan
+      // §11.3's second branch: nobody produces the artifact, so there is no
+      // edge to add and nothing to approve. It is a conversation with the
+      // plan's author, and approving it would be approving a phantom.
+      ? `re-plan: <b>${esc(a.task)}</b> needs <code>${esc(a.artifact)}</code>, which no task produces`
+      : scope
+        ? `widen <b>${esc(a.task)}</b>'s authorization to also write ` +
+          `<code>${esc((a.paths || []).join("  "))}</code>`
+        : `<b>${esc(a.task)}</b> needs <code>${esc(a.artifact)}</code>` +
+          (a.producer ? ` from <b>${esc(a.producer)}</b>` : "");
+    bits.push(
+      `<div class="dgi-amend${scope ? " dgi-amend-scope" : ""}${a.replan ? " dgi-amend-replan" : ""}">` +
+      (scope ? `<div class="dg-scopemark">authorization change</div>` : "") +
+      `<div>${what}</div>` +
+      (scope
+        ? `<div class="po-warn">approving REWRITES this child's brief and re-seeds it. ` +
+          `It is the one amendment that hands out permission, and Loom never grants it on its own.</div>`
+        : "") +
+      (a.replan
+        ? `<div class="dgi-outcome">nothing to approve: add the artifact to a producing task, ` +
+          `then re-run the pass. Loom does not invent tasks.</div>`
+        : "") +
+      (a.reason ? `<div class="dgi-outcome">${esc(a.reason)}</div>` : "") +
+      (decidable && !a.replan
+        ? `<div class="modal-actions">` +
+          `<button class="tact${scope ? " dg-scopebtn" : ""}" data-amend="${a.seq}" data-act="approve">` +
+          `${scope ? "Widen the authorization" : "Approve"}</button>` +
+          `<button class="tact" data-amend="${a.seq}" data-act="reject">Decline</button></div>`
+        : "") +
+      (a.approved ? `<div class="dgi-outcome">granted ${esc(elapsedSince(a.approvedAt))} ago</div>` : "") +
+      (a.rejected ? `<div class="dgi-outcome">declined ${esc(elapsedSince(a.rejectedAt))} ago — ` +
+        `the row stays in the log so the same offer is not re-proposed</div>` : "") +
+      `</div>`);
+  }
+  return bits.join("");
 }
 
 // refreshOrchestration is the §7 poll call. One in flight at a time: the 1.5s
@@ -892,6 +1355,12 @@ async function refreshOrchestration() {
     return;
   }
   applySnapshot(snap);
+  // Both are no-ops until their own trigger fires — a red run status, or a
+  // change in the set of parked children — so the common case is two map
+  // comparisons and no call at all. Fire-and-forget for the same reason the
+  // document refresh is: a failure here costs the seam a block, never the poll.
+  refreshRunDeadlock().catch((e) => console.error("run deadlock", e));
+  refreshParks().catch((e) => console.error("parks", e));
 }
 
 function applySnapshot(snap) {
@@ -912,6 +1381,12 @@ function applySnapshot(snap) {
   orch.hidden = false;
   orch.runs = snap.runs || [];
   orch.run = snap.run || null;
+  // §10.2 vs §12.1, off the payload. Assigned unconditionally — including the
+  // empty case — so a run that RECOVERS drops its baseline fault on the same
+  // frame the status changes, rather than one poll later when a separate call
+  // gets round to noticing.
+  orch.redKind = (orch.run && orch.run.redKind) || "";
+  orch.baselineFaults = (orch.run && orch.run.baselineFaults) || [];
   orch.statuses = snap.statuses || [];
   orch.strip = snap.strip || null;
   orch.blocked = snap.blocked || [];
@@ -960,24 +1435,46 @@ function renderOrchestration(relayout) {
   const seam = document.getElementById("po-arch");
   if (!seam || !seam.isConnected) return;
   const hiddenLine = document.getElementById("dg-hidden");
+  const escHost = document.getElementById("dg-escalate");
   const stripHost = document.getElementById("dg-strip");
   const blockedHost = document.getElementById("dg-blocked");
+  const parkedHost = document.getElementById("dg-parked");
   const graphBlock = document.getElementById("dg-graphblock");
+  const runBlock = document.getElementById("dg-runblock");
+  const amendHost = document.getElementById("dg-amend");
   const docsHost = document.getElementById("po-docs");
   if (!hiddenLine || !stripHost || !blockedHost || !graphBlock || !docsHost) return;
 
   if (orch.hidden) {
     hiddenLine.textContent = "hidden — orchestration view suppressed; unhide to view";
+    if (escHost) escHost.replaceChildren();
     stripHost.replaceChildren();
     blockedHost.replaceChildren();
+    if (parkedHost) parkedHost.replaceChildren();
     graphBlock.hidden = true;
+    if (runBlock) {
+      runBlock.hidden = true;
+      runBlock.querySelector("#dg-runbody").replaceChildren();
+      if (amendHost) amendHost.replaceChildren();
+    }
     docsHost.replaceChildren();
+    orch.escSig = orch.parkedSig = orch.amendSig = "";
     return;
   }
   hiddenLine.textContent = "";
+  // The run actions exist only when there is a run to act on. Absence of
+  // orchestration is not an error (§3), so the block goes away rather than
+  // rendering two buttons that would refuse.
+  if (runBlock) runBlock.hidden = !orch.run;
 
+  // Escalation FIRST, above the figures. §12.1: the run row goes red and
+  // permanent, and the entire hazard is that an all-blocked run reads exactly
+  // like a run that is working.
+  renderEscalation(escHost);
   renderRunStrip(stripHost);
   renderBlockedStrip(blockedHost);
+  renderParkedBlock(parkedHost);
+  renderAmendments(amendHost);
   renderGraphBlock(graphBlock, relayout);
   // Last, and outside renderGraphBlock's several early returns: an open
   // inspector must keep up with the poll even when the graph itself is a table
@@ -1005,6 +1502,10 @@ function renderRunStrip(host) {
   const figs = [
     fig(`${s.merged || 0}/${s.nodes || 0}`, "merged"),
     fig(String(s.verified || 0), "verified"),
+    // Only when there is one. It is the figure the human can act on directly —
+    // §5.2's gate is waiting on a press — so a permanent "0 mergeable" beside
+    // the others would train the eye to skip the row that matters.
+    s.mergeable ? fig(String(s.mergeable), "mergeable", "dg-f-act") : "",
     fig(String(s.ready || 0), "ready"),
     fig(String(s.running || 0), "running"),
     s.failed ? fig(String(s.failed), "failed", "dg-f-bad") : "",
@@ -1015,13 +1516,21 @@ function renderRunStrip(host) {
     // number §5.2 bans elsewhere.
     `<span class="dg-fig" title="cohesion indicator, not a measurement"><b>${s.repos || 0}</b><i>repos · ${s.sharedRepos || 0} shared · density ${density}</i></span>`,
   ].filter(Boolean).join("");
+  // §2.6's run-health number. The caveat it used to carry — "live count only" —
+  // is gone because the count is no longer live-only: the payload's park edges
+  // come from delegate.Effective, which includes every ACCEPTED amendment, so a
+  // park that was granted and worked through is still counted. What remains
+  // uncounted is a park that was resumed without an amendment ever being
+  // recorded, and the chip no longer claims otherwise in either direction.
+  const parkN = parkEdgeCount();
+  const parkedN = orch.parks.size;
   const chips = [
-    // §2.6 wants the park-edge count as a run-health number. GraphEdgeDTO
-    // deliberately carries no `kind` because park is the rendezvous path and
-    // that is 3a-deferred (arch.go:180) — so this states the gap instead of
-    // rendering a zero that would read as "the plan held".
-    `<span class="dg-chip" title="park edges are the rendezvous path — deferred with slice 3's §§9-12">park edges: not tracked yet</span>`,
+    `<span class="dg-chip${parkN ? " dg-chip-warn" : ""}" title="A park edge is a dependency the plan did not have: an accepted amendment, or a child parked on something the plan missed.">park edges: ${parkN}${parkedN ? ` · ${parkedN} parked now` : ""}</span>`,
     s.hiddenNodes ? `<span class="dg-chip dg-chip-mute">${s.hiddenNodes} node${s.hiddenNodes === 1 ? "" : "s"} hidden</span>` : "",
+    // Said in the figures too, not only in the escalation band above: the two
+    // are read at different distances, and the band is the one a user learns to
+    // scroll past once they have read it.
+    RED_RUN_STATUSES.has(r.status) ? `<span class="dg-chip dg-chip-warn">spawning stopped</span>` : "",
     orch.changed ? `<button class="dg-chip dg-chip-warn" id="dg-changed">graph changed — dismiss</button>` : "",
   ].filter(Boolean).join("");
   const switcher = orch.runs.length > 1
@@ -1040,6 +1549,7 @@ function renderRunStrip(host) {
       </div>
       <div class="dg-figs">${figs}</div>
       <div class="dg-chiprow">${bneckTitle ? `<span class="dg-chip dg-chip-accent">bottleneck: ${esc(bneckTitle)}</span>` : ""}${chips}</div>
+      ${stagingRowHtml()}
     </section>`;
   if (html === orch.stripSig) return;
   orch.stripSig = html;
@@ -1052,6 +1562,10 @@ function renderRunStrip(host) {
     // the next snapshot is forced to send the full payload rather than
     // answering "unchanged" against the previous run's rev.
     orch.rev = 0; orch.nodes = []; orch.edges = []; orch.layout = null; orch.graph = null; orch.changed = false;
+    // Everything §§10-12 holds is keyed to the run that was showing: another
+    // run's parks, red kind and tick report name task ids this graph does not
+    // have, and would paint that run's deadlock over this one.
+    resetRunLocal();
     refreshOrchestration().catch((e) => console.error("orchestration", e));
   });
   const changed = document.getElementById("dg-changed");
@@ -1065,6 +1579,29 @@ function renderRunStrip(host) {
 
 function fig(value, label, cls) {
   return `<span class="dg-fig${cls ? " " + cls : ""}"><b>${esc(value)}</b><i>${esc(label)}</i></span>`;
+}
+
+// stagingRowHtml is §10.1's staging area in one line per repo.
+//
+// Three values, not two, and the third is the load-bearing one: a recorded
+// `pass`, a recorded failure, and NO VERDICT AT ALL — the worktree's position is
+// recorded before any per-repo check has ever run there. Rendering that as green
+// would certify on the absence of a result; as red it would blame every first
+// integration. It reads "no verdict yet", which is what it is.
+//
+// A repo with no declared `integration.per_repo` gate is a REAL degradation and
+// is marked as one on the chip: the task's own check is then the only evidence
+// behind §5.2's approval, and that is a smaller claim than the gate implies.
+function stagingRowHtml() {
+  const d = orch.integration;
+  if (!d || d.hidden || !(d.repos || []).length) return "";
+  const chips = d.repos.map((r) => {
+    const cls = r.red ? " dg-stage-bad" : (r.status === "pass" ? " dg-stage-ok" : " dg-stage-none");
+    return `<span class="dg-stagechip${cls}" title="${esc(r.branch || "")}">` +
+      `<code>${esc(r.repo)}</code> ${esc(r.status || "no verdict yet")}` +
+      (r.hasCheck ? "" : ` <i>ungated</i>`) + `</span>`;
+  }).join("");
+  return `<div class="dg-stagerow"><span class="dg-stagelabel">staging</span>${chips}</div>`;
 }
 
 // ---- block 2: blocked on you -----------------------------------------------
@@ -1121,6 +1658,379 @@ function runNodeAction(id, action) {
   }
 }
 
+// ---- §12.1 / §10.2: the escalation band ------------------------------------
+//
+// One band, two completely different faults, and the difference is the whole
+// reason this is not a status chip:
+//
+//   §10.2 BASELINE fault — the repo's own integration tree is red. NO TASK IS
+//     BLAMED, spawning stops, and the repair is to the repo. Blaming a child
+//     for this is precisely the failure the attribution table exists to prevent,
+//     and it is an easy one to render by accident because both readings share
+//     the run status `deadlocked`.
+//   §12.1 DEADLOCK — no task ready, none running, work outstanding. Rendered as
+//     the actual wait-for cycle, naming every task and artifact in it, or as the
+//     list of decisions owed.
+//
+// Loud, and permanent until the run moves. A deadlocked run and a run quietly
+// making progress produce identical graphs, identical dots and identical
+// figures; if this band is subtle then it has failed at the one job it has.
+
+function nodeTitle(id) {
+  const n = nodeById(id);
+  return (n && !n.hidden && n.title) ? n.title : id;
+}
+
+// PARK_LABEL is §11.1's four kinds in the words that say what unblocks each.
+// The kind is what decides the remedy — that is why block.json carries it — so
+// the label carries the remedy rather than repeating the enum.
+const PARK_LABEL = {
+  "needs-artifact": "waiting on a peer to publish something",
+  "needs-decision": "waiting on a human decision",
+  "needs-scope": "the task's boundary was drawn wrong",
+  "blocked-external": "blocked on something outside the run",
+};
+
+// The kinds that no tick can clear. §11.4's resume only re-attempts a delivery
+// Loom already owes; these three need a person.
+const HUMAN_PARK_KINDS = new Set(["needs-decision", "needs-scope", "blocked-external"]);
+
+function renderEscalation(host) {
+  if (!host) return;
+  const run = orch.run;
+  // The POLL's finding first, the last human-pressed pass second. Both are
+  // delegate.DetectDeadlock over the same persisted rows; the tick's is used
+  // only when the read-only binding is absent (an older build) or has not
+  // answered yet, because a tick's report can be minutes old and the poll's is
+  // at most one interval behind.
+  const dl = orch.deadlock || (orch.tick && orch.tick.deadlock) || null;
+  const red = !!run && RED_RUN_STATUSES.has(run.status);
+  const baselineFault = orch.redKind === RED_BASELINE || !!orch.baselineAlert;
+  if (!red && !dl && !orch.baselineAlert) {
+    if (orch.escSig !== "") { orch.escSig = ""; host.replaceChildren(); }
+    return;
+  }
+  const bits = [];
+  if (baselineFault) bits.push(baselinePanelHtml(run));
+  // The deadlock panel is suppressed for a pure baseline fault: the run is red
+  // for a reason that names no task, and rendering an EMPTY wait-for cycle
+  // beside it is the specific misread RedKind exists to prevent.
+  if (dl || (red && !baselineFault)) bits.push(deadlockPanelHtml(dl));
+  const html = bits.join("");
+  if (html === orch.escSig) return;
+  orch.escSig = html;
+  host.innerHTML = html;
+
+  const diag = host.querySelector("#dg-diagnose");
+  if (diag) diag.addEventListener("click", async () => {
+    const call = bound("TickDelegationRun");
+    const runID = orch.run ? orch.run.id : 0;
+    if (!call || !runID) return;
+    diag.disabled = true;
+    diag.textContent = "Reading the scheduler…";
+    try {
+      const rep = await call(runID);
+      if (rep && !rep.hidden) { orch.tick = rep; orch.tickAt = Math.floor(Date.now() / 1000); }
+      // Both signatures, because a pass can answer both questions at once.
+      orch.escSig = orch.amendSig = "";
+    } catch (e) { console.error("diagnose", e); }
+    diag.disabled = false;
+    diag.textContent = "Diagnose (runs a scheduler pass)";
+    await refreshOrchestration();
+    renderOrchestration();
+  });
+  host.querySelectorAll("[data-task]").forEach((el) =>
+    el.addEventListener("click", () => openNodeInspector(el.getAttribute("data-task"))));
+}
+
+function baselinePanelHtml(run) {
+  const bits = [`
+    <section class="dg-escalate dg-escalate-baseline">
+      <div class="dg-esc-head"><span class="dg-esc-mark">baseline fault</span>
+        <h3>The repo's own tree is red — no task is to blame</h3></div>
+      <div class="dg-esc-body">This is §10.2's second attribution: the integration check was red
+        <b>with</b> the task merged and red <b>without</b> it. Loom has stopped offering spawns.
+        The repair is to the repository, not to the plan, and nothing here is evidence that any
+        child did anything wrong.</div>`];
+  for (const f of orch.baselineFaults || []) {
+    bits.push(`<div class="dg-esc-row"><code>${esc(f.repo)}</code> ` +
+      `<span class="dg-esc-verdict">${esc(f.status || "no verdict recorded")}</span>` +
+      (f.head ? ` <span class="dg-esc-dim">at ${esc(f.head.slice(0, 12))}</span>` : "") +
+      (f.at ? ` <span class="dg-esc-dim">${esc(elapsedSince(f.at))} ago</span>` : "") + `</div>` +
+      (f.reason ? `<pre class="dgi-pre dgi-out">${esc(f.reason)}</pre>` : ""));
+  }
+  const a = orch.baselineAlert;
+  if (a) {
+    bits.push(`<div class="dg-esc-row">seen this session while integrating ` +
+      `<b data-task="${esc(a.taskId)}" class="dg-esc-task">${esc(nodeTitle(a.taskId))}</b>` +
+      (a.repo ? ` in <code>${esc(a.repo)}</code>` : "") + `</div>`);
+    if (a.note) bits.push(`<div class="dg-esc-body">${esc(a.note)}</div>`);
+  }
+  if (!(orch.baselineFaults || []).length && !a) {
+    bits.push(`<div class="dg-esc-body">The run row says <code>${esc(run ? run.status : "")}</code> and its
+      integration column carries the fault; the captured reason has not been read back yet.</div>`);
+  }
+  bits.push(`</section>`);
+  return bits.join("");
+}
+
+function deadlockPanelHtml(dl) {
+  const shape = dl ? dl.shape : "";
+  const head = shape === "external"
+    ? "Every remaining task is waiting on you"
+    : shape === "starved"
+      ? "The run is stuck in a state Loom cannot classify"
+      : "Deadlocked — the tasks are waiting on each other";
+  const bits = [`
+    <section class="dg-escalate dg-escalate-deadlock">
+      <div class="dg-esc-head"><span class="dg-esc-mark">deadlocked</span><h3>${esc(head)}</h3></div>
+      <div class="dg-esc-body">Nothing is ready, nothing is running, and work remains. A run in this
+        state looks exactly like a run that is progressing — which is why it is said here rather
+        than left to a status chip.</div>`];
+
+  if (shape === "starved") {
+    // Not a third kind of deadlock: a task row is in a state no bucket claims,
+    // which is a fault in Loom. Telling the human to re-plan a manifest that is
+    // fine would be worse than admitting the tool is confused.
+    bits.push(`<div class="dg-esc-body">This one is a fault in <b>Loom</b>, not in the plan: some
+      task is in a state no scheduler bucket claims. Re-planning the manifest will not fix it.</div>`);
+  }
+
+  const cycle = dl ? (dl.cycle || []) : [];
+  const owed = dl ? (dl.owed || []) : [];
+  if (cycle.length) {
+    bits.push(`<div class="dg-esc-sec">The wait-for cycle, in full</div>`);
+    for (const e of cycle) {
+      bits.push(`<div class="dg-esc-edge">` +
+        `<b class="dg-esc-task" data-task="${esc(e.from)}">${esc(nodeTitle(e.from))}</b>` +
+        `<span class="dg-esc-arrow">is waited on by</span>` +
+        `<b class="dg-esc-task" data-task="${esc(e.to)}">${esc(nodeTitle(e.to))}</b>` +
+        (e.artifact ? `<span class="dg-esc-art">for <code>${esc(e.artifact)}</code></span>`
+          // Named as unnamed rather than omitted: an edge with no artifact came
+          // from a block that did not say what it wanted, and that is itself
+          // the thing to go and read.
+          : `<span class="dg-esc-dim">no artifact named</span>`) +
+        `</div>`);
+    }
+    bits.push(`<div class="dg-esc-body">Always fatal to the plan as written: a human re-plan is the
+      only exit. Loom will not break the cycle by choosing a task to abandon.</div>`);
+  }
+  if (owed.length) {
+    bits.push(`<div class="dg-esc-sec">Decisions owed, oldest first</div>`);
+    for (const o of owed) {
+      bits.push(`<div class="dg-esc-edge">` +
+        `<b class="dg-esc-task" data-task="${esc(o.taskId)}">${esc(nodeTitle(o.taskId))}</b>` +
+        `<span class="dg-esc-kind">${esc(o.kind)}</span>` +
+        `<span>${esc(o.summary || PARK_LABEL[o.kind] || "")}</span>` +
+        (o.since ? `<span class="dg-esc-dim">${esc(elapsedSince(o.since))} waiting</span>` : "") +
+        `</div>`);
+    }
+  }
+  if (dl && !cycle.length && !owed.length && (dl.stuck || []).length) {
+    bits.push(`<div class="dg-esc-sec">Non-terminal tasks</div>`);
+    bits.push(`<div class="dg-esc-row">${dl.stuck.map((id) =>
+      `<b class="dg-esc-task" data-task="${esc(id)}">${esc(nodeTitle(id))}</b>`).join(" · ")}</div>`);
+  }
+
+  if (!dl) {
+    // The run row says deadlocked and no pass has been read this session. What
+    // CAN be shown is shown — the server already marks back edges on the graph
+    // payload, and the parked children's own declarations are on hand — and it
+    // is labelled as the weaker evidence it is rather than presented as the
+    // scheduler's finding.
+    bits.push(derivedDeadlockHtml());
+  }
+  bits.push(`<div class="modal-actions"><button class="tact" id="dg-diagnose">` +
+    `Diagnose (runs a scheduler pass)</button></div>`);
+  bits.push(`<div class="dg-esc-dim">A pass runs checks, integrations and owed seed deliveries. ` +
+    `It is a write, which is why it is a press and not something the poll does.</div>`);
+  bits.push(`</section>`);
+  return bits.join("");
+}
+
+// derivedDeadlockHtml is the second-best picture, and it says so.
+function derivedDeadlockHtml() {
+  const back = (orch.edges || []).filter((e) => e.cycle);
+  const human = [...orch.parks.entries()].filter(([, p]) => HUMAN_PARK_KINDS.has(p.kind));
+  const bits = [`<div class="dg-esc-sec">What this screen can see without a pass</div>`];
+  if (back.length) {
+    for (const e of back) {
+      bits.push(`<div class="dg-esc-edge"><b class="dg-esc-task" data-task="${esc(e.from)}">${esc(nodeTitle(e.from))}</b>` +
+        `<span class="dg-esc-arrow">is waited on by</span>` +
+        `<b class="dg-esc-task" data-task="${esc(e.to)}">${esc(nodeTitle(e.to))}</b>` +
+        (e.artifact ? `<span class="dg-esc-art">for <code>${esc(e.artifact)}</code></span>` : "") +
+        `<span class="dg-esc-dim">back edge on the drawn graph</span></div>`);
+    }
+  }
+  for (const [id, p] of human) {
+    bits.push(`<div class="dg-esc-edge"><b class="dg-esc-task" data-task="${esc(id)}">${esc(nodeTitle(id))}</b>` +
+      `<span class="dg-esc-kind">${esc(p.kind)}</span>` +
+      `<span>${esc(p.summary || PARK_LABEL[p.kind] || "")}</span></div>`);
+  }
+  if (!back.length && !human.length) {
+    bits.push(`<div class="dg-esc-body">Nothing on the drawn graph and no parked child explains it.
+      The scheduler's own finding is one press away.</div>`);
+  } else {
+    bits.push(`<div class="dg-esc-dim">Read off the drawn graph and the parked children's own
+      declarations — not the scheduler's wait-for computation. Diagnose for that.</div>`);
+  }
+  return bits.join("");
+}
+
+// ---- §11: the park layer ----------------------------------------------------
+//
+// A parked child is the fallback the design is measured on (§2's M3), so a park
+// is never a badge on its own. Each one renders WHAT THE CHILD WROTE — its own
+// words, unedited — and the one action that can end it.
+
+function renderParkedBlock(host) {
+  if (!host) return;
+  const parks = [...orch.parks.entries()];
+  if (!parks.length) {
+    if (orch.parkedSig !== "") { orch.parkedSig = ""; host.replaceChildren(); }
+    return;
+  }
+  const runID = orch.run ? orch.run.id : 0;
+  const rows = parks.map(([id, p]) => {
+    if (p.malformed) {
+      // §11.2's worst outcome is a SWALLOWED block: a child parked forever with
+      // nobody told. So an unparseable declaration is the loudest row here, and
+      // the raw bytes are shown because they are all there is.
+      return `<li class="dg-park dg-park-bad" data-id="${esc(id)}">
+        <div class="dg-parkhead"><b class="dg-esc-task" data-task="${esc(id)}">${esc(nodeTitle(id))}</b>
+          <span class="dg-parkkind dg-parkkind-bad">declaration will not parse</span></div>
+        <div class="po-warn">${esc(p.parseError || "")} — Loom will not guess what the child meant.
+          Fix or remove block.json in the task's .meta/ directory.</div>
+        <pre class="dgi-pre">${esc(p.raw || "")}</pre></li>`;
+    }
+    const scope = p.kind === "needs-scope";
+    return `<li class="dg-park${scope ? " dg-park-scope" : ""}" data-id="${esc(id)}">
+      <div class="dg-parkhead">
+        <b class="dg-esc-task" data-task="${esc(id)}">${esc(nodeTitle(id))}</b>
+        <span class="dg-parkkind${scope ? " dg-parkkind-scope" : ""}">${esc(p.kind || "block")}</span>
+        <span class="dg-esc-dim">${esc(PARK_LABEL[p.kind] || "")}</span>
+        ${p.at ? `<span class="dg-since">${esc(elapsedSince(p.at))} parked</span>` : ""}
+      </div>
+      ${p.summary ? `<div class="dg-parksum">${esc(p.summary)}</div>` : ""}
+      ${p.artifact ? fact("needs artifact", p.artifact + (p.from ? ` (from ${p.from})` : "")) : ""}
+      ${(p.paths || []).length ? fact("wants to write", p.paths.join("  ")) : ""}
+      ${p.resumeWhen ? fact("resume when", p.resumeWhen) : ""}
+      ${p.pendingSeed
+        // §11.4's durable debt, shown as the TEXT Loom owes rather than as the
+        // word "pending": the workflow view already refuses to render a pending
+        // seed with nothing behind it.
+        ? `<div class="dgi-sec">Loom owes this child</div><pre class="dgi-pre">${esc(p.pendingSeed)}</pre>`
+        : ""}
+      <div class="dg-parkacts">
+        <button class="tact dg-parkinspect">Open the declaration</button>
+        ${p.resumable
+          ? `<button class="tact dg-parkresume">Retry the delivery</button>`
+          // The greyed button carries its own sentence. A disabled control with
+          // no reason beside it is how a human concludes the park is permanent.
+          : `<span class="dg-esc-dim">${esc(p.resumeNote || "")}</span>`}
+      </div></li>`;
+  }).join("");
+  const over = orch.parkOver
+    ? `<div class="po-warn">${orch.parkOver} more parked child${orch.parkOver === 1 ? "" : "ren"} ` +
+      `not read on this pass — open them from the graph</div>`
+    : "";
+  const html = `
+    <section class="po-block dg-parkblock">
+      <div class="po-bhead"><h3>Parked children</h3><span class="dg-count">${parks.length}</span>
+        <span class="dg-chips"><span class="dg-chip dg-chip-mute" title="§11 is the FALLBACK, not the mechanism: a run that accumulates parks is a run whose plan was wrong">the plan missed these</span></span>
+      </div>
+      ${over}
+      <ul class="po-list dg-parklist">${rows}</ul>
+    </section>`;
+  if (html === orch.parkedSig) return;
+  orch.parkedSig = html;
+  host.innerHTML = html;
+  host.querySelectorAll("[data-task]").forEach((el) =>
+    el.addEventListener("click", () => openNodeInspector(el.getAttribute("data-task"))));
+  host.querySelectorAll(".dg-park").forEach((li) => {
+    const id = li.getAttribute("data-id");
+    const open = li.querySelector(".dg-parkinspect");
+    if (open) open.addEventListener("click", () => openNodeInspector(id));
+    const res = li.querySelector(".dg-parkresume");
+    if (res) res.addEventListener("click", async () => {
+      const call = bound("ResumeTask");
+      if (!call || !runID) return;
+      res.disabled = true;
+      res.textContent = "Retrying…";
+      let note = "";
+      try {
+        const out = await call(runID, id);
+        note = out && out.hidden ? "hidden"
+          : out && out.resumed ? "delivered — the child is running again"
+          : out && out.childGone ? "the child this seed is owed to is gone — re-spawn it or abandon the task"
+          : out && out.owed ? "still owed: the child was not at a prompt that consumes typed text. Loom keeps the seed and will retry."
+          : out && out.conflict ? "the producer's branch would not merge into this child's worktree — the task stays parked"
+          : (out && out.error) || "nothing changed";
+      } catch (e) { note = String(e); }
+      const line = document.createElement("div");
+      line.className = "dgi-outcome";
+      line.textContent = note;
+      li.querySelector(".dg-parkacts").appendChild(line);
+      res.disabled = false;
+      res.textContent = "Retry the delivery";
+      // Force the next render to rebuild: the park's own row may have changed
+      // state, and the signature guard would otherwise hold the old one.
+      orch.parkSig = "";
+      await refreshOrchestration();
+    });
+  });
+}
+
+// ---- §5.1's park EDGES ------------------------------------------------------
+//
+// A park edge is a dependency the plan did not have: it exists because a child
+// stopped and said so, never because the manifest declared it.
+//
+// The snapshot now carries them: GraphEdgeDTO.kind is derived in Go from
+// delegate.Effective — declared edges + ACCEPTED AMENDMENTS + live blocks — so
+// the server's set includes the parks that were granted and have since been
+// worked through, which no live-declaration read can see. Those are the ones
+// §2.6 most wants counted: a park that was accepted and resolved is still a
+// plan that was wrong.
+//
+// What is synthesized below is the REMAINDER: a live declaration whose task row
+// has not been through Detector.Poll yet, so the block_json column the server
+// reads is still empty. It is a lag of at most one tick, and it is drawn rather
+// than waited for because a park edge that appears a tick late is a wait the
+// human cannot see during the tick it costs them.
+function producerOf(artifact) {
+  if (!artifact) return "";
+  const n = (orch.nodes || []).find((x) => !x.hidden && (x.artifacts || []).includes(artifact));
+  return n ? n.id : "";
+}
+
+function parkEdgeList() {
+  const out = [];
+  const declared = new Set((orch.edges || []).map((e) => e.from + "\0" + e.to));
+  for (const [id, p] of orch.parks) {
+    if (!p || p.malformed || p.kind !== "needs-artifact") continue;
+    if (!nodeById(id)) continue;
+    const from = (p.from && nodeById(p.from)) ? p.from : producerOf(p.artifact);
+    if (!from || from === id || !nodeById(from)) continue;
+    // A park that names a pair of tasks the payload ALREADY carries an edge for
+    // — declared or park — is not a second edge: drawing a second dashed line
+    // over one that is already there would inflate the run-health number §2.6
+    // reads.
+    if (declared.has(from + "\0" + id)) continue;
+    out.push({ from, to: id, artifact: p.artifact, kind: "park" });
+  }
+  return out;
+}
+
+// parkEdgeCount is the run-health figure over BOTH sources — the payload's park
+// edges and the not-yet-persisted remainder above. Counting only the second was
+// the bug this replaces: it saw the standing live parks and none of the accepted
+// amendments, so a run that rendezvoused six times, was granted every edge and
+// recovered read as a plan that held.
+function parkEdgeCount() {
+  return (orch.edges || []).filter((e) => e.kind === "park").length + parkEdgeList().length;
+}
+
 // ---- block 3: the graph -----------------------------------------------------
 
 // §9's two size caps. Above 60 nodes the graph collapses to repo bands (still a
@@ -1160,6 +2070,15 @@ function renderGraphBlock(block, relayout) {
     return;
   }
 
+  // The drawn edge set is the manifest's PLUS §5.1's park edges, which are
+  // synthesized from the live declarations and therefore change without the
+  // topology rev moving. Hence the signature below: `relayout` alone would keep
+  // a park edge off the picture until the manifest itself changed.
+  const parkEdges = parkEdgeList();
+  const allEdges = orch.edges.concat(parkEdges);
+  const topoSig = orch.nodes.map((n) => n.id).join(",") + "|" +
+    allEdges.map((e) => e.from + ">" + e.to + ":" + (e.kind || "plan")).join(",");
+
   const banded = orch.nodes.length > BAND_AT && !orch.expanded;
   const asTable = orch.nodes.length > TABLE_AT && !orch.expanded;
   const chipHtml = [
@@ -1177,10 +2096,10 @@ function renderGraphBlock(block, relayout) {
     if (col) col.addEventListener("click", () => { orch.expanded = false; orch.graph = null; renderOrchestration(true); });
   }
 
-  if (asTable) { orch.graph = null; renderNodeTable(host); return; }
+  if (asTable) { orch.graph = null; orch.topoSig = ""; renderNodeTable(host); return; }
 
-  const view = banded ? bandView(orch.nodes, orch.edges, statusMap()) : {
-    nodes: orch.nodes, edges: orch.edges, statuses: statusMap(),
+  const view = banded ? bandView(orch.nodes, allEdges, statusMap()) : {
+    nodes: orch.nodes, edges: allEdges, statuses: statusMap(),
   };
   if (!orch.graph) {
     // A band is not a task, so clicking one expands rather than opening an
@@ -1193,7 +2112,8 @@ function renderGraphBlock(block, relayout) {
     orch.graph.setTopology(view.nodes, view.edges, banded ? null : orch.layout);
     orch.graph.fit();
     orch.graphRun = orch.run ? orch.run.id : 0;
-  } else if (relayout) {
+    orch.topoSig = topoSig;
+  } else if (relayout || topoSig !== orch.topoSig) {
     // §7.3: a rev change re-lays-out and PRESERVES the viewport. Only a run
     // switch re-fits, because that genuinely is a different picture.
     // The banded view passes no server layout: its nodes are synthesized here.
@@ -1237,7 +2157,7 @@ function bandView(nodes, edges, statuses) {
   for (const e of edges) {
     const a = keyOf.get(e.from), b = keyOf.get(e.to);
     if (!a || !b || a === b) continue;
-    const k = a + " " + b;
+    const k = a + "\0" + b;
     if (!bandEdges.has(k)) bandEdges.set(k, { from: a, to: b, artifact: "", cycle: !!e.cycle });
     else if (e.cycle) bandEdges.get(k).cycle = true;
   }
@@ -1321,8 +2241,12 @@ function openNodeInspector(id) {
       ${(n.checkCmd || []).length
         ? `<pre class="dgi-pre dgi-cmd">${esc((n.checkCmd || []).join(" "))}</pre>`
         : `<div class="po-warn">no check declared — this task has no definition of done</div>`}
+      <div id="dgi-flags"></div>
       <div id="dgi-check"></div>
+      <div id="dgi-park"></div>
       <div id="dgi-memory"></div>
+      <div id="dgi-integration"></div>
+      <div id="dgi-gate"></div>
       <div id="dgi-merge"></div>
       <div class="modal-error" id="dgi-err"></div>
       <div class="modal-actions dgi-actions" id="dgi-actions">
@@ -1370,6 +2294,44 @@ function openNodeInspector(id) {
         ? "no live session — resume it from Finished"
         : "not launched yet";
     }
+    // §12.2/§12.3's badges with their SENTENCES, and the sentences come from Go
+    // (NodeStatusDTO.flagDetails). Two of them are binding wording — the drift
+    // note says "changed since spawn" and never "the child wrote this" — so
+    // nothing here composes a string for a flag; the frontend only decides
+    // where a loud one goes. A flag with no sentence still renders, as itself.
+    const flagHost = backdrop.querySelector("#dgi-flags");
+    const details = st.flagDetails || [];
+    const rows = details.map((d) =>
+      `<div class="${d.loud ? "po-warn" : "dgi-flagline"}"><code>${esc(d.name)}</code> ${esc(d.note || "")}</div>`);
+    // The DEBT, read from the column rather than from the `seed-pending` badge.
+    // §10.3's park owes a seed the moment it writes the column, and a view keyed
+    // on the flag alone would show a parked child with nothing saying Loom owes
+    // it a message.
+    if (st.pendingSeed) {
+      rows.push(`<div class="po-warn">Loom owes this child a message and has not delivered it yet — ` +
+        `it is delivered when the child next reaches its prompt</div>`);
+    }
+    // §12.3.1 is "`diverged` flag WITH THE FILE LIST", and this is the list. It
+    // rides on the poll payload — a decode of the column the check already
+    // wrote, no git — so the human reads WHICH files without opening the merge
+    // gate, which is the surface the acknowledgement lives on and therefore the
+    // wrong place to have to go to find out whether there is anything to
+    // acknowledge.
+    const dv = st.divergence || null;
+    if (dv && !dv.empty) {
+      if ((dv.outside || []).length) {
+        rows.push(`<div class="dgi-flagline">outside the task's declared paths: ` +
+          dv.outside.map((f) => `<code>${esc(f)}</code>`).join(" ") + `</div>`);
+      }
+      // §12.3.2 is the stronger half — it PREDICTS the merge conflict before
+      // integration reaches it — so it is loud where the first is not.
+      for (const [sib, files] of Object.entries(dv.siblings || {})) {
+        rows.push(`<div class="po-warn">inside <b>${esc(nodeTitle(sib))}</b>'s declared paths: ` +
+          files.map((f) => `<code>${esc(f)}</code>`).join(" ") + `</div>`);
+      }
+    }
+    flagHost.innerHTML = rows.length ? `<div class="dgi-sec">Flags</div>` + rows.join("") : "";
+
     const host = backdrop.querySelector("#dgi-check");
     if (!st.checkStatus) {
       host.innerHTML = `<div class="po-empty">no check has run — completion is only ever a check result</div>`;
@@ -1456,6 +2418,155 @@ function openNodeInspector(id) {
       paintLive();
     });
   }
+  // §11.1's block declaration, rendered as the child WROTE it. Fetched rather
+  // than derived from the state chip: `blocked` says a child stopped, and this
+  // says what it stopped on, which is the only half a human can act on.
+  const park = bound("TaskPark");
+  if (park && runID) {
+    park(runID, id).then((p) => {
+      const host = backdrop.querySelector("#dgi-park");
+      if (!host || !host.isConnected || !p || p.hidden || !p.hasBlock) return;
+      const bits = [`<div class="dgi-sec">Why this child stopped — its own declaration</div>`];
+      if (p.malformed) {
+        // A block Loom cannot parse is NEVER dropped: the child is parked
+        // either way, and a swallowed declaration is a child parked forever
+        // with nobody told. The raw text is shown because it is all there is.
+        bits.push(`<div class="po-warn">the declaration will not parse: ${esc(p.parseError || "")}</div>`);
+        bits.push(`<pre class="dgi-pre">${esc(p.raw || "")}</pre>`);
+      } else {
+        bits.push(`<div class="dgi-checkline bad">${esc(p.kind || "block")}` +
+          (p.author ? ` · by ${esc(p.author)}` : "") + `</div>`);
+        if (p.summary) bits.push(`<div class="dgi-outcome">${esc(p.summary)}</div>`);
+        if (p.artifact) bits.push(fact("needs artifact", p.artifact + (p.from ? " (from " + p.from + ")" : "")));
+        if ((p.paths || []).length) bits.push(fact("wants scope", p.paths.join(", ")));
+        if (p.detail) bits.push(`<pre class="dgi-pre">${esc(p.detail)}</pre>`);
+        if (p.resumeWhen) bits.push(`<div class="dgi-fact"><span>resume when</span><code>${esc(p.resumeWhen)}</code></div>`);
+      }
+      host.innerHTML = bits.join("");
+    }).catch((e) => console.error("task park", e));
+  }
+
+  // §10.2, run on demand. Loom merges the task into its repo's INTEGRATION
+  // worktree — a test bed, never the thing that ships — and re-runs the
+  // per-repo gate there. The result names the STAGE, because "the integration
+  // is red" is ambiguous and a conflict, a bootstrap failure and a red check
+  // have completely different remedies.
+  const integrate = bound("IntegrateTask");
+  if (integrate && runID) {
+    act("Integrate", async (b) => {
+      b.disabled = true;
+      b.textContent = "Integrating…";
+      const host = backdrop.querySelector("#dgi-integration");
+      try {
+        const res = await integrate(runID, id);
+        host.innerHTML = integrationHtml(res);
+        // A run-level fault is not a modal-local fact: it stops spawning for
+        // the whole run and it names no child. It is hoisted to the seam's
+        // escalation band so it survives this modal closing, which is the one
+        // way a "no task is to blame" finding gets read as a task's problem.
+        noteBaselineFault(res, id);
+      } catch (e) { errEl.textContent = String(e); }
+      b.disabled = false;
+      b.textContent = "Integrate";
+      await refreshOrchestration();
+      paintLive();
+    });
+  }
+
+  // §5.2's gate, then §10.4's merge. TWO presses, deliberately: the first
+  // computes and RENDERS the divergence and the drift, and the second carries
+  // the human's acknowledgement of exactly what was rendered.
+  //
+  // The ack lists are the gate's own arrays, passed VERBATIM. Rebuilding them
+  // here from the divergence report would defeat the staleness check outright —
+  // Runner.Merge compares what was acknowledged against what is there NOW, in
+  // both directions, and a client that regenerates the list can only ever agree
+  // with itself.
+  const gate = bound("TaskMergeGate");
+  const doMerge = bound("MergeTask");
+  if (gate && doMerge && runID) {
+    act("Merge…", async (b) => {
+      b.disabled = true;
+      const host = backdrop.querySelector("#dgi-gate");
+      let g;
+      try { g = await gate(runID, id); }
+      catch (e) { errEl.textContent = String(e); b.disabled = false; return; }
+      b.disabled = false;
+      if (!g || g.hidden) { errEl.textContent = "hidden"; return; }
+      if (g.error) { errEl.textContent = g.error; return; }
+      host.innerHTML = mergeGateHtml(g);
+      const press = async (btn, force) => {
+        btn.disabled = true;
+        const was = btn.textContent;
+        btn.textContent = "Merging…";
+        try {
+          // Verbatim. See above.
+          const res = await doMerge(runID, id, g.ackDivergence || [], g.ackDrift || [], force);
+          host.innerHTML = mergeResultHtml(res) + host.innerHTML;
+          // §10.4 step 2: a merge that SUCCEEDED can leave the user's own branch
+          // red, which is a baseline fault with no task blamed. That is the most
+          // important thing this screen can say and it must outlive the modal.
+          if (res && res.baseline && res.baseline.status && res.baseline.status !== "pass") {
+            orch.baselineAlert = {
+              taskId: id, repo: res.baseline.repo,
+              note: "the integration baseline re-derived from your own branch after this merge is " +
+                res.baseline.status + " — §10.4 step 2. No task is blamed.",
+            };
+            orch.escSig = "";
+          }
+        } catch (e) { errEl.textContent = String(e); }
+        btn.disabled = false;
+        btn.textContent = was;
+        await refreshOrchestration();
+        paintLive();
+      };
+      const go = host.querySelector("#dgi-domerge");
+      if (go) go.addEventListener("click", () => press(go, false));
+      // Force is armed by a second click, the same two-step the kill button
+      // uses, and it is offered ONLY when there is something to force past. It
+      // is never silent: the `forced` flag is written before the merge and
+      // nothing reads it as permission.
+      const forceBtn = host.querySelector("#dgi-forcemerge");
+      if (forceBtn) {
+        let armed = false;
+        forceBtn.addEventListener("click", () => {
+          if (!armed) {
+            armed = true;
+            forceBtn.classList.add("armed");
+            forceBtn.textContent = "Force past the blockers?";
+            return;
+          }
+          armed = false;
+          forceBtn.classList.remove("armed");
+          forceBtn.textContent = "Force merge";
+          press(forceBtn, true);
+        });
+      }
+    }, true);
+  }
+
+  // §11.4's delivery, retried by hand. A seed is OWED until it is delivered and
+  // a timeout is explicitly not a failure, so this is a retry and never a
+  // "send again" — the durable column is the same one either way.
+  const resume = bound("ResumeTask");
+  if (resume && runID) {
+    act("Resume child", async (b) => {
+      b.disabled = true;
+      b.textContent = "Resuming…";
+      try {
+        const res = await resume(runID, id);
+        if (res && res.hidden) errEl.textContent = "hidden";
+        else if (res && res.error) errEl.textContent = res.error;
+        else if (res && res.childGone) errEl.textContent = "the child this seed is owed to is gone — re-spawn it or abandon the task";
+        else if (res && res.owed) errEl.textContent = "still owed: the child was not at a prompt that consumes typed text. Loom keeps the seed and will retry.";
+      } catch (e) { errEl.textContent = String(e); }
+      b.disabled = false;
+      b.textContent = "Resume child";
+      await refreshOrchestration();
+      paintLive();
+    });
+  }
+
   const merge = bound("TaskMergeCommand");
   if (merge && runID) {
     act("Merge command", async () => {
@@ -1484,6 +2595,126 @@ function openNodeInspector(id) {
 function fact(label, value) {
   if (!value) return "";
   return `<div class="dgi-fact"><span>${esc(label)}</span><code>${esc(value)}</code></div>`;
+}
+
+// integrationHtml renders one §10.2 pass. The STAGE leads, because that is what
+// decides the remedy: a conflict is a human decision, a bootstrap failure is
+// usually the environment, a per-repo failure is the task, and a cross failure
+// may be either side of the seam.
+function integrationHtml(res) {
+  if (!res) return "";
+  if (res.hidden) return `<div class="po-warn">hidden</div>`;
+  if (res.error) return `<div class="po-warn">${esc(res.error)}</div>`;
+  if (res.busy) return `<div class="po-warn">another integration is already running for this repo</div>`;
+  const bits = [`<div class="dgi-sec">Integration — a staging worktree, never the thing that ships</div>`];
+  if (!res.ran) {
+    bits.push(`<div class="po-empty">nothing ran</div>`);
+  } else {
+    bits.push(`<div class="dgi-checkline ${res.status === "pass" ? "ok" : "bad"}">` +
+      `${esc(res.stage || "")} · ${esc(res.status || "")}` +
+      (res.blame ? ` · blamed: ${esc(res.blame)}` : "") + `</div>`);
+  }
+  // §10.2's attribution table, and it gets a FRAME of its own rather than a
+  // word on a chip. The two rows of that table have opposite remedies — park
+  // the child, or go and repair your repo — and blaming a task for a broken
+  // baseline is the exact failure the table was written to prevent. The bit
+  // read here is runLevelFault, never a string comparison on `blame`: a
+  // frontend that has to match "baseline" to decide whether to blame a child is
+  // a frontend that will one day blame the wrong one.
+  if (res.runLevelFault) {
+    bits.push(`<div class="dg-blame dg-blame-baseline">
+      <div class="dg-blame-head">baseline fault — no task is to blame</div>
+      <div>${esc(res.blameNote || "red with this task merged AND red without it: the repo's own tree is broken. Spawning stops and the repair is to the repo.")}</div>
+      </div>`);
+  } else if (res.blame === "task") {
+    bits.push(`<div class="dg-blame dg-blame-task">
+      <div class="dg-blame-head">this task is to blame</div>
+      <div>${esc(res.blameNote || "red with this task merged and green without it.")}</div>
+      </div>`);
+  } else if (res.blameNote) {
+    bits.push(`<div class="dgi-outcome">${esc(res.blameNote)}</div>`);
+  }
+  if ((res.conflicts || []).length) {
+    bits.push(fact("conflicting files", res.conflicts.join(", ")));
+  }
+  if (res.crossCheck) bits.push(fact("cross check", res.crossCheck));
+  for (const w of res.warnings || []) bits.push(`<div class="po-warn">${esc(w)}</div>`);
+  if (res.output) bits.push(`<pre class="dgi-pre dgi-out">${esc(res.output)}</pre>`);
+  return bits.join("");
+}
+
+// noteBaselineFault hoists §10.2's second attribution out of whatever modal
+// observed it. Nothing is cleared here: the durable read (refreshRunRed) clears
+// it when the run stops being red, which is the only evidence that the repo was
+// actually repaired.
+function noteBaselineFault(res, taskID) {
+  if (!res || !res.runLevelFault) return;
+  orch.baselineAlert = { taskId: taskID, repo: res.repo || "", note: res.blameNote || "" };
+  orch.escSig = "";
+  renderOrchestration();
+}
+
+// mergeGateHtml is §5.2 rendered: the diff's shape, the divergence, the drift,
+// the blockers, and the exact target branch. The Merge button is offered even
+// when there are blockers — greyed decisions are read, hidden ones are guessed
+// at — but it carries the force wording when that is what it would be.
+function mergeGateHtml(g) {
+  const bits = [`<div class="dgi-sec">Merge gate — you are about to write to your own branch</div>`];
+  bits.push(fact("merging", g.branch));
+  bits.push(fact("into", g.target));
+  bits.push(fact("repo", g.repo));
+  if (g.dirty) {
+    bits.push(`<div class="po-warn">your work tree is dirty — commit or stash first; ` +
+      `this is refused even under force: ${esc((g.dirtyFiles || []).join(", "))}</div>`);
+  }
+  for (const b of g.blockers || []) bits.push(`<div class="po-warn">${esc(b)}</div>`);
+  for (const w of g.warnings || []) bits.push(`<div class="po-warn">${esc(w)}</div>`);
+  if ((g.ackDivergence || []).length) {
+    bits.push(`<div class="dgi-sec">Committed outside its declared paths — you are acknowledging these</div>`);
+    bits.push(`<pre class="dgi-pre">${esc(g.ackDivergence.join("\n"))}</pre>`);
+  }
+  if ((g.ackDrift || []).length) {
+    // The hedge is Go's (DriftDTO.summary) and is reproduced verbatim, never
+    // paraphrased: the walk cannot tell the human's own edits from a child's.
+    bits.push(`<div class="dgi-sec">Changed outside the worktree since spawn — a separate acknowledgement</div>`);
+    bits.push(`<pre class="dgi-pre">${esc(g.ackDrift.join("\n"))}</pre>`);
+    if (g.drift && g.drift.summary) bits.push(`<div class="dgi-outcome">${esc(g.drift.summary)}</div>`);
+  }
+  bits.push(integrationHtml(g.integration));
+  const blocked = (g.blockers || []).length > 0;
+  bits.push(`<div class="modal-actions">` +
+    `<button class="btn-launch" id="dgi-domerge">Merge this branch</button>` +
+    // Offered, not hidden, when there is something to force past — a decision
+    // that is not on screen is one the human makes from the terminal instead.
+    (blocked ? `<button class="btn-ghost" id="dgi-forcemerge">Force merge</button>` : "") +
+    `</div>`);
+  return bits.join("");
+}
+
+function mergeResultHtml(res) {
+  if (!res) return "";
+  if (res.hidden) return `<div class="po-warn">hidden</div>`;
+  const bits = [];
+  if (res.merged) {
+    bits.push(`<div class="dgi-checkline ok">merged into your branch${res.forced ? " (FORCED — recorded as such)" : ""}</div>`);
+  } else {
+    const why = res.stale ? "the gate you read is out of date — re-read it"
+      : res.dirty ? "your work tree is dirty"
+      : res.moved ? "the task moved under you — re-read the run"
+      : "refused";
+    bits.push(`<div class="dgi-checkline bad">not merged — ${esc(why)}</div>`);
+  }
+  if (res.error) bits.push(`<div class="po-warn">${esc(res.error)}</div>`);
+  // §10.4 step 2's own sentences. These are the two facts a human most needs
+  // after a merge — "your branch is red now" and "the worktree was left behind"
+  // — and they exist nowhere else: they are composed on the integration result
+  // the merge returns, not on any status column.
+  for (const w of res.warnings || []) bits.push(`<div class="po-warn">${esc(w)}</div>`);
+  if (res.baseline && res.baseline.status && res.baseline.status !== "pass") {
+    bits.push(`<div class="po-warn">the re-derived integration baseline for ` +
+      `${esc(res.baseline.repo || "")} is ${esc(res.baseline.status)} — that is a BASELINE fault, no task is blamed</div>`);
+  }
+  return bits.join("");
 }
 
 // ---- block 4: architecture & decisions (stage 4a) ---------------------------

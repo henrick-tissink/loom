@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/henricktissink/loom/internal/arch"
 	"github.com/henricktissink/loom/internal/delegate"
@@ -403,6 +404,100 @@ type DelegationRunDTO struct {
 	// between a degraded render and a lie.
 	ManifestError string              `json:"manifestError"`
 	Tasks         []DelegationTaskDTO `json:"tasks"`
+
+	// RedKind discriminates the two things status `deadlocked` can mean, because
+	// they read completely differently to a human and share a status only
+	// because inventing a second red status string would make every existing
+	// consumer of delegation_runs.status treat the new value as not-red
+	// (integrate.go's rejected alternative, kept rejected here).
+	//
+	// §12.1's deadlock is a wait-for cycle or a list of owed decisions; §10.2's
+	// baseline fault is "this repo's own tree is broken and no child is to
+	// blame". A view that renders `deadlocked` as a wait-for cycle
+	// unconditionally shows an EMPTY cycle for every baseline fault — the
+	// specific misrender this field exists to prevent.
+	//
+	// Empty unless Status is `deadlocked`. It is derived rather than stored: the
+	// discriminator is delegation_runs.integration, which is already the place
+	// §10.2 says the baseline result lives, and a second column recording which
+	// kind of red a run is would be a second thing to keep in step with it.
+	RedKind string `json:"redKind"`
+	// BaselineFaults is the repos whose recorded baseline is not `pass`, with
+	// the captured reason. Non-empty exactly when RedKind is `baseline-fault`.
+	BaselineFaults []BaselineFaultDTO `json:"baselineFaults"`
+}
+
+// The two readings of status `deadlocked`. Exported as strings rather than an
+// enum because they cross the wire to JS, where an unknown value must be
+// renderable as itself.
+const (
+	// RedBaselineFault — §10.2: a repo's integration baseline is red, so the
+	// merge could not be attributed to any child. Nobody is blamed and the
+	// remedy is to repair the repo, not to re-plan the manifest.
+	RedBaselineFault = "baseline-fault"
+	// RedDeadlock — §12.1: the run stopped with work outstanding. The remedy is
+	// a human re-plan, and the render is the wait-for cycle or the owed
+	// decisions.
+	RedDeadlock = "deadlock"
+)
+
+// BaselineFaultDTO is one repo's failing integration baseline (§10.2).
+type BaselineFaultDTO struct {
+	Repo string `json:"repo"`
+	// Status is the CheckStatus recorded at Head — `fail`, `unpublished`,
+	// `env-suspect` or `infra-error`. Carried verbatim rather than collapsed to
+	// a boolean: `infra-error` means the gate never ran and `fail` means it ran
+	// and said no, and a human repairs those differently.
+	Status string `json:"status"`
+	Head   string `json:"head"`
+	At     int64  `json:"at"`
+	// Reason is Baseline.Out — the captured output, already capped by the writer.
+	Reason string `json:"reason"`
+}
+
+// runRedKind derives §10.2-vs-§12.1 from the run row alone.
+//
+// Baseline.Red() is the predicate and it is deliberately not re-implemented
+// here: it counts `unpublished` and `infra-error` as red, because none of them
+// is evidence the tree is good, and a view that read "not pass" as "fine" would
+// certify on the absence of a result.
+//
+// A `deadlocked` run with NO red baseline is a §12.1 deadlock. That fallback is
+// the right way round: a baseline fault always leaves its reason in the column,
+// so the absence of one is positive evidence of the other reading, whereas
+// defaulting to `baseline-fault` would invent a repo fault out of a decode
+// failure (DecodeBaselines degrades to an empty map on corrupt JSON).
+func runRedKind(r store.DelegationRun) (string, []BaselineFaultDTO) {
+	if r.Status != "deadlocked" {
+		return "", []BaselineFaultDTO{}
+	}
+	faults := []BaselineFaultDTO{}
+	bs := delegate.DecodeBaselines(r.Integration)
+	for _, repo := range sortedRepoLabels(bs) {
+		b := bs[repo]
+		if !b.Red() {
+			continue
+		}
+		faults = append(faults, BaselineFaultDTO{
+			Repo: repo, Status: string(b.Status), Head: b.Head, At: b.At, Reason: b.Out,
+		})
+	}
+	if len(faults) == 0 {
+		return RedDeadlock, faults
+	}
+	return RedBaselineFault, faults
+}
+
+// sortedRepoLabels keeps the fault list stable across polls: the source is a map
+// and an unsorted render would reshuffle the rows on every tick for no reason a
+// user can see (flagList's rule).
+func sortedRepoLabels(m map[string]delegate.Baseline) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // DelegationTaskDTO is one task's state chip and the facts behind it.
@@ -426,9 +521,20 @@ type DelegationTaskDTO struct {
 	CheckExit   int64  `json:"checkExit"`
 	CheckAt     int64  `json:"checkAt"`
 
-	Flags      []string `json:"flags"`
-	Terminal   bool     `json:"terminal"`
-	HoldsChild bool     `json:"holdsChild"`
+	Flags []string `json:"flags"`
+	// FlagDetails is the same set with §12.2's and §12.3's sentences attached,
+	// and a `loud` bit for the ones the spec requires be loud.
+	//
+	// In Go rather than in the frontend because the TUI must not say something
+	// different about the same badge, and because two of these sentences are
+	// BINDING wording: §12.3.3's drift says "changed since spawn" and never "the
+	// child wrote this" (the walk cannot tell the human's own edits from a
+	// child's), and §12.2's stalled is a LABEL — nothing was killed. A frontend
+	// dictionary would be the second place those get written, and the second
+	// place is where the hedge gets dropped.
+	FlagDetails []FlagDetailDTO `json:"flagDetails"`
+	Terminal    bool            `json:"terminal"`
+	HoldsChild  bool            `json:"holdsChild"`
 
 	// Needs names ARTIFACT ids, never task ids (§4.2) — rendered as text in 3a;
 	// slice 4 owes the graph.
@@ -447,6 +553,36 @@ type DelegationTaskDTO struct {
 	// becomes a load average. The recompute happens at the two moments §12.3
 	// names — every check run, and immediately before every merge.
 	Divergence DivergenceDTO `json:"divergence"`
+
+	// SeedOwed is §11.4's durable debt read straight from the column, and it is
+	// deliberately NOT the `seed-pending` flag.
+	//
+	// The two disagree, and the disagreement is a real one: Rendezvous.Seed sets
+	// the flag with the column, but §10.3's park (Integrator.park) writes the
+	// pending seed WITHOUT it — an integration send-back is therefore an owed
+	// delivery that carries no badge until something later tries to deliver it.
+	// A run list that only rendered the flag would show a parked child with
+	// nothing saying Loom owes it a message, which is the state §11.4 exists to
+	// make visible. This reads the debt itself; the flag stays rendered beside it
+	// because a flag that IS set also means a delivery has already been tried.
+	SeedOwed bool `json:"seedOwed"`
+
+	// SnapshotBaseline reports whether §12.3.3's out-of-worktree tripwire has a
+	// baseline for this task at all — i.e. whether delegation_tasks.spawn_snapshot
+	// was written at spawn.
+	//
+	// It exists so the view can render SnapshotDrift.NoBaseline DISTINCTLY from
+	// "no change". Those are an absence of EVIDENCE and evidence of ABSENCE, and
+	// showing the second when the truth is the first tells the human the child
+	// wrote nothing outside its worktree when in fact nobody ever looked.
+	//
+	// The DRIFT itself is deliberately not computed here. Comparing it means
+	// stat-walking every in-scope repo and integration worktree, per task, on
+	// every poll — the same load-average argument that keeps Divergence a read
+	// of the last recorded report rather than a fresh git call. §12.3 names the
+	// two moments the comparison actually happens (every check run, and
+	// immediately before every merge) and both are the runner's, not a view's.
+	SnapshotBaseline bool `json:"snapshotBaseline"`
 }
 
 // ProjectDelegation lists a project's runs and tasks with their state chips.
@@ -475,6 +611,7 @@ func (a *App) delegationRunDTO(r store.DelegationRun) DelegationRunDTO {
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 		Tasks: []DelegationTaskDTO{},
 	}
+	dto.RedKind, dto.BaselineFaults = runRedKind(r)
 	m, mErr := decodeSnapshot(r)
 	if mErr != nil {
 		dto.ManifestError = mErr.Error()
@@ -502,8 +639,15 @@ func taskDTO(row store.DelegationTask, t delegate.Task) DelegationTaskDTO {
 		SessionName: row.SessionName,
 		CheckStatus: row.CheckStatus, CheckExit: row.CheckExit, CheckAt: row.CheckAt,
 		Flags: flagList(row.Flags), Terminal: st.Terminal(), HoldsChild: st.HoldsAChild(),
-		Needs: []string{}, CheckArgv: []string{}, Blocked: row.BlockJSON,
+		FlagDetails: flagDetails(flagList(row.Flags)),
+		SeedOwed:    strings.TrimSpace(row.PendingSeed) != "",
+		Needs:       []string{}, CheckArgv: []string{}, Blocked: row.BlockJSON,
 		Divergence: divergenceDTO(delegate.DecodeDivergence(row.Divergence)),
+		// Presence of the column, not a decode: DecodeSnapshot degrades a corrupt
+		// value to an empty snapshot, so decoding here would report NoBaseline for
+		// a task that HAS one and would hide the corruption behind a plausible
+		// answer.
+		SnapshotBaseline: strings.TrimSpace(row.SpawnSnapshot) != "",
 	}
 	if t.Needs != nil {
 		d.Needs = t.Needs
@@ -525,6 +669,74 @@ func flagList(encoded string) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// FlagDetailDTO is one §13.2 flag with the sentence behind it.
+type FlagDetailDTO struct {
+	Name string `json:"name"`
+	Note string `json:"note"`
+	// Loud marks the flags the spec requires be rendered loudly rather than as
+	// one chip among several: the two that mean the isolation boundary may have
+	// been crossed, and the one that means a child may be parked forever.
+	Loud bool `json:"loud"`
+}
+
+// flagDetails attaches §12.2's and §12.3's wording to a flag set.
+//
+// An UNKNOWN flag is rendered with a note saying so rather than dropped:
+// DecodeFlags round-trips unknown flags on purpose so the vocabulary can grow
+// without a migration, and a badge this build cannot explain is still a badge a
+// newer Loom wrote for a reason.
+func flagDetails(flags []string) []FlagDetailDTO {
+	out := make([]FlagDetailDTO, 0, len(flags))
+	for _, f := range flags {
+		d := FlagDetailDTO{Name: f}
+		switch delegate.Flag(f) {
+		case delegate.FlagStalled:
+			d.Note = "no progress for 20m: the branch head has not moved and the transcript has " +
+				"not advanced. A LABEL — nothing was killed, and a stalled child may be mid-thought"
+		case delegate.FlagOrphaned:
+			d.Note = "the child session is gone. The worktree and the branch are untouched; " +
+				"re-spawn carries the context back by claude id"
+		case delegate.FlagDiverged:
+			d.Note = "committed files outside this task's declared paths. Non-blocking, and the " +
+				"merge gate demands an explicit acknowledgement of the list"
+		case delegate.FlagOutsideWrites:
+			d.Note = "files outside the worktree changed since this task was spawned. It says " +
+				"CHANGED SINCE SPAWN and not `the child wrote this`: the walk cannot tell the " +
+				"human's own edits from a child's"
+			d.Loud = true
+		case delegate.FlagStaleContract:
+			d.Note = "an interface artifact this task needs was re-fingerprinted after it was " +
+				"spawned. Mergeability is withdrawn; this is the only cross-repo break Loom can " +
+				"see without a cross-repo test, and it catches nothing else"
+			d.Loud = true
+		case delegate.FlagBlockMalformed:
+			d.Note = "this child's block declaration will not parse. Read the raw text: a " +
+				"swallowed block is a child parked forever with nobody told"
+			d.Loud = true
+		case delegate.FlagSeedPending:
+			d.Note = "a seed is durably owed to this child and has not been delivered. Owed, not " +
+				"failed — the retry is offered and the text is not lost"
+		case delegate.FlagConflict:
+			d.Note = "a producer's branch would not merge into this child's worktree. The task " +
+				"stays parked and the seed describes the conflict"
+		case delegate.FlagEnvSuspect:
+			d.Note = "the check failed with an environment shape (port in use, DB locked). A " +
+				"triage label on a FAILURE; it never turns one into a pass"
+		case delegate.FlagForced:
+			d.Note = "a human merged this past an unacknowledged divergence or a red gate. " +
+				"Recorded for the record and never read as permission"
+		case delegate.FlagFirstCheckGreen:
+			d.Note = "§2's M2: this task's first check after the child stopped was green"
+		case delegate.FlagFirstCheckRed:
+			d.Note = "§2's M2: this task's first check after the child stopped was red"
+		default:
+			d.Note = "no description in this build — a flag written by a newer Loom"
+		}
+		out = append(out, d)
+	}
 	return out
 }
 
@@ -1054,10 +1266,16 @@ func (a *App) RunTaskCheck(runID int64, taskID string) CheckResultDTO {
 	if res.Published {
 		a.recordArtifacts(runID, taskID, task, res)
 	}
-	// The ready set moves when a check lands — that is the whole of 3a's
-	// scheduler. Re-evaluated here rather than only on a poll so a green check
-	// makes its consumers approvable in the same gesture.
-	a.refreshReady(runID, m)
+	// The ready set moves when a check lands. Re-evaluated here rather than only
+	// on a poll so a green check makes its consumers approvable in the same
+	// gesture — and through the RUNNER, so this hand-pressed check and the poll
+	// loop cannot disagree about what became ready.
+	//
+	// A tick failure is not folded into the check result: the check ran, its
+	// output is what the human asked for, and losing it because the scheduler
+	// could not run afterwards is the worse outcome. It surfaces on the next
+	// poll's own report, which is where a stopped scheduler belongs.
+	_, _ = a.refreshReady(runID)
 
 	out := CheckResultDTO{
 		TaskID: taskID, Status: string(res.Status), Exit: res.Exit, Output: res.Output,
@@ -1133,12 +1351,17 @@ type MergeCommandDTO struct {
 
 // TaskMergeCommand returns the merge command as TEXT and never executes it.
 //
-// BINDING (§2): in 3a the merge gate is a human reading the check result and
-// running `git merge` themselves — Loom PRINTS the command and does not run it.
-// §§9-12's integration worktrees, Loom-run merge, force-merge and the
-// divergence acknowledgement are all deferred until 3a has run on a real
-// initiative, and there is deliberately no execute path here for one of them to
-// be smuggled in through.
+// It WAS 3a's whole merge gate (§2: "Loom prints the command and does not
+// execute it"). §10 is now built — MergeTask below runs the merge — and this is
+// kept beside it as the copy-me affordance for the human who wants to do it by
+// hand: a Loom with no ~/.loom, a repo mid-rebase, a merge someone wants to
+// watch. It holds no state, so keeping it costs nothing.
+//
+// What it must never become is a second merge path with different
+// preconditions. Everything §5.2 requires — the recomputed divergence, the
+// acknowledgement compared against what is on screen, the clean-tree refusal,
+// the `forced` record — lives on MergeTask; this function only ever produces a
+// string, and its warnings say what the executed gate would have refused.
 //
 // What is merged is the TASK'S OWN BRANCH (§10.4) and nothing else. The
 // integration branch is cumulative, so merging it would land every sibling that
@@ -1397,50 +1620,84 @@ func (a *App) StartDelegationRun(root, manifestName string) StartRunDTO {
 		return out
 	}
 
-	bases, err := delegate.PinBases(m)
+	// ONE creation path. This body used to duplicate Runner.Create — pin,
+	// marshal, insert, insert tasks, CAS to `running`, ensure the §10.1
+	// worktrees — and the duplicate had already diverged twice: the GUI copy
+	// carried an `integration` splice the Runner's did not, and the Runner's
+	// carried an Ensure the GUI's had to grow separately. Two creation paths
+	// mean the run a human starts and the run a test creates are different
+	// runs, which is the shape of bug that survives every test.
+	//
+	// BEHAVIOUR CHANGE, deliberate: Create needs a Runner, and a Runner needs
+	// ~/.loom. A Loom with no loom dir now REFUSES to create the run instead of
+	// creating one and reporting that its worktrees are missing. That is the
+	// honest outcome — every task of such a run would refuse at spawn, since a
+	// child's worktree lives under ~/.loom too — and it fails at the gesture
+	// rather than three clicks later.
+	r, err := a.delegationRunner()
 	if err != nil {
 		out.Error = err.Error()
 		return out
 	}
-	snapshot, err := json.Marshal(m)
-	if err != nil {
-		out.Error = err.Error()
+	// PinBases twice is a wasted `git rev-parse` per repo and is not worth a
+	// second return value on Create: the DTO echoes the pinned bases (§6.2
+	// step 1 is the one decision a run cannot revisit) and the run row stores
+	// them as JSON. Decoding the row back is the version that cannot disagree
+	// with what was stored — a second Pin could, if a repo moved between the
+	// two calls, and would then show the human a base no child will use.
+	run, err := r.Create(m)
+	if run.ID == 0 {
+		// Nothing was written. Create refuses before the insert for a hidden
+		// project, an unpinnable repo or a manifest with no project.
+		out.Error = errText(err, "the run was not created")
 		return out
 	}
-	baseJSON, err := json.Marshal(bases)
+	out.RunID, out.Slug = run.ID, run.Slug
+	out.Bases = decodeBases(run.BaseSHAs)
 	if err != nil {
+		// Created WITH FAULTS: §10.1's worktrees, or the `planning`→`running`
+		// CAS. Reported beside a usable run and never rolled back — deleting
+		// the row would also delete the record of why.
 		out.Error = err.Error()
-		return out
 	}
 
-	now := a.now().Unix()
-	run, err := a.st.InsertDelegationRun(m.Name, root, string(snapshot), string(baseJSON), now)
+	ready, tickErr := a.refreshReady(run.ID)
+	out.Ready = ready
+	if tickErr != nil {
+		// The run EXISTS and its tasks are written; what failed is the first
+		// scheduler pass. Reported on the same field as the `planning` fault
+		// above and for the same reason: a run whose scheduler never ran will
+		// show no ready tasks, and "nothing is ready yet" is indistinguishable
+		// from "the scheduler is not running" unless it says so.
+		out.Error = strings.TrimSpace(out.Error + " " + tickErr.Error())
+	}
+	return out
+}
+
+// errText renders an error for a DTO, falling back to a sentence when the
+// error is nil. A binding that returns a failure with an empty `error` string
+// renders as a silent no-op, which is the one failure mode the house rule
+// against invisible degradation exists to forbid.
+func errText(err error, fallback string) string {
 	if err != nil {
-		out.Error = err.Error()
+		return err.Error()
+	}
+	return fallback
+}
+
+// decodeBases reads `delegation_runs.base_shas` back into repo label → commit.
+//
+// Degrades to an EMPTY map, never nil: the DTO's `bases` is rendered as a list
+// and a null there is a JS error at the call site, whereas an empty map renders
+// as "no pinned bases" — which is exactly what an unreadable column means.
+func decodeBases(baseJSON string) map[string]string {
+	out := map[string]string{}
+	if strings.TrimSpace(baseJSON) == "" {
 		return out
 	}
-	out.RunID, out.Slug, out.Bases = run.ID, run.Slug, bases
-
-	// Tasks are inserted `pending`; refreshReady below promotes the ones with
-	// no unmet edges. Two steps rather than one so there is exactly ONE place
-	// that decides what is ready — a run whose creation seeded `ready` directly
-	// would have a second, subtly different scheduler in it.
-	for _, t := range m.Tasks {
-		if err := a.st.InsertDelegationTask(store.DelegationTask{
-			RunID: run.ID, TaskID: t.ID, State: string(delegate.StatePending),
-			RepoLabel: t.Repo, UpdatedAt: now,
-		}); err != nil {
-			out.Error = fmt.Sprintf("run %d created, but task %q could not be written: %v", run.ID, t.ID, err)
-			return out
-		}
+	if err := json.Unmarshal([]byte(baseJSON), &out); err != nil {
+		return map[string]string{}
 	}
-	if _, err := a.st.AdvanceDelegationRunCAS(run.ID, "planning", "running", now); err != nil {
-		// Not fatal: the tasks exist and the run is usable. Surfaced anyway,
-		// because a run stuck in `planning` is a status chip that will confuse
-		// whoever reads it later.
-		out.Error = err.Error()
-	}
-	out.Ready = a.refreshReady(run.ID, m)
 	return out
 }
 
@@ -1470,61 +1727,152 @@ func (a *App) RefreshDelegationRun(runID int64) DelegationDTO {
 	case !orchestrationVisible(a.resolver(), run.ProjectRoot):
 		return DelegationDTO{Hidden: true, Runs: []DelegationRunDTO{}}
 	}
-	m, mErr := decodeSnapshot(run)
-	if mErr == nil {
-		m.RepoPaths = a.repoPaths(run.ProjectRoot)
-		a.refreshReady(runID, m)
+	// The manifest is no longer decoded here to feed the scheduler: the runner
+	// re-derives it from the snapshot and re-resolves the repo paths itself
+	// (Runner.Repos), so a second decode would be a second place for the two to
+	// disagree about which repos a run is in scope of.
+	if _, tickErr := a.refreshReady(runID); tickErr != nil {
+		out.Error = tickErr.Error()
+	}
+	// Re-read: the tick moved rows, and returning the run row that was read
+	// before it would render one poll behind its own scheduler.
+	if fresh, ok, err := a.st.GetDelegationRun(runID); err == nil && ok {
+		run = fresh
 	}
 	out.Runs = append(out.Runs, a.delegationRunDTO(run))
 	return out
 }
 
-// refreshReady promotes pending → ready for every task §9.1's pure predicate
-// proposes, and returns the tasks that are ready AFTERWARDS.
+// refreshReady drives the ONE scheduler — delegate.Runner.Tick — and then READS
+// the rows it moved.
 //
-// The promotion is a CAS from `pending` per task, so it is idempotent, cannot
-// resurrect a task that has moved on, and is safe for two Loom instances to run
-// at once. A task Ready proposes that is already `ready` is simply not moved.
+// It used to promote pending → ready itself, over `Ready(BuildGraph(m), …)`.
+// That is the DECLARED graph, and it was a second scheduler with a defect the
+// first one does not have: it cannot see an approved amendment's edge (§11.3),
+// so a task the EFFECTIVE graph says is still waiting on `account-schema` was
+// offered for spawn by the view, gate and all. Tick step 3b owns the promotion
+// now, over the effective edge set, under the same per-task CAS.
 //
-// It PROPOSES ONLY. Nothing here spawns: §5.1's human gate is the only path to
-// a child, and a scheduler that could start work would make that sentence
-// false.
-func (a *App) refreshReady(runID int64, m delegate.Manifest) []string {
+// The read afterwards is deliberately a read of the STATE COLUMN and not of the
+// report's Ready bucket. Progress.Ready is what the graph proposes; the column
+// is what was actually written, and a CAS that lost a race to the other Loom
+// instance must not be rendered as an offer this instance can honour.
+//
+// A Tick that cannot even be built degrades to the read alone: nothing is
+// promoted, the run renders with no ready tasks, and the reason travels back to
+// the caller rather than being swallowed — see tickRun.
+func (a *App) refreshReady(runID int64) ([]string, error) {
+	_, tickErr := a.tickRun(runID)
 	rows, err := a.st.ListDelegationTasks(runID)
 	if err != nil {
-		return []string{}
+		return []string{}, errors.Join(tickErr, err)
 	}
-	states := make(map[string]delegate.TaskState, len(rows))
+	out := []string{}
 	for _, r := range rows {
-		states[r.TaskID] = delegate.TaskState(r.State)
-	}
-	// `published` is the artifact ids §8.3 has verified as committed, read from
-	// delegation_artifacts. Both halves of §9.1 are required — a producer that
-	// is verified but published nothing means the check did not cover the
-	// handoff — so an empty table correctly leaves every needs-bearing task
-	// pending rather than waving it through.
-	arts, err := a.st.ListDelegationArtifacts(runID)
-	if err != nil {
-		return []string{}
-	}
-	published := make(map[string]bool, len(arts))
-	for _, art := range arts {
-		published[art.ArtifactID] = true
-	}
-
-	now := a.now().Unix()
-	ready := delegate.Ready(delegate.BuildGraph(m), states, published)
-	out := make([]string, 0, len(ready))
-	for _, id := range ready {
-		if states[id] == delegate.StatePending || states[id] == "" {
-			if _, err := a.st.AdvanceTaskCAS(runID, id,
-				string(delegate.StatePending), string(delegate.StateReady), now); err != nil {
-				continue
-			}
+		if delegate.TaskState(r.State) == delegate.StateReady {
+			out = append(out, r.TaskID)
 		}
-		out = append(out, id)
 	}
-	return out
+	sort.Strings(out)
+	return out, tickErr
+}
+
+// tickRun runs one poll of §9's loop for a run.
+//
+// Errors are RETURNED rather than logged: a tick that cannot run is a run that
+// stopped moving, and the two ways that happens (no ~/.loom, no store) are both
+// permanent until a human does something. The per-task faults inside a tick are
+// a different class and stay on the report — one task's git failure must not
+// cost the other eleven their tick.
+func (a *App) tickRun(runID int64) (delegate.TickReport, error) {
+	r, err := a.delegationRunner()
+	if err != nil {
+		return delegate.TickReport{RunID: runID}, err
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return r.Tick(ctx, runID)
+}
+
+// delegationRunner builds §§9-12's runner once and keeps it.
+//
+// Repos is the field this whole seam exists for. Manifest.ProjectRoot and
+// Manifest.RepoPaths are `json:"-"` — resolved by the loader from the machine's
+// project table, deliberately never snapshotted, because a run that replayed a
+// stale absolute path would be worse than one that has none. So a manifest read
+// back out of manifest_json carries no repo paths at all, and every git call
+// downstream of it (worktree add, base pin, merge) would get "". The GUI holds
+// the projects resolver and is the only caller that can answer, which is exactly
+// why the Runner takes a function instead of importing internal/projects.
+//
+// Hidden is §14's ONE bit and it is the §3.1 predicate, not projects.go's: an
+// unattributable or unknown root reads as HIDDEN here, so a root Loom cannot
+// place suppresses new spawns rather than authorizing them. It never routes a
+// CHILD through the resolver — child visibility is the Attributor's (§14.1), and
+// a raw resolver would fail closed on every worktree cwd and hide the whole run.
+func (a *App) delegationRunner() (*delegate.Runner, error) {
+	a.delegMu.Lock()
+	defer a.delegMu.Unlock()
+	if a.deleg != nil {
+		return a.deleg, nil
+	}
+	w, err := a.worktrees()
+	if err != nil {
+		return nil, err
+	}
+	layout := delegate.NewLayout(a.loomDir)
+	checker := &delegate.Checker{}
+	detector := &delegate.Detector{Layout: layout, Store: a.st}
+	r := &delegate.Runner{
+		Store:     a.st,
+		Layout:    layout,
+		Checker:   checker,
+		Worktrees: w,
+		Detector:  detector,
+		Integrator: &delegate.Integrator{
+			Store: a.st, Layout: layout, Checker: checker,
+			// Repos is left nil: Integrator falls back to Manifest.RepoPaths,
+			// which the Runner re-resolves per run through Repos below. One
+			// answer, from one place, per project — a map pinned here would be
+			// whichever project happened to be open when the Runner was built.
+			Worktrees: w, Blocks: detector, Now: a.now,
+		},
+		Rendezvous: &delegate.Rendezvous{
+			Store: a.st, Layout: layout, Detector: detector,
+			Width: launchCols, Height: launchRows, Now: a.now,
+		},
+		Watchdogs: &delegate.Watchdogs{Store: a.st, Worktrees: w, Layout: layout, Now: a.now},
+		// The durable log lives in delegation_amendments and *store.Store
+		// implements all three operations, so the nil interface is the ordinary
+		// case: Runner.amendments falls through to the store. It is left nil
+		// rather than wrapped so there is no second implementation to keep in
+		// step with the CAS.
+		Hidden: func(root string) bool { return !orchestrationVisible(a.resolver(), root) },
+		Repos:  a.repoPaths,
+		Now:    a.now,
+	}
+	// The two seeding seams are set only when they EXIST. A nil *tmux.Client
+	// stored in the Sender interface is a non-nil interface holding nil, which
+	// turns "no terminal wired" into a panic inside a poll tick instead of the
+	// visible ErrSeedUndelivered the seed path is built to report.
+	if a.tm != nil {
+		r.Rendezvous.Tmux = a.tm
+	}
+	if a.launcher != nil {
+		r.Rendezvous.Resumer = a.launcher
+		r.Rendezvous.ClaudeConfigDir = a.launcher.ClaudeConfigDir
+		// Only the LAUNCH needs a launcher, and a Loom that cannot start tmux
+		// must still tick: checks, blocks, integration and the watchdogs are all
+		// reachable without one. A nil Spawner refuses at Approve with a reason.
+		r.Spawner = &delegate.Spawner{
+			Store: a.st, Launcher: a.launcher, Worktrees: w,
+			Width: launchCols, Height: launchRows, Now: a.now,
+		}
+	}
+	a.deleg = r
+	return r, nil
 }
 
 // --- slice 3a: §5.1's gate, rendered ---------------------------------------
@@ -1696,4 +2044,1605 @@ func (a *App) DiscardTaskWorktree(runID int64, taskID string, force bool) Discar
 			"(it is %s)", taskID, row.State)
 	}
 	return out
+}
+
+// --- §§9-12: the tick, its findings, and §11.3's offers ---------------------
+
+// TickReportDTO is one poll of §9's loop, rendered.
+//
+// Every field on delegate.TickReport is here, and that is the point rather than
+// completeness for its own sake: "a tick that did something invisible is a tick
+// that will be debugged by reading source". A DTO that carried only the happy
+// buckets would drop the suppressions, the watchdog findings and the per-task
+// faults — which are precisely the three things a human looking at a run that is
+// not moving needs.
+type TickReportDTO struct {
+	Hidden bool  `json:"hidden"`
+	RunID  int64 `json:"runId"`
+	At     int64 `json:"at"`
+
+	// §9.3's buckets. Five and not four: `waiting` is a task whose producer has
+	// not finished, and folding it into Unclassified — which the deadlock
+	// detector renders as "Loom has a bug" — would make the loud bucket
+	// non-empty on every healthy multi-task run.
+	Ready        []string `json:"ready"`
+	Waiting      []string `json:"waiting"`
+	InFlight     []string `json:"inFlight"`
+	Blocked      []string `json:"blocked"`
+	TerminalIDs  []string `json:"terminal"`
+	Unclassified []string `json:"unclassified"`
+
+	// What the tick DID, named per task. Empty lists, never nulls: the frontend
+	// renders a list and a null is a crash there.
+	Checked    []string `json:"checked"`
+	Integrated []string `json:"integrated"`
+	Resumed    []string `json:"resumed"`
+	Orphaned   []string `json:"orphaned"`
+
+	// Suppressed is every action Loom would have taken and did not, with the
+	// reason in the human's words. Rendered GREYED WITH THE REASON and never
+	// dropped — a suppressed spawn that renders as nothing is indistinguishable
+	// from a scheduler that is broken (§14's table says the same thing).
+	Suppressed []SuppressedActionDTO `json:"suppressed"`
+	// Findings is §12.2's watchdog pass. NOTHING HERE KILLS ANYTHING: the
+	// actions are flag, offer-retry, resolve and stop-spawns, and a `stalled`
+	// child is a label on a child that is still running.
+	Findings []FindingDTO `json:"findings"`
+	// Blocks is what §11.2's detector saw this tick, malformed ones included.
+	Blocks []BlockEventDTO `json:"blocks"`
+
+	// Offers is §11.3's amendment log, UNAPPROVED — the standing offers. It is
+	// the log rather than this tick's proposals because the durable row is what
+	// makes the offer survive a restart, and a view that rendered only what the
+	// current tick re-proposed would lose every offer made before Loom last
+	// started.
+	Offers []AmendmentDTO `json:"offers"`
+	// Granted is the approved half, for the record. §2's M3 counts BOTH — a
+	// dependency the human refused was still hit by a child that could not
+	// proceed without it — so the two lists are shown, never summed into one.
+	Granted []AmendmentDTO `json:"granted"`
+	// Declined is the third, and it exists for the same reason Granted does: the
+	// row survives the decision, so the decision has to be visible. A rejected
+	// amendment that simply disappeared would be re-decided by the next human to
+	// read the run — and, because `propose` will not re-offer it, re-decided
+	// against an offer that is no longer on the screen at all.
+	Declined []AmendmentDTO `json:"declined"`
+
+	Deadlock *DeadlockDTO `json:"deadlock"`
+
+	// Measurements is §2's M2/M3 and Verdict is §2's own sentence about them.
+	// On the run view and not behind a debug flag: it is the number the decision
+	// to keep or kill this whole approach is made on, and a number that has to be
+	// asked for is one that gets reconstructed by hand from a run nobody kept.
+	Measurements MeasurementsDTO `json:"measurements"`
+	Verdict      string          `json:"verdict"`
+
+	// Errs is the per-task faults this tick collected. One task's git failure
+	// must not cost the other eleven their tick, so they are carried; carried
+	// and not rendered is the same as swallowed, so they are here.
+	Errs []TaskErrorDTO `json:"errs"`
+	// Error is the tick failing WHOLESALE — no ~/.loom, no store, an unreadable
+	// run. Distinct from Errs for the reason those two classes differ: this one
+	// means nothing moved at all.
+	Error string `json:"error"`
+}
+
+type SuppressedActionDTO struct {
+	TaskID string `json:"taskId"`
+	Action string `json:"action"`
+	Reason string `json:"reason"`
+}
+
+type FindingDTO struct {
+	TaskID string `json:"taskId"`
+	Kind   string `json:"kind"`
+	// Action is what the finding ASKS FOR, carried verbatim so the frontend
+	// cannot invent a harsher one. `offer-retry` is an affordance the human
+	// presses; it is never a retry that already happened.
+	Action string `json:"action"`
+	Flag   string `json:"flag"`
+	Detail string `json:"detail"`
+	At     int64  `json:"at"`
+}
+
+type BlockEventDTO struct {
+	TaskID string `json:"taskId"`
+	Kind   string `json:"kind"`
+	// Author is "loom" for a §9.2 producer conflict or a §10.3 integration
+	// failure, empty for a child's own declaration. Rendered, because "Loom
+	// stopped this" and "the child asked for something" are different sentences.
+	Author     string `json:"author"`
+	Summary    string `json:"summary"`
+	Detail     string `json:"detail"`
+	ResumeWhen string `json:"resumeWhen"`
+	Artifact   string `json:"artifact"`
+	At         int64  `json:"at"`
+	// Cleared is a block.json that DISAPPEARED. An event because a task stuck in
+	// `blocked` with no declaration on disk is otherwise indistinguishable from
+	// one that is legitimately parked.
+	Cleared bool `json:"cleared"`
+	// Malformed is §11.2's loud case, with the raw text. A swallowed block is a
+	// child parked forever with nobody told — the worst outcome this path has —
+	// so the raw content is rendered rather than the parse error alone.
+	Malformed bool   `json:"malformed"`
+	Raw       string `json:"raw"`
+	ParseErr  string `json:"parseError"`
+}
+
+// AmendmentDTO is one §11.3 amendment as an OFFER.
+//
+// Approved is on the wire because the difference between a proposal and a
+// granted edge is the entire mechanism: Loom proposes, the human grants, and an
+// amendment is INERT until then. A view that rendered a proposal as a done deed
+// would show an edge the effective graph does not have.
+type AmendmentDTO struct {
+	Seq  int64  `json:"seq"`
+	Kind string `json:"kind"`
+	// Task is the task the amendment is ABOUT, Producer the task that would
+	// satisfy it (for a re-plan, Loom's SUGGESTION of which task should produce
+	// the artifact — a suggestion, rendered as one, never applied).
+	Task     string   `json:"task"`
+	Artifact string   `json:"artifact"`
+	Producer string   `json:"producer"`
+	Paths    []string `json:"paths"`
+	// Reason is the child's own block summary, carried so the offer still reads
+	// after the worktree is gone.
+	Reason     string `json:"reason"`
+	CreatedAt  int64  `json:"createdAt"`
+	ApprovedAt int64  `json:"approvedAt"`
+	Approved   bool   `json:"approved"`
+	// RejectedAt/Rejected is §11.3's durable NO (migration v16). Carried even
+	// though a rejected amendment leaves the Offers list, because the Declined
+	// list renders it: a decision a human made an hour ago and can no longer see
+	// is a decision they will make again.
+	RejectedAt int64 `json:"rejectedAt"`
+	Rejected   bool  `json:"rejected"`
+	// Replan is §11.3's second branch: the block names an artifact NOBODY
+	// produces, so there is no edge to add and there is nothing to approve. It
+	// is a separate bit and not an inference at the call site because the two
+	// render completely differently — an edge is a checkbox, a re-plan is a
+	// conversation with the plan's author.
+	Replan bool `json:"replan"`
+}
+
+type DeadlockDTO struct {
+	Shape string `json:"shape"`
+	// Cycle is the wait-for path, as `from → to (artifact)` edges.
+	Cycle []EdgeDTO `json:"cycle"`
+	// Owed is the actionable list for a run stopped on human decisions, oldest
+	// first — the decision that has cost the most is the one to show at the top.
+	Owed  []OwedDecisionDTO `json:"owed"`
+	Stuck []string          `json:"stuck"`
+	At    int64             `json:"at"`
+}
+
+type EdgeDTO struct {
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Artifact string `json:"artifact"`
+}
+
+type OwedDecisionDTO struct {
+	TaskID  string `json:"taskId"`
+	Kind    string `json:"kind"`
+	Summary string `json:"summary"`
+	Since   int64  `json:"since"`
+}
+
+// MeasurementsDTO is §2's kill criterion, per run.
+//
+// The numerators and denominators travel, not just the two ratios: §2's rule is
+// "M3 ≤ 1 per 4 tasks and M2 ≥ 0.5 on an initiative of at least 4 tasks", and a
+// ratio without its counts cannot be checked against that sentence by the person
+// it is addressed to.
+type MeasurementsDTO struct {
+	Tasks           int      `json:"tasks"`
+	UnforeseenTotal int      `json:"unforeseenTotal"`
+	PerFourTasks    float64  `json:"perFourTasks"`
+	GreenFirstTime  []string `json:"greenFirstTime"`
+	RedFirstTime    []string `json:"redFirstTime"`
+	// Unmeasured are the tasks with no first-check verdict yet. Named rather
+	// than counted, because they are what makes the numbers PROVISIONAL and the
+	// human can go and look at them.
+	Unmeasured []string `json:"unmeasured"`
+	Fraction   float64  `json:"fraction"`
+	// Enough is §2's "at least 4 tasks": under it the run decides nothing, which
+	// is a different statement from failing.
+	Enough      bool `json:"enough"`
+	Provisional bool `json:"provisional"`
+	M2Met       bool `json:"m2Met"`
+	M3Met       bool `json:"m3Met"`
+}
+
+type TaskErrorDTO struct {
+	TaskID string `json:"taskId"`
+	Stage  string `json:"stage"`
+	Error  string `json:"error"`
+}
+
+// TickDelegationRun runs one poll of §9's loop and returns everything it saw.
+//
+// It is the run view's own clock. NOTHING HERE SPAWNS — Tick computes what is
+// ready and the human presses approve (§16), and a poll that could start work is
+// how a night's quota disappears with nothing on screen.
+func (a *App) TickDelegationRun(runID int64) TickReportDTO {
+	out := emptyTickDTO(runID)
+	if a.st == nil {
+		out.Error = "delegation unavailable: no store"
+		return out
+	}
+	run, ok, err := a.st.GetDelegationRun(runID)
+	switch {
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	case !ok:
+		out.Error = fmt.Sprintf("no such delegation run: %d", runID)
+		return out
+	case !orchestrationVisible(a.resolver(), run.ProjectRoot):
+		// The bare marker. §14's table keeps the run's own clock going — checks
+		// and seed deliveries are in-flight work and are not suppressed — and it
+		// is the OUTPUT that must not cross, which is this return.
+		return TickReportDTO{Hidden: true}
+	}
+	rep, err := a.tickRun(runID)
+	if err != nil {
+		out.Error = err.Error()
+	}
+	return a.tickDTO(runID, rep, out.Error)
+}
+
+// tickDTO flattens the report. Split from the binding so the amendment log read
+// — which is a second query — happens in one place for both the tick and the
+// approve path, and cannot answer differently between them.
+func (a *App) tickDTO(runID int64, rep delegate.TickReport, errText string) TickReportDTO {
+	out := emptyTickDTO(runID)
+	out.Error = errText
+	if !rep.At.IsZero() {
+		out.At = rep.At.Unix()
+	}
+	out.Ready = orEmptyIDs(rep.Progress.Ready)
+	out.Waiting = orEmptyIDs(rep.Progress.Waiting)
+	out.InFlight = orEmptyIDs(rep.Progress.InFlight)
+	out.Blocked = orEmptyIDs(rep.Progress.Blocked)
+	out.TerminalIDs = orEmptyIDs(rep.Progress.Terminal)
+	out.Unclassified = orEmptyIDs(rep.Progress.Unclassified)
+	out.Checked = orEmptyIDs(rep.Checked)
+	out.Integrated = orEmptyIDs(rep.Integrated)
+	out.Resumed = orEmptyIDs(rep.Resumed)
+	out.Orphaned = orEmptyIDs(rep.Orphaned)
+
+	for _, s := range rep.Suppressed {
+		out.Suppressed = append(out.Suppressed, SuppressedActionDTO{
+			TaskID: s.TaskID, Action: s.Action, Reason: s.Reason})
+	}
+	for _, f := range rep.Findings {
+		// The `unflag` action is deliberately not rendered: it is a badge being
+		// CLEARED because a live child is bound to the task again, and putting
+		// "orphaned" on screen next to a task that is working would report the
+		// absence of a problem as a problem.
+		if f.Action == delegate.ActionUnflag {
+			continue
+		}
+		out.Findings = append(out.Findings, FindingDTO{
+			TaskID: f.TaskID, Kind: string(f.Kind), Action: string(f.Action),
+			Flag: string(f.Flag), Detail: f.Detail, At: unixOrZero(f.At),
+		})
+	}
+	for _, b := range rep.Blocks {
+		out.Blocks = append(out.Blocks, blockEventDTO(b))
+	}
+	for _, am := range a.amendmentLog(runID) {
+		dto := amendmentDTO(am)
+		switch {
+		case dto.Approved:
+			out.Granted = append(out.Granted, dto)
+		case dto.Rejected:
+			// NOT an offer. This is the whole point of v16: before it, a refused
+			// amendment was indistinguishable from one nobody had read, so it
+			// came back on every poll forever.
+			out.Declined = append(out.Declined, dto)
+		default:
+			out.Offers = append(out.Offers, dto)
+		}
+	}
+	if rep.Deadlock != nil {
+		out.Deadlock = deadlockDTO(rep.Deadlock)
+	}
+	out.Measurements = measurementsDTO(rep.Measurements)
+	out.Verdict = rep.Measurements.Verdict()
+	for _, e := range rep.Errs {
+		msg := ""
+		if e.Err != nil {
+			msg = e.Err.Error()
+		}
+		out.Errs = append(out.Errs, TaskErrorDTO{TaskID: e.TaskID, Stage: e.Stage, Error: msg})
+	}
+	return out
+}
+
+// amendmentLog reads §11.3's durable log through the runner when there is one,
+// and straight from the store when there is not.
+//
+// The fallback is not a duplicate scheduler — it is the same read Runner
+// performs, and it exists so a Loom that cannot build a runner (no ~/.loom)
+// still SHOWS the offers it has already recorded. An offer that vanishes because
+// a seam is unwired is an offer the human never answers.
+func (a *App) amendmentLog(runID int64) []delegate.Amendment {
+	if r, err := a.delegationRunner(); err == nil {
+		return r.AmendmentLog(runID)
+	}
+	rows, err := a.st.ListDelegationAmendments(runID)
+	if err != nil {
+		return nil
+	}
+	out := make([]delegate.Amendment, 0, len(rows))
+	for _, row := range rows {
+		// A body that will not parse still RENDERS, with its kind and seq
+		// intact: an invisible amendment is an edge the human cannot see.
+		am, _ := delegate.DecodeAmendmentBody(delegate.AmendmentKind(row.Kind), row.Body)
+		am.RunID, am.Seq = row.RunID, row.Seq
+		am.CreatedAt = time.Unix(row.CreatedAt, 0)
+		if row.ApprovedAt != 0 {
+			am.ApprovedAt = time.Unix(row.ApprovedAt, 0)
+		}
+		if row.RejectedAt != 0 {
+			am.RejectedAt = time.Unix(row.RejectedAt, 0)
+		}
+		out = append(out, am)
+	}
+	return out
+}
+
+// AmendmentResultDTO is the outcome of §11.3's grant.
+type AmendmentResultDTO struct {
+	Hidden bool `json:"hidden"`
+	// Approved is the CAS having moved the row THIS call. False with an empty
+	// Error never happens; false with an Error is either a refusal (a cycle) or
+	// the row already being granted, and those read differently.
+	Approved bool `json:"approved"`
+	// Claimed says the amendment was ALREADY approved — by the other Loom
+	// instance, or by a second press of the same button. Not an error to retry:
+	// the amendment is granted and what the caller is holding is a stale screen.
+	Claimed bool   `json:"claimed"`
+	Error   string `json:"error"`
+	// Tick is the run re-ticked after the grant, so the new edge's consequences
+	// — a task that is now waiting, a block that can now be resumed — are on
+	// screen in the same gesture rather than one poll later.
+	Tick TickReportDTO `json:"tick"`
+}
+
+// ApproveDelegationAmendment is §11.3's HUMAN GRANT, and it is the only path
+// from a proposal to an edge.
+//
+// Loom proposes and never applies: propose() appends the row unapproved on every
+// tick, Effective ignores an unapproved amendment entirely, and this is the
+// press. That shape is why the amendment log can be written from a poll loop at
+// all — a row that changes nothing until a human moves it is safe to re-derive.
+//
+// The cycle check runs against the AMENDED graph before the CAS (§11.3's last
+// rule): an amendment that closes a loop turns a loud block into a silent
+// deadlock, so it is refused with the cycle named.
+func (a *App) ApproveDelegationAmendment(runID, seq int64) AmendmentResultDTO {
+	out := AmendmentResultDTO{Tick: emptyTickDTO(runID)}
+	if a.st == nil {
+		out.Error = "delegation unavailable: no store"
+		return out
+	}
+	run, ok, err := a.st.GetDelegationRun(runID)
+	switch {
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	case !ok:
+		out.Error = fmt.Sprintf("no such delegation run: %d", runID)
+		return out
+	case !orchestrationVisible(a.resolver(), run.ProjectRoot):
+		// The bare marker, and no write. Granting an amendment is a change to
+		// the plan of a project this screen may not name.
+		return AmendmentResultDTO{Hidden: true, Tick: TickReportDTO{Hidden: true}}
+	}
+	r, err := a.delegationRunner()
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	switch err := r.ApproveAmendment(runID, seq); {
+	case err == nil:
+		out.Approved = true
+	case errors.Is(err, delegate.ErrAmendmentClaimed):
+		// Not a failure the caller retries: the edge exists. Said out loud
+		// anyway, because the button they pressed did nothing and a silent
+		// no-op reads as a broken button.
+		out.Claimed, out.Error = true, err.Error()
+	default:
+		out.Error = err.Error()
+	}
+	rep, tickErr := a.tickRun(runID)
+	tickText := ""
+	if tickErr != nil {
+		tickText = tickErr.Error()
+	}
+	out.Tick = a.tickDTO(runID, rep, tickText)
+	return out
+}
+
+func emptyTickDTO(runID int64) TickReportDTO {
+	return TickReportDTO{
+		RunID: runID,
+		Ready: []string{}, Waiting: []string{}, InFlight: []string{},
+		Blocked: []string{}, TerminalIDs: []string{}, Unclassified: []string{},
+		Checked: []string{}, Integrated: []string{}, Resumed: []string{}, Orphaned: []string{},
+		Suppressed: []SuppressedActionDTO{}, Findings: []FindingDTO{},
+		Blocks: []BlockEventDTO{}, Offers: []AmendmentDTO{}, Granted: []AmendmentDTO{},
+		Declined: []AmendmentDTO{},
+		Errs:     []TaskErrorDTO{},
+	}
+}
+
+// orEmptyIDs keeps a nil slice off the wire. A JSON null where the frontend
+// expects a list is a crash there, and every list on these DTOs is rendered.
+func orEmptyIDs(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
+}
+
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+func blockEventDTO(b delegate.BlockEvent) BlockEventDTO {
+	out := BlockEventDTO{TaskID: b.TaskID, Cleared: b.Cleared}
+	if b.Malformed != nil {
+		out.Malformed = true
+		out.Raw = b.Malformed.Raw
+		if b.Malformed.Err != nil {
+			out.ParseErr = b.Malformed.Err.Error()
+		}
+		if out.TaskID == "" {
+			out.TaskID = b.Malformed.TaskID
+		}
+		return out
+	}
+	out.Kind = string(b.Block.Kind)
+	out.Author = string(b.Block.Author)
+	out.Summary = b.Block.Summary
+	out.Detail = b.Block.Detail
+	out.ResumeWhen = b.Block.ResumeWhen
+	out.Artifact = b.Block.Need.Artifact
+	out.At = unixOrZero(b.Block.At)
+	return out
+}
+
+func amendmentDTO(a delegate.Amendment) AmendmentDTO {
+	out := AmendmentDTO{
+		Seq: a.Seq, Kind: string(a.Kind), Task: a.Task, Artifact: a.Artifact,
+		Producer: a.From, Paths: []string{}, Reason: a.Reason,
+		CreatedAt: unixOrZero(a.CreatedAt), ApprovedAt: unixOrZero(a.ApprovedAt),
+		Approved:   a.Accepted(),
+		RejectedAt: unixOrZero(a.RejectedAt), Rejected: a.Rejected(),
+		// Derived from the KIND, which is the durable discriminator, rather than
+		// carried from the in-memory Proposal: an offer read back after a restart
+		// must render as the same thing it was when it was made.
+		Replan: a.Kind == delegate.AmendReplan,
+	}
+	if a.Paths != nil {
+		out.Paths = a.Paths
+	}
+	return out
+}
+
+func deadlockDTO(d *delegate.Deadlock) *DeadlockDTO {
+	out := &DeadlockDTO{
+		Shape: string(d.Shape), Cycle: []EdgeDTO{}, Owed: []OwedDecisionDTO{},
+		Stuck: orEmptyIDs(d.Stuck), At: unixOrZero(d.At),
+	}
+	for _, e := range d.Cycle {
+		out.Cycle = append(out.Cycle, EdgeDTO{From: e.From, To: e.To, Artifact: e.Artifact})
+	}
+	for _, o := range d.Owed {
+		out.Owed = append(out.Owed, OwedDecisionDTO{
+			TaskID: o.TaskID, Kind: string(o.Kind), Summary: o.Summary, Since: unixOrZero(o.Since)})
+	}
+	return out
+}
+
+// RunDeadlockDTO is §12.1's finding on the POLL path.
+//
+// Deadlock is nil when the run is progressing, and that is the ordinary answer.
+// Nil is distinguishable from "we could not tell" because Error carries the
+// second case: a run whose deadlock could not be computed must not render as a
+// healthy one.
+type RunDeadlockDTO struct {
+	Hidden   bool         `json:"hidden"`
+	RunID    int64        `json:"runId"`
+	Deadlock *DeadlockDTO `json:"deadlock"`
+	Error    string       `json:"error"`
+}
+
+// RunDeadlock is §12.1's wait-for cycle, READ-ONLY.
+//
+// It exists because the only other way to reach a DeadlockDTO was
+// TickDelegationRun, which is a writer: it polls block files, runs checks,
+// performs integrations, promotes pending → ready and flips the run's status. A
+// view that had to call it every 1.5s to render WHY a run is red would be
+// advancing the run in order to draw it — and §12.1 asks for the cycle on the
+// poll. This runs delegate's detector over already-persisted state and writes
+// nothing.
+//
+// The verdict can therefore be one tick behind the runner's, and that is the
+// correct trade rather than a defect: §14 already discloses that status lags the
+// truth by up to one poll, and a deadlock that resolves is resolved by a tick
+// this method deliberately does not perform.
+func (a *App) RunDeadlock(runID int64) RunDeadlockDTO {
+	out := RunDeadlockDTO{RunID: runID}
+	if a.st == nil {
+		out.Error = "delegation unavailable: no store"
+		return out
+	}
+	run, ok, err := a.st.GetDelegationRun(runID)
+	switch {
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	case !ok:
+		out.Error = fmt.Sprintf("no such delegation run: %d", runID)
+		return out
+	case !orchestrationVisible(a.resolver(), run.ProjectRoot):
+		// §3.1's bare marker. A deadlock names tasks and artifacts, which are
+		// agent-authored and routinely name the client; there is no label-free
+		// version of this payload worth sending.
+		return RunDeadlockDTO{Hidden: true}
+	}
+	r, err := a.delegationRunner()
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	d, err := r.Deadlock(runID)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	if d != nil {
+		out.Deadlock = deadlockDTO(d)
+	}
+	return out
+}
+
+func measurementsDTO(m delegate.Measurements) MeasurementsDTO {
+	return MeasurementsDTO{
+		Tasks: m.Tasks, UnforeseenTotal: m.UnforeseenTotal, PerFourTasks: m.PerFourTasks,
+		GreenFirstTime: orEmptyIDs(m.GreenFirstTime), RedFirstTime: orEmptyIDs(m.RedFirstTime),
+		Unmeasured: orEmptyIDs(m.Unmeasured), Fraction: m.Fraction,
+		Enough: m.Enough, Provisional: m.Provisional, M2Met: m.M2Met, M3Met: m.M3Met,
+	}
+}
+
+// --- §10: the integration gate, and it EXECUTES now -------------------------
+
+// §10 is the section 3a deferred and it is the one the evidence calls
+// load-bearing. Three bindings, in the order a human meets them:
+//
+//	IntegrateTask  — run §10.2's sequence for one verified task and say what
+//	                 happened, including WHICH of §10.2's two attributions it is.
+//	TaskMergeGate  — §5.2's gate: what will land, what diverged, why the button
+//	                 is refused. No writes.
+//	MergeTask      — §10.4, executed, behind the acknowledgement the gate handed
+//	                 out. This is the only thing in Loom that writes to a branch
+//	                 the user owns.
+//
+// The human approval stays IN FRONT of the merge and is not a boolean: the ack
+// lists travel back from the gate and are compared against a freshly computed
+// divergence (delegate.Runner.Merge), so a preview read five minutes ago cannot
+// authorize what is there now.
+
+// IntegrationResultDTO is one pass of §10.2, rendered.
+//
+// Stage is carried because "the integration is red" is ambiguous and the
+// remedies are completely different — a conflict is a human decision, a
+// bootstrap failure is usually §6.4's environment, a per-repo failure is the
+// task, a cross failure may be either side of the seam.
+type IntegrationResultDTO struct {
+	Hidden bool   `json:"hidden"`
+	TaskID string `json:"taskId"`
+	Repo   string `json:"repo"`
+	// Ran distinguishes "the sequence executed" from every other outcome. A DTO
+	// with a green-looking zero value and no such bit would render a refusal as
+	// a pass at stage "".
+	Ran bool `json:"ran"`
+	// Busy is §10.2's run-wide serialization refusing, and it is NOT a fault:
+	// one integration at a time, run-wide, because a cross check reads several
+	// repos' integration worktrees at once and must not see one mid-merge. The
+	// answer is "next tick", so it is a distinct bit rather than an error string
+	// a frontend would paint red.
+	Busy bool `json:"busy"`
+
+	Stage  string `json:"stage"`
+	Status string `json:"status"`
+	// Blame is §10.2's attribution table, verbatim: `task` or `baseline`.
+	// BlameNote is the same fact in the sentence the human needs, because the
+	// two have OPPOSITE remedies and a bare word on a chip does not carry that.
+	Blame     string `json:"blame"`
+	BlameNote string `json:"blameNote"`
+	// RunLevelFault is Blame == baseline hoisted to a bit: it means the run row
+	// goes red, spawning stops and NO TASK IS BLAMED. A frontend that had to
+	// compare a string to decide whether to blame a child is a frontend that
+	// will one day blame the wrong one.
+	RunLevelFault bool `json:"runLevelFault"`
+
+	// CrossCheck names the failing `integration.cross` entry (§10.5's honest
+	// part); Conflicts is the file list §10.3 sends back to the child.
+	CrossCheck string   `json:"crossCheck"`
+	Conflicts  []string `json:"conflicts"`
+	// Pre is what the task was integrated ON TOP OF, and it is on the result
+	// even when the pass was green: it is the only way to say that. Head is the
+	// integration head after a green pass and is empty after a red one —
+	// §10.2's reset means a failed pass leaves nothing behind.
+	Pre    string `json:"pre"`
+	Head   string `json:"head"`
+	Output string `json:"output"`
+	RanAt  int64  `json:"ranAt"`
+	// Warnings is everything that happened which did not change the verdict and
+	// which a human must still see — the loudest being "this repo declares no
+	// per-repo gate", which is a REAL degradation: the task's own check becomes
+	// the only evidence behind §5.2.
+	Warnings []string `json:"warnings"`
+
+	// State and RunStatus are read back AFTER the pass rather than derived from
+	// the result, for taskDTO's reason: a second place that maps a verdict onto
+	// a state is a second place to get it wrong, and §10.2's transitions are
+	// CASes that can lose to the other Loom instance.
+	State     string `json:"state"`
+	RunStatus string `json:"runStatus"`
+	Error     string `json:"error"`
+}
+
+// IntegrateTask runs §10.2 for one task and reports the pass.
+//
+// The sequence is Loom's, not this file's: Integrator.Integrate owns the claim,
+// the reset-on-red and the attribution, and this binding exists so a human can
+// ask for a pass now rather than waiting for the tick that would have. Both
+// paths call the same function — a second sequence spelled out here would be a
+// second definition of what "green" means, and §5.2 reads it.
+//
+// Hidden projects get the bare marker and NO execution, which differs from
+// RunTaskCheck's neighbouring rule on purpose. A check is the run's clock (§14's
+// table keeps it running while hidden); an integration pass ends in a state
+// transition that offers a MERGE gate, and §14 suppresses merges on a hidden
+// project because a merge is human-gated work whose gate cannot be shown.
+func (a *App) IntegrateTask(runID int64, taskID string) IntegrationResultDTO {
+	out := emptyIntegrationDTO(taskID)
+	run, m, _, task, err := a.runAndTask(runID, taskID)
+	switch {
+	case errors.Is(err, errHiddenProject):
+		return IntegrationResultDTO{Hidden: true}
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	}
+	out.Repo = task.Repo
+	r, err := a.delegationRunner()
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	res, err := r.Integrator.Integrate(ctx, run, m, task)
+	switch {
+	case errors.Is(err, delegate.ErrIntegrationBusy):
+		out.Busy = true
+	case err != nil:
+		out.Error = err.Error()
+	default:
+		out.Ran = true
+	}
+	// The partial result is rendered even on error. sequence() fills Stage and
+	// Conflicts before it returns, and dropping them because the call also
+	// reported an error would hide the one thing that says WHERE it stopped.
+	out = fillIntegrationDTO(out, res)
+	out.State, out.RunStatus = a.taskAndRunState(runID, taskID)
+	return out
+}
+
+func emptyIntegrationDTO(taskID string) IntegrationResultDTO {
+	return IntegrationResultDTO{TaskID: taskID, Conflicts: []string{}, Warnings: []string{}}
+}
+
+func fillIntegrationDTO(out IntegrationResultDTO, res delegate.IntegrationResult) IntegrationResultDTO {
+	out.Stage, out.Status = string(res.Stage), string(res.Status)
+	out.Blame, out.BlameNote = string(res.Blame), blameNote(res.Blame)
+	out.RunLevelFault = res.Blame == delegate.BlameBaseline
+	out.CrossCheck, out.Pre, out.Head, out.Output = res.CrossCheck, res.Pre, res.Head, res.Output
+	out.RanAt = unixOrZero(res.RanAt)
+	out.Conflicts = orEmptyIDs(res.Conflicts)
+	out.Warnings = orEmptyIDs(res.Warnings)
+	return out
+}
+
+// blameNote is §10.2's table in the two sentences the human acts on. In Go and
+// not in the frontend because the TUI must not say something different about the
+// same verdict, and because the difference between these two rows is the
+// difference between parking a child and telling the human their repo is broken.
+func blameNote(b delegate.Blame) string {
+	switch b {
+	case delegate.BlameTask:
+		return "red with this task merged and green without it: the task is to blame, " +
+			"and §10.3 parks the child with the failure rather than fixing it here"
+	case delegate.BlameBaseline:
+		return "red with this task merged AND red without it: this is a run-level BASELINE fault. " +
+			"No task is to blame, spawning stops, and the repair is to the repo's own tree"
+	}
+	return ""
+}
+
+// taskAndRunState re-reads the two columns every §10 binding reports afterwards.
+// A read and not a derivation: each of these transitions is a CAS that can lose
+// to the other Loom instance, and reporting the state this process INTENDED is
+// how a UI ends up offering a gate the row never reached.
+func (a *App) taskAndRunState(runID int64, taskID string) (state, runStatus string) {
+	if a.st == nil {
+		return "", ""
+	}
+	if row, ok, err := a.st.GetDelegationTask(runID, taskID); err == nil && ok {
+		state = row.State
+	}
+	if run, ok, err := a.st.GetDelegationRun(runID); err == nil && ok {
+		runStatus = run.Status
+	}
+	return state, runStatus
+}
+
+// MergeGateDTO is §5.2 rendered: the branch that will land, the target it lands
+// in, what diverged, and every reason the button is refused.
+//
+// It is the one place a human reads a diff a machine wrote into a tree they own,
+// so nothing here is summarized: Blockers are listed in full rather than
+// expressed as a disabled button, and the two acknowledgement lists travel
+// verbatim so the press can be compared against exactly what was shown.
+type MergeGateDTO struct {
+	Hidden bool   `json:"hidden"`
+	TaskID string `json:"taskId"`
+	Repo   string `json:"repo"`
+	Branch string `json:"branch"`
+	// Target is the user's CURRENTLY checked-out branch, resolved here and
+	// re-resolved at merge time. A human who switches branches between reading
+	// this and pressing it must not silently land the work somewhere else.
+	Target string `json:"target"`
+
+	Dirty      bool     `json:"dirty"`
+	DirtyFiles []string `json:"dirtyFiles"`
+
+	// Divergence is §12.3.1-2 recomputed for this gate — never the recorded
+	// column. Drift is §12.3.3, a DIFFERENT mechanism over different evidence,
+	// kept apart so the UI cannot conflate "the child committed outside its
+	// paths" with "a file outside the worktree changed since spawn".
+	Divergence DivergenceDTO `json:"divergence"`
+	Drift      DriftDTO      `json:"drift"`
+	// AckDivergence and AckDrift are what MergeTask must be handed back. Two
+	// lists and not one bit: "I acknowledged something" is not consent to
+	// whatever is there now, and one checkbox covering both would let §12.3.3's
+	// disclosed false positives launder a real §12.3.1 finding.
+	AckDivergence []string `json:"ackDivergence"`
+	AckDrift      []string `json:"ackDrift"`
+
+	// Integration is the evidence behind the gate: which baseline this task is
+	// staged on and what the recorded verdict there is.
+	Integration IntegrationResultDTO `json:"integration"`
+	Blockers    []string             `json:"blockers"`
+	Warnings    []string             `json:"warnings"`
+	Error       string               `json:"error"`
+}
+
+// DriftDTO is §12.3.3's out-of-worktree tripwire.
+//
+// Summary comes from delegate and is not re-worded here: §12.3.3 makes the
+// WORDING binding — "changed since spawn", never "the child wrote this" —
+// because the walk cannot distinguish the human's own edits from a child's, and
+// a detector that overclaims is one the human learns to dismiss.
+type DriftDTO struct {
+	Changed map[string][]string `json:"changed"`
+	// NoBaseline is an absence of EVIDENCE and renders distinctly from "no
+	// change": nobody looked, which is not the same as nothing happened.
+	NoBaseline []string `json:"noBaseline"`
+	Summary    string   `json:"summary"`
+	Empty      bool     `json:"empty"`
+}
+
+// TaskMergeGate renders §5.2 for one task and writes nothing.
+//
+// Looking must cost nothing — the same reason TaskSpawnPreview is separate from
+// ApproveTask. The divergence IS recomputed here (git, per press), which is not
+// free, but §12.3 requires it immediately before every merge and a gate that
+// showed a cached list would be showing a picture of a different tree.
+func (a *App) TaskMergeGate(runID int64, taskID string) MergeGateDTO {
+	out := emptyMergeGateDTO(taskID)
+	run, m, _, task, err := a.runAndTask(runID, taskID)
+	switch {
+	case errors.Is(err, errHiddenProject):
+		return MergeGateDTO{Hidden: true}
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	}
+	r, err := a.delegationRunner()
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	p, err := r.Integrator.Preview(run, m, task)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	return mergeGateDTO(p)
+}
+
+func emptyMergeGateDTO(taskID string) MergeGateDTO {
+	return MergeGateDTO{
+		TaskID: taskID, DirtyFiles: []string{},
+		Divergence:    DivergenceDTO{Outside: []string{}, Siblings: map[string][]string{}, Empty: true},
+		Drift:         DriftDTO{Changed: map[string][]string{}, NoBaseline: []string{}, Empty: true},
+		AckDivergence: []string{}, AckDrift: []string{},
+		Integration: emptyIntegrationDTO(taskID),
+		Blockers:    []string{}, Warnings: []string{},
+	}
+}
+
+func mergeGateDTO(p delegate.MergePreview) MergeGateDTO {
+	out := emptyMergeGateDTO(p.TaskID)
+	out.Repo, out.Branch, out.Target = p.Repo, p.Branch, p.Target
+	out.Dirty, out.DirtyFiles = p.Dirty, orEmptyIDs(p.DirtyFiles)
+	out.Divergence = DivergenceDTO{
+		Outside:  orEmptyIDs(p.Divergence.Outside),
+		Siblings: map[string][]string{},
+		Empty:    len(p.Divergence.Outside) == 0 && len(p.Divergence.Siblings) == 0,
+	}
+	for id, files := range p.Divergence.Siblings {
+		out.Divergence.Siblings[id] = files
+	}
+	out.Drift = driftDTO(p.Divergence.Drift)
+	out.AckDivergence = ackDivergenceList(p.Divergence)
+	out.AckDrift = ackDriftList(p.Divergence.Drift)
+	out.Integration = fillIntegrationDTO(emptyIntegrationDTO(p.TaskID), p.Integration)
+	out.Integration.Repo = p.Repo
+	out.Integration.Ran = p.Integration.Stage != ""
+	out.Blockers = orEmptyIDs(p.Blockers)
+	out.Warnings = orEmptyIDs(p.Warnings)
+	return out
+}
+
+func driftDTO(d delegate.SnapshotDrift) DriftDTO {
+	out := DriftDTO{Changed: map[string][]string{}, NoBaseline: orEmptyIDs(d.NoBaseline),
+		Summary: d.Summary(), Empty: d.Empty()}
+	for dir, files := range d.Changed {
+		out.Changed[dir] = files
+	}
+	return out
+}
+
+// ackDivergenceList and ackDriftList flatten the two findings into the lists the
+// merge press echoes back.
+//
+// They are a SET each, and that is what makes this safe to compute here:
+// delegate compares the acknowledgement as a set (Runner.ackMismatch builds maps
+// on both sides), so this file agreeing about membership is enough and it cannot
+// drift into a second opinion about ordering. Membership itself is deliberately
+// the same rule — the union of §12.3.1 and §12.3.2 for one, `dir/file` for the
+// other, because "config.json changed" in the human's own repo and in an
+// integration worktree are different findings and one acknowledgement must not
+// cover both.
+func ackDivergenceList(d delegate.DivergenceReport) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(fs []string) {
+		for _, f := range fs {
+			if f == "" || seen[f] {
+				continue
+			}
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	add(d.Outside)
+	for _, id := range sortedKeys(d.Siblings) {
+		add(d.Siblings[id])
+	}
+	sort.Strings(out)
+	return out
+}
+
+func ackDriftList(d delegate.SnapshotDrift) []string {
+	out := []string{}
+	for _, dir := range sortedKeys(d.Changed) {
+		for _, f := range d.Changed[dir] {
+			out = append(out, filepath.Join(dir, f))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// MergeResultDTO is §10.4 attempted.
+type MergeResultDTO struct {
+	Hidden bool `json:"hidden"`
+	// Merged is the branch actually landing in the user's branch. It is the only
+	// field that may be believed about that; everything else is why it did not.
+	Merged bool   `json:"merged"`
+	State  string `json:"state"`
+	// RunStatus can go red on a merge that SUCCEEDED: §10.4 step 2 re-derives the
+	// integration worktree from the user's branch head and re-runs the per-repo
+	// check there, and a red result is a BASELINE fault — the user's own branch
+	// is red — with no task blamed.
+	RunStatus string `json:"runStatus"`
+	Forced    bool   `json:"forced"`
+	// The refusals, each its own bit because each has its own remedy: re-read
+	// the gate, commit or stash, re-read the row, answer the blockers.
+	Stale   bool `json:"stale"`
+	Dirty   bool `json:"dirty"`
+	Moved   bool `json:"moved"`
+	Refused bool `json:"refused"`
+	// Baseline is the repo's integration baseline AFTER the attempt, which is
+	// where §10.4 step 2's re-derivation lands durably. Kept beside Warnings,
+	// not replaced by it: the column survives a restart and the warnings do not.
+	Baseline *BaselineFaultDTO `json:"baseline"`
+	// Warnings is §10.4 step 2 in sentences — "the user's own branch is red
+	// after this merge", "the child's worktree was not removed". They come off
+	// the IntegrationResult Runner.Merge returns, which used to be discarded,
+	// leaving the human to infer both from a status column that records the
+	// verdict and not the reason. Rendered LOUD, never as a footnote: a merge
+	// that succeeded and left the user's branch red is the single most important
+	// thing this screen can say.
+	Warnings []string `json:"warnings"`
+	// Gate is the gate RECOMPUTED, and only on a refusal: after a merge the gate
+	// is spent, and re-rendering it would show "the task is merged, not
+	// mergeable" as though something were wrong.
+	Gate  *MergeGateDTO `json:"gate"`
+	Error string        `json:"error"`
+}
+
+// MergeTask is §5.2's action and §10.4's merge, executed.
+//
+// What is merged is the TASK'S OWN BRANCH. Never the integration branch, which
+// is cumulative: the human approves diff(B) and would get diff(A)+diff(B), with
+// A's own gate never shown and A's divergence never acknowledged. That is the
+// exact shape §5.2 exists to forbid, on the one mechanism the evidence says is
+// load-bearing, and it is enforced in delegate — this binding cannot choose a
+// source.
+//
+// The acknowledgements are the human approval and they are LISTS, not a boolean:
+// Runner.Merge recomputes the divergence and refuses when what was acknowledged
+// is not what is there now, in both directions (a file that appeared is new
+// information; one that disappeared means the human is approving a picture that
+// no longer exists).
+//
+// force is §5.2's escape hatch and it is never silent: it records the `forced`
+// flag for the record, and it is still refused against a dirty target tree —
+// permission to merge past an unacknowledged divergence has never been
+// permission to merge onto uncommitted work.
+func (a *App) MergeTask(runID int64, taskID string, ackDivergence, ackDrift []string, force bool) MergeResultDTO {
+	out := MergeResultDTO{Forced: force, Warnings: []string{}}
+	run, m, _, task, err := a.runAndTask(runID, taskID)
+	switch {
+	case errors.Is(err, errHiddenProject):
+		// §14: merges are suppressed on a hidden project. Human-gated anyway,
+		// and the gate is hidden.
+		return MergeResultDTO{Hidden: true}
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	}
+	r, err := a.delegationRunner()
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ack := delegate.MergeAck{Divergence: ackDivergence, Drift: ackDrift}
+	res, err := r.Merge(ctx, runID, taskID, ack, force)
+	// The warnings are carried on EVERY outcome, not only the successful one.
+	// §10.4 step 2 runs after the merge lands, so a result that also carries a
+	// refusal is the case where the sentences matter most.
+	if len(res.Warnings) > 0 {
+		out.Warnings = append(out.Warnings, res.Warnings...)
+	}
+	switch {
+	case err == nil:
+		out.Merged = true
+	case errors.Is(err, delegate.ErrAckStale):
+		out.Stale, out.Error = true, err.Error()
+	case errors.Is(err, delegate.ErrDirtyTarget):
+		out.Dirty, out.Error = true, err.Error()
+	case errors.Is(err, delegate.ErrTaskMovedElsewhere):
+		out.Moved, out.Error = true, err.Error()
+	default:
+		out.Refused, out.Error = true, err.Error()
+	}
+	out.State, out.RunStatus = a.taskAndRunState(runID, taskID)
+	if run, ok, rerr := a.st.GetDelegationRun(runID); rerr == nil && ok {
+		if b, found := delegate.DecodeBaselines(run.Integration)[task.Repo]; found {
+			out.Baseline = &BaselineFaultDTO{
+				Repo: task.Repo, Status: string(b.Status), Head: b.Head, At: b.At, Reason: b.Out}
+		}
+	}
+	if !out.Merged {
+		if p, perr := r.Integrator.Preview(run, m, task); perr == nil {
+			g := mergeGateDTO(p)
+			out.Gate = &g
+		}
+	}
+	return out
+}
+
+// --- §10.5: cross-repo, and the honest limits -------------------------------
+
+// RunIntegrationDTO is the run's staging area, per repo, plus §10.5's two
+// mechanisms and the sentence that says what neither of them is.
+//
+// The limits are on the payload rather than left to the frontend to remember,
+// because §10.5 is the one part of this design whose weakness is structural: no
+// VCS operation can surface a cross-repo interface break, `git merge` in one
+// repo cannot know another calls a function whose signature changed, and this
+// design does not invent one. A screen that renders green per-repo baselines and
+// says nothing else IS the misreading.
+type RunIntegrationDTO struct {
+	Hidden bool                 `json:"hidden"`
+	RunID  int64                `json:"runId"`
+	Repos  []RepoIntegrationDTO `json:"repos"`
+	// Cross is the declared `integration.cross` checks. Empty is the common case
+	// and is the whole of §10.5's disclosure — see Limits.
+	Cross []CrossCheckDTO `json:"cross"`
+	// Limits is §10.5 in the human's words, computed from what this run actually
+	// declares. Always non-empty: even a run WITH cross checks gets the sentence
+	// saying the stale-contract alarm is not integration testing.
+	Limits []string `json:"limits"`
+	// Drifts is the stale-contract alarm evaluated LIVE for every task that needs
+	// an interface artifact — the flag is what some earlier pass found, and this
+	// is about now.
+	Drifts []ContractDriftDTO `json:"drifts"`
+	Error  string             `json:"error"`
+}
+
+// RepoIntegrationDTO is one repo's staging area (§10.1).
+type RepoIntegrationDTO struct {
+	Repo     string `json:"repo"`
+	Branch   string `json:"branch"`
+	Worktree string `json:"worktree"`
+	// Status/Head/At/Out are the recorded baseline. Status "" is a THIRD value
+	// and load-bearing: the worktree's position is recorded with no verdict when
+	// no per-repo check has ever run there. Rendering it as green would certify
+	// on the absence of a result; as red would blame every first integration.
+	Status string `json:"status"`
+	Head   string `json:"head"`
+	At     int64  `json:"at"`
+	Out    string `json:"out"`
+	Red    bool   `json:"red"`
+	// HasCheck is whether `integration.per_repo` declares a gate for this repo.
+	// False is a REAL degradation and is rendered as one: the task's own check
+	// becomes the only evidence behind §5.2's approval.
+	HasCheck  bool     `json:"hasCheck"`
+	CheckArgv []string `json:"checkArgv"`
+}
+
+// CrossCheckDTO is one declared cross-repo check.
+type CrossCheckDTO struct {
+	ID   string   `json:"id"`
+	Repo string   `json:"repo"`
+	Argv []string `json:"argv"`
+	// NeedsRepos are the repos whose integration worktrees are exported to the
+	// check as LOOM_REPO_<LABEL>. NeedsStatus is each one's CURRENTLY RECORDED
+	// baseline, which is evidence about whether this check can run — not a
+	// verdict that it will. The scheduling decision is delegate's and is
+	// deliberately not re-derived here: a second opinion about readiness is how
+	// a view starts promising a check that never runs.
+	NeedsRepos  []string          `json:"needsRepos"`
+	NeedsStatus map[string]string `json:"needsStatus"`
+}
+
+// ContractDriftDTO is §10.5's stale-contract alarm firing for one artifact.
+type ContractDriftDTO struct {
+	TaskID    string `json:"taskId"`
+	Artifact  string `json:"artifact"`
+	Producer  string `json:"producer"`
+	WasCommit string `json:"wasCommit"`
+	NowCommit string `json:"nowCommit"`
+}
+
+// RunIntegration renders §10.1's staging area and §10.5's limits for one run.
+func (a *App) RunIntegration(runID int64) RunIntegrationDTO {
+	out := RunIntegrationDTO{RunID: runID, Repos: []RepoIntegrationDTO{},
+		Cross: []CrossCheckDTO{}, Limits: []string{}, Drifts: []ContractDriftDTO{}}
+	if a.st == nil {
+		out.Error = "delegation unavailable: no store"
+		return out
+	}
+	run, ok, err := a.st.GetDelegationRun(runID)
+	switch {
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	case !ok:
+		out.Error = fmt.Sprintf("no such delegation run: %d", runID)
+		return out
+	case !orchestrationVisible(a.resolver(), run.ProjectRoot):
+		// The bare marker: repo labels, branch names, worktree paths and captured
+		// check output are exactly the client-identifying material §6 keeps off a
+		// shared screen.
+		return RunIntegrationDTO{Hidden: true}
+	}
+	m, mErr := decodeSnapshot(run)
+	if mErr != nil {
+		out.Error = mErr.Error()
+	}
+	m.RepoPaths = a.repoPaths(run.ProjectRoot)
+
+	spec, specErr := delegate.IntegrationOf(run.ManifestJSON)
+	if specErr != nil {
+		// LOUD. A malformed integration block means checks the author wrote are
+		// not running, and a gate that is green on evidence nobody produced is the
+		// worst outcome §10 has.
+		out.Error = strings.TrimSpace(out.Error + " " + specErr.Error())
+	}
+	baselines := delegate.DecodeBaselines(run.Integration)
+
+	// The layout is the runner's when there is one. Without ~/.loom there are no
+	// paths to render, and the baselines still are — a degraded panel that names
+	// the verdicts beats an empty one that names nothing.
+	var layout delegate.Layout
+	haveLayout := false
+	if r, rerr := a.delegationRunner(); rerr == nil {
+		layout, haveLayout = r.Layout, true
+	}
+
+	for _, label := range sortedRepoLabelsOf(m, baselines) {
+		b := baselines[label]
+		dto := RepoIntegrationDTO{
+			Repo: label, Status: string(b.Status), Head: b.Head, At: b.At, Out: b.Out,
+			Red: b.Red(), CheckArgv: []string{},
+		}
+		if haveLayout {
+			dto.Branch = delegate.IntegrationBranch(run.Slug, label)
+			dto.Worktree = layout.IntegrationDir(run.Slug, label)
+		}
+		if c, declared := spec.PerRepo[label]; declared {
+			dto.HasCheck, dto.CheckArgv = true, orEmptyIDs(c.Cmd)
+		}
+		out.Repos = append(out.Repos, dto)
+	}
+
+	for _, c := range spec.Cross {
+		dto := CrossCheckDTO{ID: c.ID, Repo: c.Repo, Argv: orEmptyIDs(c.Cmd),
+			NeedsRepos: orEmptyIDs(c.Needs), NeedsStatus: map[string]string{}}
+		for _, need := range c.Needs {
+			dto.NeedsStatus[need] = string(baselines[need].Status)
+		}
+		out.Cross = append(out.Cross, dto)
+	}
+	out.Limits = integrationLimits(spec, out.Repos)
+	out.Drifts = a.contractDrifts(run, m)
+	return out
+}
+
+// sortedRepoLabelsOf is every repo the run stages: the manifest's in-scope set
+// UNION whatever the baseline column already carries.
+//
+// The union and not just the manifest, because a baseline recorded for a repo
+// the snapshot no longer names is precisely the thing a human needs to see —
+// dropping it would make a stale red verdict invisible while it still counts
+// against §10.2's attribution.
+func sortedRepoLabelsOf(m delegate.Manifest, baselines map[string]delegate.Baseline) []string {
+	seen := map[string]bool{}
+	for _, t := range m.Tasks {
+		seen[t.Repo] = true
+	}
+	for label := range baselines {
+		seen[label] = true
+	}
+	out := make([]string, 0, len(seen))
+	for label := range seen {
+		if label != "" {
+			out = append(out, label)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// integrationLimits is §10.5 said out loud, and the wording is the spec's.
+func integrationLimits(spec delegate.IntegrationSpec, repos []RepoIntegrationDTO) []string {
+	out := []string{}
+	var ungated []string
+	for _, r := range repos {
+		if !r.HasCheck {
+			ungated = append(ungated, r.Repo)
+		}
+	}
+	if len(ungated) > 0 {
+		out = append(out, fmt.Sprintf(
+			"no integration.per_repo check is declared for %s: each task's own check is the "+
+				"only evidence behind the merge gate for those repos", strings.Join(ungated, ", ")))
+	}
+	if len(spec.Cross) == 0 {
+		out = append(out, "this run declares no integration.cross check, so Loom CANNOT provide "+
+			"test-gated cross-repo integration: no VCS operation can surface a cross-repo interface "+
+			"break, and the seam is a human read at the merge gate")
+	}
+	// Said whether or not cross checks exist. The alarm is the thing most likely
+	// to be mistaken for integration testing, and it is at its most convincing
+	// exactly when it has just fired.
+	out = append(out, "the stale-contract alarm catches one thing — an interface artifact "+
+		"re-fingerprinted after its consumer was spawned. It is not integration testing and "+
+		"catches nothing else")
+	return out
+}
+
+// contractDrifts evaluates §10.5's alarm for every task that needs something.
+//
+// Per task and on demand, never on the poll: it reads the artifact table and the
+// task's spawn-time baseline, and the run view already has a load ceiling that
+// keeps taskDTO free of git and of per-task queries.
+func (a *App) contractDrifts(run store.DelegationRun, m delegate.Manifest) []ContractDriftDTO {
+	out := []ContractDriftDTO{}
+	r, err := a.delegationRunner()
+	if err != nil {
+		return out
+	}
+	for _, t := range m.Tasks {
+		if len(t.Needs) == 0 {
+			continue
+		}
+		drifts, derr := r.Integrator.StaleContract(run, m, t)
+		if derr != nil {
+			// Per task, dropped: one task's unreadable row must not cost the
+			// others their alarm. The flag on the row is the durable trace, and
+			// §5.2's gate re-evaluates this per merge with the failure rendered.
+			continue
+		}
+		for _, d := range drifts {
+			out = append(out, ContractDriftDTO{
+				TaskID: t.ID, Artifact: d.Artifact, Producer: d.Producer,
+				WasCommit: d.WasCommit, NowCommit: d.NowCommit})
+		}
+	}
+	return out
+}
+
+// --- §11: the park, its declaration, and the resume -------------------------
+
+// ParkDTO is one parked child (§11.1) as the human meets it: what the child
+// said, in its own words, and what Loom can do about it.
+//
+// The declaration is rendered from the ROW, which holds the bytes the child
+// wrote (Detector.record stores the raw file, deliberately, because the human's
+// whole remedy is reading what the child actually wrote). A malformed one is
+// rendered RAW and loudly — §11.2's worst outcome is a swallowed block, which is
+// a child parked forever with nobody told.
+type ParkDTO struct {
+	Hidden bool   `json:"hidden"`
+	TaskID string `json:"taskId"`
+	State  string `json:"state"`
+	// Parked is the STATE, not the presence of a declaration. The two disagree in
+	// both directions and each disagreement is a finding: blocked with no
+	// declaration is §11.2's cleared block, and a declaration on a running task
+	// is a park the detector has not yet acted on.
+	Parked     bool     `json:"parked"`
+	HasBlock   bool     `json:"hasBlock"`
+	Kind       string   `json:"kind"`
+	Author     string   `json:"author"`
+	Summary    string   `json:"summary"`
+	Detail     string   `json:"detail"`
+	ResumeWhen string   `json:"resumeWhen"`
+	Artifact   string   `json:"artifact"`
+	From       string   `json:"from"`
+	At         int64    `json:"at"`
+	Paths      []string `json:"paths"`
+	Malformed  bool     `json:"malformed"`
+	Raw        string   `json:"raw"`
+	ParseError string   `json:"parseError"`
+	// PendingSeed is §11.4's durable column: the text Loom owes this child. It is
+	// rendered because "seed pending" with nothing behind it is a state the
+	// workflow view already refuses to show.
+	PendingSeed string   `json:"pendingSeed"`
+	Flags       []string `json:"flags"`
+	SessionName string   `json:"sessionName"`
+	// Resumable and ResumeNote are the affordance and its reason. A greyed
+	// button with no sentence is how a human concludes the park is permanent.
+	Resumable  bool   `json:"resumable"`
+	ResumeNote string `json:"resumeNote"`
+	Error      string `json:"error"`
+}
+
+// TaskPark renders one task's park. No writes, no git, no delivery.
+func (a *App) TaskPark(runID int64, taskID string) ParkDTO {
+	out := ParkDTO{TaskID: taskID, Paths: []string{}, Flags: []string{}}
+	_, _, row, _, err := a.runAndTask(runID, taskID)
+	switch {
+	case errors.Is(err, errHiddenProject):
+		return ParkDTO{Hidden: true}
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	}
+	return parkDTO(row)
+}
+
+func parkDTO(row store.DelegationTask) ParkDTO {
+	out := ParkDTO{
+		TaskID: row.TaskID, State: row.State,
+		Parked:      delegate.TaskState(row.State) == delegate.StateBlocked,
+		PendingSeed: row.PendingSeed, Flags: flagList(row.Flags),
+		SessionName: row.SessionName, Paths: []string{},
+	}
+	raw := strings.TrimSpace(row.BlockJSON)
+	if raw != "" {
+		out.HasBlock = true
+		b, err := delegate.ParseBlock([]byte(row.BlockJSON))
+		if err != nil {
+			out.Malformed, out.Raw, out.ParseError = true, row.BlockJSON, err.Error()
+		} else {
+			out.Kind, out.Author = string(b.Kind), string(b.Author)
+			out.Summary, out.Detail, out.ResumeWhen = b.Summary, b.Detail, b.ResumeWhen
+			out.Artifact, out.From = b.Need.Artifact, b.Need.From
+			// The child's requested authorization, for a needs-scope block. It is
+			// what §11.3's proposal is BUILT from and it is never auto-granted —
+			// rendering it here is what lets a human read the ask before pressing
+			// approve on the amendment that would widen the brief.
+			out.Paths = orEmptyIDs(b.Paths)
+			out.At = unixOrZero(b.At)
+		}
+	}
+	out.Resumable, out.ResumeNote = resumability(row, out)
+	return out
+}
+
+// resumability is what the resume button may do, and WHY when it may not.
+//
+// The rule is deliberately narrow: a manual resume re-attempts a delivery Loom
+// has ALREADY decided is due — the durable pending_seed is that decision, and
+// §12.2's `block-stale` watchdog is the affordance's own justification ("render
+// seed pending, offer retry").
+//
+// Rejected, and this is the important half: recomputing Rendezvous.Unblocked
+// here so the button could also unblock a task the tick has not got to. That
+// needs the effective graph, the state map and the published set — i.e. a second
+// scheduler in a DTO shim, which is the exact defect refreshReady's comment
+// records being removed. Dependency-gated scheduling stays primary and the tick
+// stays the only thing that decides a park is over; this button only re-attempts
+// what that decision already owes.
+func resumability(row store.DelegationTask, p ParkDTO) (bool, string) {
+	switch {
+	case !p.Parked:
+		return false, "this task is not parked"
+	case p.Malformed:
+		return false, "the declaration will not parse: fix or remove block.json in the task's " +
+			".meta/ directory — Loom will not guess what the child meant"
+	case strings.TrimSpace(row.PendingSeed) != "":
+		return true, "a seed is durably owed to this child; retry the delivery"
+	case p.Kind == string(delegate.BlockNeedsArtifact):
+		return false, "waiting on the producer: the run's own tick materializes the artifact and " +
+			"seeds the child when its producer is verified and the artifact is published"
+	}
+	return false, "a human clears this park: answer it, or approve the amendment it raised — " +
+		"the tick does not resume a needs-decision, needs-scope or blocked-external block on its own"
+}
+
+// ResumeResultDTO is §11.4's delivery re-attempted.
+type ResumeResultDTO struct {
+	Hidden bool `json:"hidden"`
+	// Resumed means the whole of §11.4 completed: materialize, seed, clear the
+	// declaration, and only then the blocked → running CAS. The order is
+	// delegate's and it is load-bearing — a task marked running whose seed never
+	// arrived is a child sitting at a prompt Loom believes is working.
+	Resumed bool   `json:"resumed"`
+	State   string `json:"state"`
+	// Owed is the continue gate timing out. NOT a failure: the seed stays in the
+	// column, the flag stays on, and the retry stays offered.
+	Owed bool `json:"owed"`
+	// ChildGone is a park whose child is no longer there. A different decision
+	// for the human — re-spawn by claude id, or abandon — and never a retry loop.
+	ChildGone bool `json:"childGone"`
+	// Conflict is §11.4 step 2 refusing: the producer's branch would not merge
+	// into the child's worktree. The task STAYS blocked and the seed describes
+	// the conflict instead of telling the child to continue.
+	Conflict bool    `json:"conflict"`
+	Park     ParkDTO `json:"park"`
+	Error    string  `json:"error"`
+}
+
+// ResumeTask re-attempts §11.4's delivery for a parked child.
+//
+// It never bypasses the tick's decision that the park is over (see
+// resumability), and it never invents a seed: what it re-delivers is the text
+// already in pending_seed, through Rendezvous, which owns the order and the
+// double-delivery CAS.
+func (a *App) ResumeTask(runID int64, taskID string) ResumeResultDTO {
+	out := ResumeResultDTO{Park: ParkDTO{TaskID: taskID, Paths: []string{}, Flags: []string{}}}
+	run, m, row, task, err := a.runAndTask(runID, taskID)
+	switch {
+	case errors.Is(err, errHiddenProject):
+		// §14: seed DELIVERIES keep running while hidden — they are the
+		// continuation of in-flight work — but that is the tick's own clock. This
+		// is a human pressing a button on a screen, and what it returns is the
+		// child's declaration.
+		return ResumeResultDTO{Hidden: true, Park: ParkDTO{Hidden: true}}
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	}
+	park := parkDTO(row)
+	out.Park = park
+	if !park.Resumable {
+		// The refusal carries the same sentence the button was greyed with, so a
+		// second Loom instance racing this one cannot produce a bare no-op.
+		out.Error = park.ResumeNote
+		out.State = row.State
+		return out
+	}
+	r, err := a.delegationRunner()
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	b, perr := delegate.ParseBlock([]byte(row.BlockJSON))
+	if perr != nil {
+		out.Error = perr.Error()
+		out.State = row.State
+		return out
+	}
+	switch err := r.Rendezvous.Resume(run, m, task, b); {
+	case err == nil:
+		out.Resumed = true
+	case errors.Is(err, delegate.ErrSeedUndelivered):
+		out.Owed, out.Error = true, err.Error()
+	case errors.Is(err, delegate.ErrChildGone):
+		out.ChildGone, out.Error = true, err.Error()
+	default:
+		var conflict *delegate.ProducerConflict
+		if errors.As(err, &conflict) {
+			out.Conflict = true
+		}
+		out.Error = err.Error()
+	}
+	if fresh, ok, ferr := a.st.GetDelegationTask(runID, taskID); ferr == nil && ok {
+		out.Park = parkDTO(fresh)
+		out.State = fresh.State
+	}
+	return out
+}
+
+// --- §11.3: refusing an amendment -------------------------------------------
+
+// RejectDelegationAmendment is the human declining an offer, durably.
+//
+// §11.3's mechanism is that Loom proposes and the human grants: an unapproved
+// amendment is INERT (Effective ignores it entirely), so declining one changes
+// nothing about the plan. What the decline has to do is be REMEMBERED. Before
+// migration v16 it could not be: `approved_at = 0` meant "proposed", a refusal
+// was indistinguishable from an offer nobody had read, and the offer came back
+// on the next poll forever — the one gate in this design built to be refusable
+// had no way to record a refusal.
+//
+// The write is delegate.Runner.RejectAmendment and not a store call from here,
+// for this file's standing rule: a DTO shim that performs a transition itself is
+// a second definition of the transition. The Runner's CAS is guarded on BOTH
+// decision columns, so an approve and a reject racing from two Loom instances
+// produce exactly one decision and the loser is TOLD.
+//
+// The row is not deleted and the log stays append-only. That is not a
+// limitation being worked around — it is what keeps `propose` idempotent: the
+// append-once rule is keyed on a proposal's identity across the whole log, so a
+// rejected amendment that vanished would be re-proposed on the very next tick.
+//
+// Rejected alternative, deliberately: seeding the child with the refusal from
+// here. It is the actionable half — a `needs-scope` child that is never told
+// waits forever — but it would leave block.json on disk with the task still
+// `blocked`, so the very next detector poll re-parks it and the child receives a
+// refusal it cannot act on. Clearing the park properly is finishResume's job.
+//
+// An already-APPROVED amendment cannot be revoked, and that refusal is loud: the
+// edge is in the effective graph, children may have been spawned against it, and
+// pretending otherwise would be the worst thing this binding could do.
+type AmendmentRejectDTO struct {
+	Hidden bool `json:"hidden"`
+	// Rejected is "this offer will not be granted"; Persisted is whether that
+	// survives a restart. They are still two fields rather than one: a reject
+	// whose durable write failed must not render as a reject that stuck, and
+	// collapsing them is how a human comes to believe an offer is gone when the
+	// other Loom instance is still showing it.
+	Rejected  bool `json:"rejected"`
+	Persisted bool `json:"persisted"`
+	// Granted is the refusal above: the amendment is already approved and an
+	// approved amendment is not revocable.
+	Granted bool `json:"granted"`
+	// Note is the sentence the UI must render beside the press so a human is
+	// never left guessing what the decision did.
+	Note  string        `json:"note"`
+	Tick  TickReportDTO `json:"tick"`
+	Error string        `json:"error"`
+}
+
+func (a *App) RejectDelegationAmendment(runID, seq int64) AmendmentRejectDTO {
+	out := AmendmentRejectDTO{Tick: emptyTickDTO(runID)}
+	if a.st == nil {
+		out.Error = "delegation unavailable: no store"
+		return out
+	}
+	run, ok, err := a.st.GetDelegationRun(runID)
+	switch {
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	case !ok:
+		out.Error = fmt.Sprintf("no such delegation run: %d", runID)
+		return out
+	case !orchestrationVisible(a.resolver(), run.ProjectRoot):
+		return AmendmentRejectDTO{Hidden: true, Tick: TickReportDTO{Hidden: true}}
+	}
+	row, found, err := a.st.GetDelegationAmendment(runID, seq)
+	switch {
+	case err != nil:
+		out.Error = err.Error()
+		return out
+	case !found:
+		out.Error = fmt.Sprintf("run %d has no amendment %d", runID, seq)
+		return out
+	case row.ApprovedAt != 0:
+		out.Granted = true
+		out.Error = fmt.Sprintf("amendment %d is already approved: an approved amendment is an edge "+
+			"in the effective graph and is not revocable", seq)
+		return out
+	case row.RejectedAt != 0:
+		// Already decided, and the second press is not an error the human needs
+		// to act on: the answer they wanted is the answer on the row.
+		out.Rejected, out.Persisted = true, true
+		out.Note = "already declined; the offer is closed and stays in the log"
+		out.Tick = emptyTickDTO(runID)
+		return out
+	}
+
+	r, err := a.delegationRunner()
+	if err != nil {
+		// Rejected NOTHING. The press did not take, and saying it did is the one
+		// outcome this binding must never produce.
+		out.Error = err.Error()
+		return out
+	}
+	if err := r.RejectAmendment(runID, seq); err != nil {
+		out.Error = err.Error()
+		if errors.Is(err, delegate.ErrAmendmentClaimed) {
+			// The other instance decided it between our read and our CAS. The
+			// screen is stale, not wrong; the tick below re-renders it.
+			out.Tick = a.tickAfterDecision(runID)
+		}
+		return out
+	}
+	out.Rejected, out.Persisted = true, true
+	out.Note = "declined, durably. Nothing was granted: an unapproved amendment is inert, and the " +
+		"row stays in the append-only log so the decision is legible later and the same offer is " +
+		"not re-proposed on the next tick"
+	out.Tick = a.tickAfterDecision(runID)
+	return out
+}
+
+// tickAfterDecision re-runs the scheduler and renders it, folding a tick failure
+// into the report rather than losing it. Shared by the two amendment decisions
+// so neither can grow a differently-shaped answer to "what changed".
+func (a *App) tickAfterDecision(runID int64) TickReportDTO {
+	rep, err := a.tickRun(runID)
+	text := ""
+	if err != nil {
+		text = err.Error()
+	}
+	return a.tickDTO(runID, rep, text)
 }

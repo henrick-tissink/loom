@@ -54,6 +54,19 @@ func TestRenderBlocks(t *testing.T) {
 			},
 		},
 		{
+			name: "mermaid fence outside the subset falls back with a chip",
+			src:  "```mermaid\nsequenceDiagram\n  a ->> b: hi\n```\n",
+			want: []BlockKind{BlockCode},
+			check: func(t *testing.T, bs []Block) {
+				if bs[0].Diagram == nil || bs[0].Diagram.Status != DiagramUnsupported {
+					t.Fatalf("diagram = %#v", bs[0].Diagram)
+				}
+				if !strings.Contains(bs[0].Note, "shown as source") {
+					t.Fatalf("note = %q", bs[0].Note)
+				}
+			},
+		},
+		{
 			name: "unterminated fence renders to EOF and says so",
 			src:  "intro\n\n```sh\nls -l\nstill code\n",
 			want: []BlockKind{BlockParagraph, BlockCode},
@@ -67,7 +80,10 @@ func TestRenderBlocks(t *testing.T) {
 			},
 		},
 		{
-			name: "mermaid fence renders as source with a chip (4d is not built)",
+			// 4d ships the parser, so a fence INSIDE the subset now draws and
+			// carries no chip. The source text is still preserved verbatim: the
+			// fallback is permanent and the renderer may need it at any time.
+			name: "mermaid fence in the subset parses, keeping its source",
 			src:  "```mermaid\nflowchart LR\n  a --> b\n```\n",
 			want: []BlockKind{BlockCode},
 			check: func(t *testing.T, bs []Block) {
@@ -77,8 +93,11 @@ func TestRenderBlocks(t *testing.T) {
 				if bs[0].Text != "flowchart LR\n  a --> b" {
 					t.Fatalf("source not preserved: %q", bs[0].Text)
 				}
-				if !strings.Contains(bs[0].Note, "shown as source") {
-					t.Fatalf("note = %q", bs[0].Note)
+				if bs[0].Diagram == nil || bs[0].Diagram.Status != DiagramOK {
+					t.Fatalf("diagram = %#v", bs[0].Diagram)
+				}
+				if bs[0].Note != "" {
+					t.Fatalf("a drawn diagram carries no chip, got %q", bs[0].Note)
 				}
 			},
 		},

@@ -52,6 +52,27 @@ type Manifest struct {
 	// field exists so adding them later is not a schema break.
 	Isolation string `json:"isolation"`
 
+	// Integration is §10's block: the per-repo gate run in each integration
+	// worktree after a merge, and the cross-repo checks that are the only
+	// mechanism in this design able to see an interface break across repos.
+	//
+	// It lives HERE, on the loaded manifest, rather than being fished out of
+	// the raw file by whoever needs it. The alternative — which shipped
+	// briefly — was for run creation to re-read the file for this one key and
+	// splice it into the snapshot, and it was wrong in a way that is worth
+	// keeping written down: `json.Marshal(m)` of a Manifest without this field
+	// stores a snapshot with NO integration block, so every §10.2 pass over
+	// that run skips step 3 and reports green. §5.2's precondition ("the
+	// per-repo integration check is green on the merged result") was then
+	// satisfiable by evidence nobody produced, on the one gate this slice calls
+	// load-bearing. The field is unexported-in-effect at the format level —
+	// absent is legal and common — but its ABSENCE must be a fact about the
+	// manifest, never an artefact of how Loom happened to serialize it.
+	//
+	// Validated at load by ValidateIntegration, the same function IntegrationOf
+	// runs over the snapshot, so a block that loads is a block that will run.
+	Integration IntegrationSpec `json:"integration"`
+
 	// Resolved-at-load fields, not part of the on-disk format and not persisted
 	// into the snapshot. The workflow.Step.Project precedent: label→path
 	// resolution happens ONCE, here, while a resolver is in hand, because
@@ -394,6 +415,19 @@ func loadOne(path string, r Resolver) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("defaults: check_timeout: %w", err)
 	}
 
+	// §10's block, validated HERE and not at first use. A malformed integration
+	// check is an error and not a warning for the reason IntegrationOf gives:
+	// a check the author wrote and Loom silently skipped is the worst outcome
+	// available, because the gate then reports green on evidence nobody
+	// produced. Its repo LABELS are a warning rather than an error — see
+	// warnings() — since an unknown label costs a check that cannot run, which
+	// is loud at integration time, not a gate that silently passes.
+	integ, err := ValidateIntegration(m.Integration, defTimeout)
+	if err != nil {
+		return Manifest{}, err
+	}
+	m.Integration = integ
+
 	// Rule 3.
 	if len(m.Tasks) == 0 {
 		return Manifest{}, errors.New("must have at least 1 task")
@@ -592,6 +626,39 @@ func (m Manifest) warnings(scope Scope) []Warning {
 		}
 		if !used[label] {
 			out = append(out, Warning{Text: fmt.Sprintf("repos[%q] is declared but no task uses it", label)})
+		}
+	}
+
+	// §10's integration block, by LABEL. A per-repo gate for a repo no task
+	// touches never runs (§10.2 integrates a task into ITS repo's worktree),
+	// and a gate for a label the project does not have has no worktree at all.
+	//
+	// Warnings and not errors, unlike everything ValidateIntegration refuses:
+	// those are blocks that would run wrong, these are blocks that will not run.
+	// A gate that cannot run is loud at integration time — RunIntegration
+	// reports the missing worktree — whereas a malformed gate that is skipped
+	// is silent, and silence is what §10 cannot afford. The distinction is the
+	// same one `repos[]` above draws, for the same reason.
+	for _, label := range sortedKeys(m.Integration.PerRepo) {
+		switch {
+		case scope.Repos[label] == "":
+			out = append(out, Warning{Text: fmt.Sprintf("integration.per_repo[%q] is not a repo of project %q — that gate will never run", label, scope.Name)})
+		case !used[label]:
+			out = append(out, Warning{Text: fmt.Sprintf("integration.per_repo[%q] is declared but no task uses that repo — that gate will never run", label)})
+		}
+	}
+	for _, c := range m.Integration.Cross {
+		if scope.Repos[c.Repo] == "" {
+			out = append(out, Warning{Text: fmt.Sprintf("integration.cross[%q] runs in repo %q, which is not a repo of project %q — it will never run", c.ID, c.Repo, scope.Name)})
+		}
+		for _, n := range c.Needs {
+			// needs_repos gates WHEN the cross check runs (§10.2 step 4 waits
+			// for each named repo to be green). A name nothing can satisfy is a
+			// check that waits forever, which reads on the run exactly like a
+			// check that is merely slow — the one confusion worth a line here.
+			if scope.Repos[n] == "" {
+				out = append(out, Warning{Text: fmt.Sprintf("integration.cross[%q] needs_repos %q, which is not a repo of project %q — that check can never become eligible", c.ID, n, scope.Name)})
+			}
 		}
 	}
 
