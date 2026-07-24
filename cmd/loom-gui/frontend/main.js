@@ -8,9 +8,25 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 
 const threadsEl = document.getElementById("threads");
+const projectsEl = document.getElementById("projects");
+const threadsHeadEl = document.getElementById("threads-head");
 const attnEl = document.getElementById("attn");
 const chipEl = document.getElementById("hidechip");
 let activeName = null;
+
+// Three-pane nav state (2026-07-24). selProject is a project root, or the
+// ATTENTION sentinel for the cross-project needs-you queue. activeName (above)
+// remains the attached session, so a thread stays highlighted while its project
+// stays selected. Both the selected project and the collapse choice persist in
+// localStorage — pure per-machine view state, no backend round-trip.
+const ATTENTION = "__attention__";
+let selProject = ATTENTION;
+let manualCollapsed = false;
+let navInit = false;
+const PP_KEY = "loom.projects.collapsed";
+const SEL_KEY = "loom.projects.selected";
+try { manualCollapsed = localStorage.getItem(PP_KEY) === "1"; } catch { /* storage off */ }
+try { const v = localStorage.getItem(SEL_KEY); if (v) selProject = v; } catch { /* storage off */ }
 let latestSessions = [];
 let latestRecent = [];
 // Project rows (ListProjectDetails) — UNFILTERED by §6 on purpose: this is the
@@ -194,14 +210,16 @@ function appendGroup(label) {
   threadsEl.appendChild(gh);
 }
 
-function appendLiveRow(s) {
+// projLabel overrides the sub-label (the repo basename) — the Attention queue
+// mixes projects, so it shows each thread's PROJECT there instead.
+function appendLiveRow(s, projLabel) {
   const li = document.createElement("li");
   li.className = "thread" + (s.name === activeName ? " active" : "");
   const color = statusColor(s.status);
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span>${ctxGaugeHtml(s.ctxTokens)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}</span>${ctxGaugeHtml(s.ctxTokens)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
@@ -375,26 +393,174 @@ function appendProjectIndex(shownRoots) {
   }
 }
 
-function renderRail(sessions, recent) {
-  threadsEl.replaceChildren();
-  const sections = railSections(sessions, recent);
-  const shown = new Set();
-  for (const sec of sections) {
-    shown.add(sec.root);
-    appendSectionHead(sec);
-    if (collapsedRoots.has(sec.root)) continue;
-    for (const g of GROUPS) {
-      const rows = sec.live.filter((s) => g.match(s.status));
-      if (!rows.length) continue;
-      appendGroup(g.key);
-      for (const s of rows) appendLiveRow(s);
-    }
-    if (sec.finished.length) {
-      appendGroup("Finished");
-      for (const s of sec.finished) appendFinishedRow(s);
-    }
+// renderRail is kept as the single nav-refresh entry point (its six call sites
+// are unchanged); it now paints the two nav panes. Args are ignored — every
+// pane reads the poll's globals.
+function renderRail() {
+  renderProjectsPane();
+  renderThreadsPane();
+}
+
+// ---- projects pane (2026-07-24 three-pane nav) ----
+
+function effectiveCollapsed() { return window.innerWidth < 980 ? true : manualCollapsed; }
+
+function applyCollapse() {
+  const on = effectiveCollapsed();
+  const body = document.getElementById("body");
+  if (body) body.classList.toggle("pp-collapsed", on);
+  const btn = document.getElementById("pp-collapse");
+  if (btn) { btn.textContent = on ? "›" : "‹"; btn.title = on ? "Expand projects" : "Collapse projects"; }
+  renderProjectsPane();
+}
+
+// Per-project needs-you / running counts from the (already §6-filtered) sessions.
+function projectCounts() {
+  const m = new Map();
+  for (const s of latestSessions) {
+    const root = s.projectRoot || "";
+    let c = m.get(root); if (!c) { c = { need: 0, run: 0 }; m.set(root, c); }
+    if (s.status === "needs_you") c.need++;
+    else if (s.status === "running") c.run++;
   }
-  appendProjectIndex(shown);
+  return m;
+}
+
+// §3 order: needs-you (by count) → running → the rest alphabetical → Ungrouped
+// (only when it holds sessions). Hidden/solo respected via projectVisible.
+function orderedProjects() {
+  const counts = projectCounts();
+  const withC = latestProjects
+    .filter((p) => !p.ungrouped && projectVisible(p))
+    .map((p) => ({ root: p.root, name: p.name, missing: p.missing, need: 0, run: 0, ...(counts.get(p.root) || {}) }));
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const need = withC.filter((p) => p.need).sort((a, b) => b.need - a.need || byName(a, b));
+  const run = withC.filter((p) => !p.need && p.run).sort(byName);
+  const rest = withC.filter((p) => !p.need && !p.run).sort(byName);
+  const ungC = counts.get("");
+  const ung = ungC ? [{ root: "", name: "Ungrouped", ung: true, need: ungC.need, run: ungC.run }] : [];
+  return [...need, ...run, ...rest, ...ung];
+}
+
+function totalNeed() { return latestSessions.filter((s) => s.status === "needs_you").length; }
+
+function initials(name) {
+  const w = String(name).split(/[ /_.-]/).filter(Boolean);
+  return ((w[0] ? w[0][0] : "?") + (w[1] ? w[1][0] : "")).toUpperCase();
+}
+
+function renderProjectsPane() {
+  if (!projectsEl) return;
+  const collapsed = effectiveCollapsed();
+  const need = totalNeed();
+  const projects = orderedProjects();
+  projectsEl.replaceChildren();
+
+  if (collapsed) {
+    const a = document.createElement("li");
+    a.className = "pj-tok" + (selProject === ATTENTION ? " on" : "");
+    a.title = "Attention" + (need ? ` — ${need} need you` : "");
+    a.innerHTML = `<span class="attn-dot"></span>` + (need ? `<span class="pj-badge">${need}</span>` : "");
+    a.addEventListener("click", openAttention);
+    projectsEl.appendChild(a);
+    for (const p of projects) {
+      const li = document.createElement("li");
+      li.className = "pj-tok" + (selProject === p.root ? " on" : "") + (p.ung ? " ung" : "");
+      li.title = p.name;
+      li.innerHTML = (p.ung ? "·" : `<span>${esc(initials(p.name))}</span>`) +
+        (p.need ? `<span class="pj-badge">${p.need}</span>` : (p.run ? `<span class="pj-tdot"></span>` : ""));
+      li.addEventListener("click", () => selectProject(p.root));
+      projectsEl.appendChild(li);
+    }
+    return;
+  }
+
+  const a = document.createElement("li");
+  a.className = "pj-attn" + (selProject === ATTENTION ? " on" : "");
+  a.innerHTML = `<span class="attn-dot"></span><span class="pj-name">Attention</span>` + (need ? `<span class="pj-count">${need}</span>` : "");
+  a.addEventListener("click", openAttention);
+  projectsEl.appendChild(a);
+  const div = document.createElement("li"); div.className = "pj-div"; projectsEl.appendChild(div);
+  for (const p of projects) {
+    const li = document.createElement("li");
+    li.className = "pj-row" + (selProject === p.root ? " on" : "") + (p.missing ? " missing" : "") + (p.ung ? " ung" : "");
+    li.innerHTML = `<span class="pj-name">${esc(p.name)}</span><span class="pj-meta">` +
+      (p.run && !p.need ? `<span class="pj-run"></span>` : "") +
+      (p.need ? `<span class="pj-count">${p.need}</span>` : "") + `</span>`;
+    li.addEventListener("click", () => selectProject(p.root));
+    projectsEl.appendChild(li);
+  }
+}
+
+// ---- threads pane (2026-07-24 three-pane nav) ----
+
+function renderThreadsPane() {
+  if (!threadsHeadEl || !threadsEl) return;
+  threadsEl.replaceChildren();
+
+  if (selProject === ATTENTION) {
+    const queue = latestSessions.filter((s) => s.status === "needs_you");
+    threadsHeadEl.innerHTML =
+      `<div class="th-head"><span class="th-title"><span class="attn-dot"></span><span>Needs you</span></span></div>` +
+      `<div class="th-sub"><span>${queue.length} across all projects</span></div>`;
+    for (const s of queue) appendLiveRow(s, s.projectName || "");
+    if (!queue.length) threadsEl.innerHTML = `<div class="th-empty">Nothing needs you right now.<br><span>Walk away — loom pulls you back.</span></div>`;
+    return;
+  }
+
+  const p = projectByRoot(selProject);
+  const name = p ? p.name : (selProject === "" ? "Ungrouped" : selProject.split("/").pop());
+  const live = latestSessions.filter((s) => (s.projectRoot || "") === selProject);
+  const fin = latestRecent.filter((s) => (s.projectRoot || "") === selProject);
+  const repoCount = p && p.repos ? p.repos.length : 0;
+  threadsHeadEl.innerHTML =
+    `<div class="th-head"><span class="th-title"><span>${esc(name)}</span></span><button class="th-new" id="th-new">+ New</button></div>` +
+    (p && !p.ungrouped && selProject !== "" ? `<div class="th-sub"><span>${repoCount} repo${repoCount === 1 ? "" : "s"}</span><a class="th-spacer" id="th-overview">overview</a></div>` : "");
+  const nb = document.getElementById("th-new"); if (nb) nb.addEventListener("click", () => openLauncher());
+  const ov = document.getElementById("th-overview"); if (ov) ov.addEventListener("click", () => openProject(selProject));
+
+  for (const g of GROUPS) {
+    const rows = live.filter((s) => g.match(s.status));
+    if (!rows.length) continue;
+    appendGroup(g.key);
+    for (const s of rows) appendLiveRow(s);
+  }
+  if (fin.length) { appendGroup("Finished"); for (const s of fin) appendFinishedRow(s); }
+  if (!live.length && !fin.length) threadsEl.innerHTML = `<div class="th-empty">No threads in ${esc(name)} yet.<br><span>Press + New to start one.</span></div>`;
+}
+
+function selectProject(root) {
+  try { localStorage.setItem(SEL_KEY, root); } catch { /* storage off */ }
+  openProject(root); // sets the stage to the overview, activeName=null, re-renders nav
+}
+
+function openAttention() {
+  selProject = ATTENTION;
+  try { localStorage.setItem(SEL_KEY, ATTENTION); } catch { /* storage off */ }
+  teardownTerminal();
+  activeName = null;
+  stageView = { kind: "attention" };
+  renderAttentionStage();
+  renderRail();
+}
+
+function renderAttentionStage() {
+  const stage = document.getElementById("stage");
+  if (!stage) return;
+  stage.replaceChildren();
+  const d = document.createElement("div");
+  d.id = "stage-empty";
+  d.textContent = latestSessions.some((s) => s.status === "needs_you")
+    ? "Pick a thread on the left to attend to it." : "Nothing needs you right now.";
+  stage.appendChild(d);
+}
+
+// On the first poll (once the DTOs exist) sync the stage to the restored
+// selection, and apply the collapse state. Runs once.
+function initNav() {
+  applyCollapse();
+  if (selProject !== ATTENTION && projectByRoot(selProject)) openProject(selProject);
+  else { selProject = ATTENTION; stageView = { kind: "attention" }; renderAttentionStage(); renderRail(); }
 }
 
 function renderStageHeader(name) {
@@ -540,10 +706,11 @@ function projectByRoot(root) {
 function openProject(root) {
   teardownTerminal();
   activeName = null;
+  selProject = root; // keep the projects pane in sync (openProject has many callers)
   stageView = { kind: "project", root };
   resetOrchestration(root);
   renderProject();
-  renderRail(latestSessions, latestRecent); // drop the active-session highlight
+  renderRail(); // drop the active-session highlight, reflect the selected project
 }
 
 async function projectAction(fn) {
@@ -3117,6 +3284,17 @@ function openHiddenProjects() {
 const newProjectBtn = document.getElementById("new-project");
 if (newProjectBtn) newProjectBtn.addEventListener("click", openCreateProject);
 
+// Projects-pane collapse: manual toggle + auto-collapse under the width
+// threshold (effectiveCollapsed). The toggle sets the manual preference; a
+// resize re-evaluates. The manual choice only takes effect above the threshold.
+const ppCollapseBtn = document.getElementById("pp-collapse");
+if (ppCollapseBtn) ppCollapseBtn.addEventListener("click", () => {
+  manualCollapsed = !manualCollapsed;
+  try { localStorage.setItem(PP_KEY, manualCollapsed ? "1" : "0"); } catch { /* storage off */ }
+  applyCollapse();
+});
+window.addEventListener("resize", applyCollapse);
+
 // ---- fan-out (same prompt across many projects) ----
 async function openFanout() {
   if (document.querySelector(".modal-backdrop")) return;
@@ -3718,8 +3896,8 @@ async function poll() {
     latestSessions = sessions;
     latestRecent = recent;
     latestProjects = projects || [];
-    syncCollapseFromServer(latestProjects);
-    renderRail(sessions, recent);
+    if (!navInit) { navInit = true; initNav(); } // first poll: sync stage to restored selection
+    renderRail();
     renderAttention(sessions);
     renderHideChip();
     if (activeName) renderStageHeader(activeName);

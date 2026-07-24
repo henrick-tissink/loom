@@ -31,11 +31,16 @@
       </div>
     </header>
     <main id="body">
-      <aside id="rail">
-        <div class="rail-head">
-          <span>Threads</span>
-          <button id="new-project" title="New project">+ New project</button>
+      <aside id="projects-pane">
+        <div class="pp-head">
+          <span class="pp-title">Projects</span>
+          <button id="new-project" title="New project">+ New</button>
+          <button id="pp-collapse" title="Collapse projects">‹</button>
         </div>
+        <ul id="projects"></ul>
+      </aside>
+      <aside id="threads-pane">
+        <div id="threads-head"></div>
         <ul id="threads"></ul>
       </aside>
       <section id="stage"><div id="stage-empty">Select a session, or press + New</div></section>
