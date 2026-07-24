@@ -431,18 +431,21 @@ function projectCounts() {
 
 // §3 order: needs-you (by count) → running → the rest alphabetical → Ungrouped
 // (only when it holds sessions). Hidden/solo respected via projectVisible.
+// A STABLE alphabetical order (Ungrouped last). Projects deliberately do NOT
+// reorder by needs-you count: a live agent's status flips constantly (a turn
+// ends → needs-you, you reply → running), and reordering on every flip made the
+// whole list jump up and down while you read it. The needs-you count still
+// shows as an in-place badge, and the pinned Attention entry is the one place
+// attention floats to the top — so a project row never has to move.
 function orderedProjects() {
   const counts = projectCounts();
   const withC = latestProjects
     .filter((p) => !p.ungrouped && projectVisible(p))
-    .map((p) => ({ root: p.root, name: p.name, missing: p.missing, need: 0, run: 0, ...(counts.get(p.root) || {}) }));
-  const byName = (a, b) => a.name.localeCompare(b.name);
-  const need = withC.filter((p) => p.need).sort((a, b) => b.need - a.need || byName(a, b));
-  const run = withC.filter((p) => !p.need && p.run).sort(byName);
-  const rest = withC.filter((p) => !p.need && !p.run).sort(byName);
+    .map((p) => ({ root: p.root, name: p.name, missing: p.missing, need: 0, run: 0, ...(counts.get(p.root) || {}) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
   const ungC = counts.get("");
   const ung = ungC ? [{ root: "", name: "Ungrouped", ung: true, need: ungC.need, run: ungC.run }] : [];
-  return [...need, ...run, ...rest, ...ung];
+  return [...withC, ...ung];
 }
 
 function totalNeed() { return latestSessions.filter((s) => s.status === "needs_you").length; }
@@ -522,12 +525,12 @@ function renderThreadsPane() {
   const nb = document.getElementById("th-new"); if (nb) nb.addEventListener("click", () => openLauncher());
   const ov = document.getElementById("th-overview"); if (ov) ov.addEventListener("click", () => openProject(selProject));
 
-  for (const g of GROUPS) {
-    const rows = live.filter((s) => g.match(s.status));
-    if (!rows.length) continue;
-    appendGroup(g.key);
-    for (const s of rows) appendLiveRow(s);
-  }
+  // A flat, STABLE list — live sessions newest-launched-first (latestSessions
+  // is created_at desc), each showing its status in place (glyph + colour +
+  // word). No status sub-grouping: a status flip must not move a row. The only
+  // membership change is the one-way live→finished transition (rare), which
+  // drops a row into the FINISHED section below.
+  for (const s of live) appendLiveRow(s);
   if (fin.length) { appendGroup("Finished"); for (const s of fin) appendFinishedRow(s); }
   if (!live.length && !fin.length) threadsEl.innerHTML = `<div class="th-empty">No threads in ${esc(name)} yet.<br><span>Press + New to start one.</span></div>`;
 }
