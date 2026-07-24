@@ -114,13 +114,16 @@ function isTyping() {
 }
 
 // ---- icons ----
+// One coherent glyph per status, each distinct — error was a copy of needs_you
+// (both an exclamation) and unknown a copy of idle (both a dash), so a failed
+// session and one that needs you, or a booting and an idle one, read alike.
 const STATUS_ICON = {
-  needs_you: '<path d="M12 8v5M12 16.5v.01"/>',
-  running: '<path d="M9 6l8 6-8 6z"/>',
-  idle: '<path d="M6 12h12"/>',
-  done: '<path d="M5 13l4 4L19 7"/>',
-  error: '<path d="M12 8v5M12 16.5v.01"/>',
-  unknown: '<path d="M6 12h12"/>',
+  needs_you: '<path d="M12 8v5M12 16.5v.01"/>',   // ! — your turn, come back
+  running: '<path d="M9 6l8 6-8 6z"/>',            // ▶ — working
+  idle: '<path d="M6 12h12"/>',                    // — — waiting on you
+  done: '<path d="M5 13l4 4L19 7"/>',              // ✓ — finished clean
+  error: '<path d="M8 8l8 8M16 8l-8 8"/>',         // ✕ — finished with an error
+  unknown: '<path d="M12 12h.01"/>',               // · — booting, no state yet
 };
 const FOLDER_ICON = '<path d="M3 7h6l2 2h10v10H3z"/>';
 

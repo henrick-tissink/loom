@@ -7,7 +7,7 @@ export const palette = {
   running: "#3E9A80",
   idle: "#8A8FC0",
   done: "#6FAE66",
-  error: "#C5604C",
+  error: "#C64C40",
   unknown: "#A99CA2",
 };
 
