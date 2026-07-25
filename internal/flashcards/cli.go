@@ -44,7 +44,7 @@ func (pl *Pipeline) GenerateForPart(project string, p Part, now int64) (stored, 
 	return stored, rejected, nil
 }
 
-// RunCLI dispatches `loom flashcards <generate|curate|review|stats> <projectRoot> [args]`.
+// RunCLI dispatches `loom flashcards <generate|curate|review|stats|export> <projectRoot> [args]`.
 func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, in io.Reader, out io.Writer) error {
 	if len(args) < 2 {
 		return fmt.Errorf("usage: loom flashcards <generate|curate|review|stats|export> <projectRoot> [args]")
@@ -200,17 +200,19 @@ func runExport(args []string, st *store.Store, project string, out io.Writer) er
 	if len(args) > 2 {
 		format = args[2]
 	}
+	// Validate the format before touching the DB, so a typo doesn't pay for a
+	// full deck query it will only discard.
+	if format != "csv" && format != "md" && format != "markdown" {
+		return fmt.Errorf("unknown export format %q (want csv or md)", format)
+	}
 	cards, err := st.ExportCards(project)
 	if err != nil {
 		return err
 	}
-	switch format {
-	case "csv":
+	if format == "csv" {
 		fmt.Fprint(out, ToCSV(cards))
-	case "md", "markdown":
+	} else {
 		fmt.Fprint(out, ToMarkdown(cards))
-	default:
-		return fmt.Errorf("unknown export format %q (want csv or md)", format)
 	}
 	return nil
 }
