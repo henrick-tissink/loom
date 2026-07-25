@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/henricktissink/loom/internal/flashcards"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
 )
@@ -87,8 +88,10 @@ func TestFlashcardMutationBridge(t *testing.T) {
 		t.Fatalf("Edit: %v", err)
 	}
 	cards, _ := st.FlashcardsForProject("p")
-	if cards[0].Front != "new front" || cards[0].StemHash == "m1" || cards[0].AnswerHash == "" {
-		t.Fatalf("edit not applied/hashed: %+v", cards[0])
+	if cards[0].Front != "new front" || cards[0].Back != "new back" ||
+		cards[0].StemHash != flashcards.StemHash("new front") ||
+		cards[0].AnswerHash != flashcards.Hash("new back") {
+		t.Fatalf("edit not applied/hashed correctly (front→stem, back→answer): %+v", cards[0])
 	}
 
 	// activate-all count
