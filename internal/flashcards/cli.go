@@ -1,6 +1,7 @@
 package flashcards
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"strings"
@@ -43,11 +44,30 @@ func (pl *Pipeline) GenerateForPart(project string, p Part, now int64) (stored, 
 	return stored, rejected, nil
 }
 
-// RunCLI implements `loom flashcards generate <projectRoot> [partSubstr]`.
-func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, out io.Writer) error {
-	if len(args) < 2 || args[0] != "generate" {
-		return fmt.Errorf("usage: loom flashcards generate <projectRoot> [partSubstr]")
+// RunCLI dispatches `loom flashcards <generate|curate|review|stats> <projectRoot> [args]`.
+func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, in io.Reader, out io.Writer) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: loom flashcards <generate|curate|review|stats> <projectRoot> [args]")
 	}
+	verb, root := args[0], args[1]
+	project := projectName(root)
+	rv := &Reviewer{Store: st, Cfg: DefaultReviewConfig()}
+	switch verb {
+	case "generate":
+		return runGenerate(args, st, binary, workDir, now, out)
+	case "curate":
+		return runCurate(args, st, project, now, out)
+	case "review":
+		return runReview(rv, project, now, in, out)
+	case "stats":
+		return runStats(rv, project, now, out)
+	default:
+		return fmt.Errorf("unknown flashcards command %q", verb)
+	}
+}
+
+// runGenerate implements `loom flashcards generate <projectRoot> [partSubstr]`.
+func runGenerate(args []string, st *store.Store, binary, workDir string, now int64, out io.Writer) error {
 	root := args[1]
 	var filter string
 	if len(args) > 2 {
@@ -80,6 +100,108 @@ func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, o
 	}
 	fmt.Fprintf(out, "flashcards: %d parts, stored=%d rejected=%d\n", done, totStored, totRej)
 	return nil
+}
+
+func runCurate(args []string, st *store.Store, project string, now int64, out io.Writer) error {
+	drafts, err := st.DraftsForProject(project)
+	if err != nil {
+		return err
+	}
+	activateAll := false
+	for _, a := range args[2:] {
+		if a == "--activate-all" {
+			activateAll = true
+		}
+	}
+	if !activateAll {
+		fmt.Fprintf(out, "%d draft card(s) awaiting curation:\n", len(drafts))
+		for _, c := range drafts {
+			fmt.Fprintf(out, "  [%d] %-14s %s\n", c.ID, c.Type, c.Front)
+		}
+		fmt.Fprintln(out, "re-run with --activate-all to activate them")
+		return nil
+	}
+	n := 0
+	for _, c := range drafts {
+		if err := st.SetCardStatus(c.ID, "active", now); err != nil {
+			return err
+		}
+		n++
+	}
+	fmt.Fprintf(out, "activated %d card(s)\n", n)
+	return nil
+}
+
+func runReview(rv *Reviewer, project string, now int64, in io.Reader, out io.Writer) error {
+	dayStart := now - (now % 86400)
+	// mark which queued cards were due (for the log's was_due flag)
+	due, err := rv.Store.DueReviewCards(project, now, 1000)
+	if err != nil {
+		return err
+	}
+	dueIDs := map[int64]bool{}
+	for _, c := range due {
+		dueIDs[c.ID] = true
+	}
+	queue, err := rv.BuildQueue(project, now, dayStart)
+	if err != nil {
+		return err
+	}
+	sc := bufio.NewScanner(in)
+	reviewed := 0
+	for _, c := range queue {
+		fmt.Fprintf(out, "Q: %s\n", c.Front)
+		fmt.Fprintf(out, "A: %s\n", c.Back)
+		fmt.Fprint(out, "grade (1=again 2=hard 3=good 4=easy, q=quit): ")
+		if !sc.Scan() {
+			break
+		}
+		line := strings.TrimSpace(sc.Text())
+		if line == "q" || line == "" {
+			break
+		}
+		g, ok := parseGrade(line)
+		if !ok {
+			fmt.Fprintf(out, "  ignored %q\n", line)
+			continue
+		}
+		if _, err := rv.Record(c.ID, g, dueIDs[c.ID], now); err != nil {
+			return err
+		}
+		reviewed++
+	}
+	fmt.Fprintf(out, "reviewed %d card(s)\n", reviewed)
+	return nil
+}
+
+func runStats(rv *Reviewer, project string, now int64, out io.Writer) error {
+	cov, err := rv.Coverage(project, now)
+	if err != nil {
+		return err
+	}
+	for _, c := range cov {
+		fmt.Fprintf(out, "  %-40s total=%d active=%d draft=%d due=%d\n", c.Part, c.Total, c.Active, c.Draft, c.Due)
+	}
+	rate, n, err := rv.PassRate(project, 0)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "pass-rate: %.0f%% over %d review(s)\n", rate*100, n)
+	return nil
+}
+
+func parseGrade(s string) (Grade, bool) {
+	switch s {
+	case "1":
+		return GradeAgain, true
+	case "2":
+		return GradeHard, true
+	case "3":
+		return GradeGood, true
+	case "4":
+		return GradeEasy, true
+	}
+	return 0, false
 }
 
 func projectName(root string) string {

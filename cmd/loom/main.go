@@ -48,7 +48,7 @@ func runFlashcards(args []string) error {
 		return err
 	}
 	defer st.Close()
-	return flashcards.RunCLI(args, st, "claude", cfg.LoomDir, time.Now().Unix(), os.Stdout)
+	return flashcards.RunCLI(args, st, "claude", cfg.LoomDir, time.Now().Unix(), os.Stdin, os.Stdout)
 }
 
 func run() error {

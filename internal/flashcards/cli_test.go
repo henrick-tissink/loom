@@ -3,6 +3,7 @@ package flashcards
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/henricktissink/loom/internal/store"
@@ -68,7 +69,7 @@ func TestRunCLIStoresThenIsIdempotent(t *testing.T) {
 	project := projectName(root)
 
 	var buf1 bytes.Buffer
-	if err := RunCLI([]string{"generate", root}, st, bin, root, 100, &buf1); err != nil {
+	if err := RunCLI([]string{"generate", root}, st, bin, root, 100, strings.NewReader(""), &buf1); err != nil {
 		t.Fatalf("RunCLI run 1: %v", err)
 	}
 	after1, _ := st.FlashcardsForProject(project)
@@ -77,7 +78,7 @@ func TestRunCLIStoresThenIsIdempotent(t *testing.T) {
 	}
 
 	var buf2 bytes.Buffer
-	if err := RunCLI([]string{"generate", root}, st, bin, root, 200, &buf2); err != nil {
+	if err := RunCLI([]string{"generate", root}, st, bin, root, 200, strings.NewReader(""), &buf2); err != nil {
 		t.Fatalf("RunCLI run 2: %v", err)
 	}
 	after2, _ := st.FlashcardsForProject(project)
