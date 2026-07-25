@@ -1,5 +1,10 @@
 package store
 
+import (
+	"database/sql"
+	"strings"
+)
+
 // Flashcard is one row of the flashcards table (2026-07-25 flashcards slice 1).
 // (Anchor, StemHash) is the stable identity: the natural source location plus a
 // normalized question stem, never the card text — so regeneration re-links to
@@ -41,6 +46,24 @@ func (s *Store) FlashcardsForProject(project string) ([]Flashcard, error) {
 	if err != nil {
 		return nil, err
 	}
+	return scanCards(rows)
+}
+
+// errNoRows aliases sql.ErrNoRows so callers in this package need not import database/sql.
+var errNoRows = sql.ErrNoRows
+
+// prefixed rewrites a comma-separated column list with a table alias prefix,
+// e.g. prefixed("id, project", "c.") == "c.id, c.project".
+func prefixed(cols, prefix string) string {
+	parts := strings.Split(cols, ", ")
+	for i, p := range parts {
+		parts[i] = prefix + p
+	}
+	return strings.Join(parts, ", ")
+}
+
+// scanCards scans a rows cursor selecting flashcardCols (in order) into Flashcards.
+func scanCards(rows *sql.Rows) ([]Flashcard, error) {
 	defer rows.Close()
 	var out []Flashcard
 	for rows.Next() {

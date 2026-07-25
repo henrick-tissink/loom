@@ -479,6 +479,21 @@ func (s *Store) migrate() error {
 			last_grade    INTEGER NOT NULL DEFAULT 0,
 			last_reviewed INTEGER NOT NULL DEFAULT 0
 		)`,
+		// v21: when a card was first reviewed, for the daily new-card cap
+		// (2026-07-25-flashcards-slice2). Set once on the first RecordReview and
+		// never changed. Own slot: ALTER has no IF NOT EXISTS.
+		`ALTER TABLE flashcard_reviews ADD COLUMN introduced_at INTEGER NOT NULL DEFAULT 0`,
+		// v22: append-only review history. The flashcard_reviews row holds only
+		// CURRENT SM-2 state; an honest rolling pass-rate (spec §9) needs the
+		// event log — one row per graded review.
+		`CREATE TABLE IF NOT EXISTS flashcard_review_log (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			card_id     INTEGER NOT NULL,
+			grade       INTEGER NOT NULL,
+			was_due     INTEGER NOT NULL DEFAULT 0,
+			reviewed_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_frlog_card ON flashcard_review_log(card_id, reviewed_at)`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {

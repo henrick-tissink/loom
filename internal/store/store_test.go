@@ -881,7 +881,7 @@ func TestMigrationV10ToV18FromStaleUserVersion(t *testing.T) {
 	}
 }
 
-// TestUserVersionIsEighteen asserts the ABSOLUTE migration head, which the
+// TestUserVersionIsPinned asserts the ABSOLUTE migration head (22), which the
 // orchestrator spec §13 asks for by name and for a specific reason: revision 1
 // of that spec allocated an already-occupied slot, and migrate() loops
 // `for i := v; i < len(migrations)`, so a DB sitting at the colliding version
@@ -889,15 +889,16 @@ func TestMigrationV10ToV18FromStaleUserVersion(t *testing.T) {
 // fresh-DB test, broken on every real one. A relative assertion cannot catch
 // that. When a later slice adds a slot, this number moves with it deliberately.
 // (Name kept from the v18 head; v19/v20 added by the 2026-07-25-flashcards-
-// slice1 plan — see TestMigrationHeadIsPinned for that pin.)
-func TestUserVersionIsEighteen(t *testing.T) {
+// slice1 plan; v21/v22 added by the 2026-07-25-flashcards-slice2 plan — see
+// TestMigrationHeadIsPinned for that pin.)
+func TestUserVersionIsPinned(t *testing.T) {
 	s := open(t)
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 20 {
-		t.Fatalf("user_version = %d, want 20", v)
+	if v != 22 {
+		t.Fatalf("user_version = %d, want 22", v)
 	}
 	for _, obj := range []string{"orchestrators", "delegation_runs", "delegation_tasks",
 		"delegation_artifacts", "delegation_amendments"} {
@@ -1075,7 +1076,7 @@ func TestProjectNotesDirSurvivesRepoint(t *testing.T) {
 // means a slot was added, and the question to answer is whether every
 // already-migrated DB in existence will still receive it.
 func TestMigrationHeadIsPinned(t *testing.T) {
-	// 20 since §§9-12 were unparked and their failure modes closed: v14
+	// 22 since §§9-12 were unparked and their failure modes closed: v14
 	// delegation_amendments, v15 delegation_tasks.needs_snapshot, v16
 	// delegation_amendments.rejected_at (§11.3's durable NO), v17
 	// delegation_tasks.seed_owed_since (§12.2's `block-stale` clock, which
@@ -1084,9 +1085,11 @@ func TestMigrationHeadIsPinned(t *testing.T) {
 	// already at 13 enters the loop at i=13 and receives all five, which
 	// TestMigrationV10ToV18FromStaleUserVersion exercises against a real file.
 	// v19/v20 (2026-07-25-flashcards-slice1 plan) added the flashcards and
-	// flashcard_reviews tables — confirmed safe to replay from every stale
-	// version by TestMigrationsReplayFromEveryStaleVersion.
-	const wantHead = 20
+	// flashcard_reviews tables; v21/v22 (2026-07-25-flashcards-slice2 plan)
+	// added flashcard_reviews.introduced_at and flashcard_review_log —
+	// confirmed safe to replay from every stale version by
+	// TestMigrationsReplayFromEveryStaleVersion.
+	const wantHead = 22
 
 	s := open(t)
 	var v int
