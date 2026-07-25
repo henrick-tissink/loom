@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/henricktissink/loom/internal/config"
+	"github.com/henricktissink/loom/internal/flashcards"
 	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/registry"
@@ -22,10 +23,32 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "flashcards" {
+		if err := runFlashcards(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "loom:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "loom:", err)
 		os.Exit(1)
 	}
+}
+
+// runFlashcards wires the flashcards CLI to config + store, using the real
+// `claude` binary and the loom data dir as the child workdir.
+func runFlashcards(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	return flashcards.RunCLI(args, st, "claude", cfg.LoomDir, time.Now().Unix(), os.Stdout)
 }
 
 func run() error {
