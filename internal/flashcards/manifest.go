@@ -83,13 +83,16 @@ func BuildManifest(projectRoot string) ([]Part, error) {
 			return nil
 		}
 		rel := relTo(projectRoot, path)
-		usedSlugs := map[string]int{}
+		// usedSlugs holds slugs already EMITTED for this doc (not raw occurrence
+		// counts): a synthesized "foo-2" can equal another heading's natural
+		// slug, so uniqueness must be checked against what was actually assigned.
+		usedSlugs := map[string]bool{}
 		for _, h := range arch.Headings(string(b)) {
 			slug := h.Slug
-			if usedSlugs[h.Slug] > 0 {
-				slug = fmt.Sprintf("%s-%d", h.Slug, usedSlugs[h.Slug]+1)
+			for n := 2; usedSlugs[slug]; n++ {
+				slug = fmt.Sprintf("%s-%d", h.Slug, n)
 			}
-			usedSlugs[h.Slug]++
+			usedSlugs[slug] = true
 			ref := rel + "#" + slug
 			parts = append(parts, Part{Kind: PartDoc, ID: ref, Title: h.Text, SourceRef: ref, Source: h.Body})
 		}

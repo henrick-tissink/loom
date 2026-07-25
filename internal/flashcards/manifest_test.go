@@ -104,3 +104,30 @@ func TestBuildManifestHandlesFormattedAndDuplicateHeadings(t *testing.T) {
 		t.Fatalf("doc parts = %d, want 3", docCount)
 	}
 }
+
+func TestBuildManifestDedupSurvivesNaturalSlugCollision(t *testing.T) {
+	root := t.TempDir()
+	// Third heading's natural slug ("overview-2") equals the synthesized slug the
+	// second heading would take — the de-dup must still keep all three IDs unique.
+	writeFile(t, filepath.Join(root, "docs", "h.md"),
+		"## Overview\na\n## Overview\nb\n## Overview 2\nc\n")
+	parts, err := BuildManifest(root)
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	ids := map[string]bool{}
+	var doc int
+	for _, p := range parts {
+		if p.Kind != PartDoc {
+			continue
+		}
+		doc++
+		if ids[p.ID] {
+			t.Fatalf("duplicate doc part ID: %q", p.ID)
+		}
+		ids[p.ID] = true
+	}
+	if doc != 3 {
+		t.Fatalf("doc parts = %d, want 3 unique", doc)
+	}
+}
