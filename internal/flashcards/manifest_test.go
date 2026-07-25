@@ -1,0 +1,75 @@
+package flashcards
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBuildManifestEnumeratesCodeAndDocHeadings(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "status.go"), "package status\nfunc Fuse() int { return 1 }\n")
+	writeFile(t, filepath.Join(root, "docs", "ARCHITECTURE.md"),
+		"# Loom\nintro\n## Status\nhow status works\n## Data model\nthe db\n")
+
+	parts, err := BuildManifest(root)
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+
+	var code, docs int
+	for _, p := range parts {
+		switch p.Kind {
+		case PartCode:
+			code++
+			if p.Source == "" || p.SourceRef == "" {
+				t.Fatalf("code part missing source/ref: %+v", p)
+			}
+		case PartDoc:
+			docs++
+		}
+	}
+	if code < 1 {
+		t.Fatalf("want >=1 code part, got %d", code)
+	}
+	if docs != 3 { // three headings: Loom, Status, Data model
+		t.Fatalf("want 3 doc heading parts, got %d", docs)
+	}
+	// deterministic order
+	for i := 1; i < len(parts); i++ {
+		if parts[i-1].ID > parts[i].ID {
+			t.Fatalf("parts not sorted by ID: %q > %q", parts[i-1].ID, parts[i].ID)
+		}
+	}
+	// a doc part carries its heading section text and a #slug ref
+	for _, p := range parts {
+		if p.Kind == PartDoc && p.Title == "Status" {
+			if p.SourceRef == "" || filepath.Ext(p.SourceRef) != "" && !contains(p.SourceRef, "#") {
+				t.Fatalf("doc SourceRef should carry #slug: %q", p.SourceRef)
+			}
+			if !contains(p.Source, "how status works") {
+				t.Fatalf("Status section should include its body, got %q", p.Source)
+			}
+		}
+	}
+}
+
+func contains(s, sub string) bool { return len(s) >= len(sub) && (indexOf(s, sub) >= 0) }
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
