@@ -119,3 +119,44 @@ func TestUsageAbsentLeavesCtx(t *testing.T) {
 		t.Fatalf("CtxTokens = %d", c.CtxTokens())
 	}
 }
+
+// --- regression: "needs you while busy" (2026-07-25) ---
+// Claude Code emits thinking-only and text-only assistant messages MID-TURN,
+// before the tool call lands. They carry stop_reason "tool_use" and have no
+// tool_use block. Verified against a real transcript: 332/332 such records were
+// followed by more assistant activity, never a user turn — Claude was still
+// working. The classifier used to call these needs_you (absence of a tool_use
+// block), so loom notified "needs you" while the session was busy.
+const (
+	lineAsstThinkingMidTurn = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"let me consider the options"}],"stop_reason":"tool_use"}}`
+	lineAsstTextMidTurn     = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check the file first."}],"stop_reason":"tool_use"}}`
+)
+
+func TestThinkingMidTurnIsRunning(t *testing.T) {
+	if s := feed(t, lineUserPrompt, lineAsstThinkingMidTurn).State(); s != StateRunning {
+		t.Fatalf("thinking mid-turn (stop_reason tool_use): state = %v, want Running (still busy)", s)
+	}
+}
+
+func TestTextMidTurnIsRunning(t *testing.T) {
+	if s := feed(t, lineUserPrompt, lineAsstTextMidTurn).State(); s != StateRunning {
+		t.Fatalf("text mid-turn (stop_reason tool_use): state = %v, want Running (still busy)", s)
+	}
+}
+
+func TestEndTurnTextIsNeedsYou(t *testing.T) {
+	if s := feed(t, lineUserPrompt, lineAsstEndTurn).State(); s != StateNeedsYou {
+		t.Fatalf("end_turn text: state = %v, want NeedsYou (genuine wait)", s)
+	}
+}
+
+// A thinking-only message can carry stop_reason "end_turn" yet is still
+// mid-turn — the text answer (or a tool) always follows. Verified 225/225 such
+// records were followed by more assistant activity, never a user turn.
+const lineAsstThinkingEndTurn = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"final considerations"}],"stop_reason":"end_turn"}}`
+
+func TestThinkingEndTurnIsRunning(t *testing.T) {
+	if s := feed(t, lineUserPrompt, lineAsstThinkingEndTurn).State(); s != StateRunning {
+		t.Fatalf("thinking-only end_turn: state = %v, want Running (text answer still to come)", s)
+	}
+}

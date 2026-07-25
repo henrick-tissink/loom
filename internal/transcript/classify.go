@@ -31,6 +31,14 @@ type record struct {
 	Message     *struct {
 		Content json.RawMessage `json:"content"`
 		Usage   *usage          `json:"usage"`
+		// StopReason is the API stop reason on an assistant message. It is the
+		// authoritative "did the turn end?" signal: "tool_use"/"pause_turn"
+		// mean Claude is still working (a thinking or text message emitted
+		// mid-turn before the tool call lands), while "end_turn" (and the other
+		// terminal reasons) mean control returned to the user. Keying needs_you
+		// on the absence of a tool_use BLOCK instead misfired on every mid-turn
+		// thinking/text message — the "needs you while busy" bug.
+		StopReason string `json:"stop_reason"`
 	} `json:"message"`
 }
 
@@ -83,7 +91,25 @@ func (c *Classifier) Feed(line []byte) {
 			c.state = StateRunning // tool pending: its result would be a LATER user record
 			return
 		}
-		c.state = StateNeedsYou
+		// No tool_use block. The session is genuinely waiting ONLY when it has
+		// delivered a TEXT answer AND the turn has ended. Two mid-turn shapes
+		// used to misfire as needs_you (the "needs you while busy" bug), both
+		// verified against a real transcript:
+		//   • thinking-only messages — ALWAYS mid-turn (225/225 followed by more
+		//     assistant activity). Thinking precedes a tool call or the text
+		//     answer, so their stop_reason is unreliable: 61 carried "end_turn"
+		//     yet the text answer landed ~7s later.
+		//   • text messages whose stop_reason is "tool_use"/"pause_turn" — a
+		//     preamble before the next tool call (168/168 continued).
+		// An empty stop_reason (older transcripts, pre stop_reason) is treated
+		// as terminal, preserving the original text→needs_you behavior.
+		sr := stopReason(r)
+		_, hasText := findBlock(blocks, "text")
+		if hasText && sr != "tool_use" && sr != "pause_turn" {
+			c.state = StateNeedsYou
+			return
+		}
+		c.state = StateRunning // thinking mid-turn, or a text preamble before a tool
 	case "user":
 		if _, ok := findBlock(blocks, "tool_result"); ok {
 			c.state = StateRunning // claude is consuming the result
@@ -103,6 +129,13 @@ func parseBlocks(r record) []block {
 		return nil
 	}
 	return bs
+}
+
+func stopReason(r record) string {
+	if r.Message == nil {
+		return ""
+	}
+	return r.Message.StopReason
 }
 
 func findBlock(bs []block, typ string) (name string, ok bool) {
