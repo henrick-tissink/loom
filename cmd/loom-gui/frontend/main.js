@@ -794,6 +794,7 @@ function renderProject() {
       ${p.missing ? `<span class="po-tag">missing</span>` : ""}
       <span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(p.root || "no directory")}</span>
       <span class="po-acts">
+        <button class="sh-btn sh-btn-study" id="po-study">✦ Study</button>
         <button class="sh-btn" id="po-hide">${p.hidden ? "Show" : "Hide"}</button>
         <button class="sh-btn" id="po-solo">${p.solo ? "Leave solo" : "Solo"}</button>
         <button class="sh-btn" id="po-rename">Rename</button>
@@ -834,6 +835,7 @@ function renderProject() {
     const el = document.getElementById(id);
     if (el && ungrouped) el.disabled = true;
   }
+  on("po-study", () => openStudy(p.root));
   on("po-hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !p.hidden)));
   on("po-solo", () => projectAction(() => window.go.main.App.SetProjectSolo(p.root, !p.solo)));
   on("po-rename", async () => {
@@ -4230,3 +4232,228 @@ function openSearch() {
     }, 200);
   });
 }
+
+// ===== Flashcards Study surface (slice 3b) =====
+// A stage surface reached from a project overview — never a fourth nav mode, so
+// it slots into the projects · threads · stage axis. Views: coverage (landing) ·
+// review (focused single card) · curate. Bridge methods (Flashcard*) live on the
+// GUI App (slice 3a). poll() only refreshes a kind==="project" stage, so this
+// surface is never clobbered mid-review.
+
+let study = { queue: [], idx: 0, revealed: false, drafts: [] };
+
+function studyProjName(root) {
+  const p = projectByRoot(root);
+  return p ? p.name : (root ? root.split("/").pop() : "project");
+}
+
+function openStudy(root) {
+  teardownTerminal();
+  activeName = null;
+  stageView = { kind: "study", root, view: "coverage" };
+  study = { queue: [], idx: 0, revealed: false, drafts: [] };
+  renderStudy();
+  renderRail();
+}
+
+function studyHeader(title, sub) {
+  return `<div id="stage-header" class="stage-head study-head">
+      <button class="sh-btn study-back" id="st-back">‹ ${esc(studyProjName(stageView.root))}</button>
+      <span class="sh-name">${esc(title)}</span>
+      ${sub ? `<span class="sh-proj">${esc(sub)}</span>` : ""}
+    </div>`;
+}
+
+function renderStudy() {
+  if (stageView.kind !== "study") return;
+  if (stageView.view === "review") return renderStudyReview();
+  if (stageView.view === "curate") return renderStudyCurate();
+  return renderStudyCoverage();
+}
+
+async function renderStudyCoverage() {
+  const stage = document.getElementById("stage");
+  if (!stage) return;
+  const root = stageView.root;
+  let stats = { passRate: 0, reviews: 0, parts: [] };
+  const fn = bound("FlashcardStats");
+  if (fn) { try { stats = (await fn(root)) || stats; } catch (e) { console.error("fc stats", e); } }
+  if (stageView.kind !== "study" || stageView.root !== root) return;
+  const parts = stats.parts || [];
+  const sum = (k) => parts.reduce((n, p) => n + (p[k] || 0), 0);
+  const totalDue = sum("due"), totalDraft = sum("draft"), totalCards = sum("total");
+  const pct = Math.round((stats.passRate || 0) * 100);
+  const rows = parts.map((p) => `
+      <li class="st-part">
+        <span class="st-ppath">${esc(p.part)}</span>
+        <span class="st-pcounts">
+          <span class="st-chip">${p.total}</span>
+          ${p.due ? `<span class="st-chip st-due">${p.due} due</span>` : ""}
+          ${p.draft ? `<span class="st-chip st-draft">${p.draft} draft</span>` : ""}
+        </span>
+      </li>`).join("");
+  stage.replaceChildren();
+  stage.innerHTML = studyHeader("Study", studyProjName(root)) + `
+    <div class="study">
+      <div class="st-summary">
+        <div class="st-metric"><span class="st-big">${totalCards}</span><span class="st-lbl">cards</span></div>
+        <div class="st-metric"><span class="st-big">${totalDue}</span><span class="st-lbl">due now</span></div>
+        <div class="st-metric"><span class="st-big">${stats.reviews ? pct + "%" : "—"}</span><span class="st-lbl">${stats.reviews ? "recall over " + stats.reviews + " reviews" : "no reviews yet"}</span></div>
+      </div>
+      <div class="st-actions">
+        <button class="st-cta st-cta-primary" id="st-review"${totalDue ? "" : " disabled"}>Review ${totalDue} due</button>
+        <button class="st-cta" id="st-curate"${totalDraft ? "" : " disabled"}>Curate ${totalDraft} draft${totalDraft === 1 ? "" : "s"}</button>
+      </div>
+      ${parts.length ? `<ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet — generate them with <code>loom flashcards generate ${esc(root)}</code>.</div>`}
+    </div>`;
+  const back = document.getElementById("st-back"); if (back) back.addEventListener("click", () => openProject(root));
+  const rev = document.getElementById("st-review"); if (rev && totalDue) rev.addEventListener("click", () => startReview(root));
+  const cur = document.getElementById("st-curate"); if (cur && totalDraft) cur.addEventListener("click", () => startCurate(root));
+}
+
+async function startReview(root) {
+  let q = [];
+  const fn = bound("FlashcardQueue");
+  if (fn) { try { q = (await fn(root)) || []; } catch (e) { console.error("fc queue", e); } }
+  if (stageView.kind !== "study" || stageView.root !== root) return;
+  study.queue = q; study.idx = 0; study.revealed = false;
+  stageView.view = "review";
+  renderStudyReview();
+}
+
+function renderStudyReview() {
+  const stage = document.getElementById("stage");
+  if (!stage) return;
+  const root = stageView.root;
+  const q = study.queue;
+  stage.replaceChildren();
+  if (study.idx >= q.length) {
+    stage.innerHTML = studyHeader("Study", studyProjName(root)) + `
+      <div class="study study-done">
+        <div class="st-done-mark">✦</div>
+        <div class="st-done-msg">${q.length ? "All caught up." : "Nothing due right now."}</div>
+        <button class="st-cta" id="st-done-back">Back to coverage</button>
+      </div>`;
+    document.getElementById("st-back").addEventListener("click", () => openProject(root));
+    document.getElementById("st-done-back").addEventListener("click", () => { stageView.view = "coverage"; renderStudy(); });
+    return;
+  }
+  const card = q[study.idx];
+  const revealed = study.revealed;
+  stage.innerHTML = studyHeader("Review", "") + `
+    <div class="study study-review">
+      <div class="st-cardmeta"><span class="st-part-lbl">${esc(card.part)} · ${esc(card.type)}</span><span class="st-count">${study.idx + 1} / ${q.length}</span></div>
+      <div class="st-card${revealed ? " revealed" : ""}">
+        <div class="st-front">${esc(card.front)}</div>
+        ${revealed ? `<div class="st-divider"><span>answer</span></div><div class="st-back">${esc(card.back)}</div>` : ""}
+      </div>
+      <div class="st-controls">
+        ${revealed
+          ? `<button class="st-grade st-g1" data-g="1"><b>Again</b><i>1</i></button>
+             <button class="st-grade st-g2" data-g="2"><b>Hard</b><i>2</i></button>
+             <button class="st-grade st-g3" data-g="3"><b>Good</b><i>3</i></button>
+             <button class="st-grade st-g4" data-g="4"><b>Easy</b><i>4</i></button>`
+          : `<button class="st-cta st-cta-primary st-reveal" id="st-reveal">Show answer <span class="st-key">space</span></button>`}
+      </div>
+    </div>`;
+  document.getElementById("st-back").addEventListener("click", () => openProject(root));
+  if (!revealed) {
+    document.getElementById("st-reveal").addEventListener("click", revealCard);
+  } else {
+    stage.querySelectorAll(".st-grade").forEach((b) =>
+      b.addEventListener("click", () => gradeCard(parseInt(b.getAttribute("data-g"), 10))));
+  }
+}
+
+function revealCard() {
+  if (stageView.kind !== "study" || stageView.view !== "review") return;
+  if (study.revealed || study.idx >= study.queue.length) return;
+  study.revealed = true;
+  renderStudyReview();
+}
+
+async function gradeCard(grade) {
+  if (stageView.kind !== "study" || stageView.view !== "review" || !study.revealed) return;
+  const card = study.queue[study.idx];
+  if (!card) return;
+  const fn = bound("FlashcardGrade");
+  if (fn) {
+    try {
+      const susp = await fn(card.id, grade, !!card.wasDue);
+      if (susp) studyToast(`"${stTruncate(card.front, 40)}" suspended — repeated lapses`);
+    } catch (e) { console.error("fc grade", e); }
+  }
+  study.idx++; study.revealed = false;
+  renderStudyReview();
+}
+
+async function startCurate(root) {
+  let drafts = [];
+  const fn = bound("FlashcardDrafts");
+  if (fn) { try { drafts = (await fn(root)) || []; } catch (e) { console.error("fc drafts", e); } }
+  if (stageView.kind !== "study" || stageView.root !== root) return;
+  study.drafts = drafts;
+  stageView.view = "curate";
+  renderStudyCurate();
+}
+
+function renderStudyCurate() {
+  const stage = document.getElementById("stage");
+  if (!stage) return;
+  const root = stageView.root;
+  const drafts = study.drafts || [];
+  const rows = drafts.map((c) => `
+      <li class="st-draft" data-id="${c.id}">
+        <div class="st-dtext"><div class="st-dfront">${esc(c.front)}</div><div class="st-dback">${esc(c.back)}</div><div class="st-dmeta">${esc(c.part)} · ${esc(c.type)}</div></div>
+        <div class="st-dacts"><button class="st-dbtn st-keep">keep</button><button class="st-dbtn st-kill">kill</button></div>
+      </li>`).join("");
+  stage.replaceChildren();
+  stage.innerHTML = studyHeader("Curate", studyProjName(root)) + `
+    <div class="study study-curate">
+      <div class="st-curate-head">
+        <span>${drafts.length} draft${drafts.length === 1 ? "" : "s"} awaiting review</span>
+        ${drafts.length ? `<button class="st-cta st-cta-primary" id="st-actall">Activate all</button>` : ""}
+      </div>
+      ${drafts.length ? `<ul class="st-drafts">${rows}</ul>` : `<div class="st-empty">No drafts — generated cards land here to keep or kill.</div>`}
+    </div>`;
+  document.getElementById("st-back").addEventListener("click", () => { stageView.view = "coverage"; renderStudy(); });
+  const all = document.getElementById("st-actall");
+  if (all) all.addEventListener("click", async () => {
+    const afn = bound("FlashcardActivateAll");
+    if (afn) { try { await afn(root); } catch (e) { console.error("fc activateAll", e); } }
+    startCurate(root);
+  });
+  stage.querySelectorAll(".st-draft").forEach((li) => {
+    const id = parseInt(li.getAttribute("data-id"), 10);
+    li.querySelector(".st-keep").addEventListener("click", async () => {
+      const kfn = bound("FlashcardActivate"); if (kfn) { try { await kfn(id); } catch (e) { console.error(e); } }
+      startCurate(root);
+    });
+    li.querySelector(".st-kill").addEventListener("click", async () => {
+      const xfn = bound("FlashcardKill"); if (xfn) { try { await xfn(id); } catch (e) { console.error(e); } }
+      startCurate(root);
+    });
+  });
+}
+
+function studyToast(msg) {
+  const stage = document.getElementById("stage");
+  if (!stage) return;
+  const t = document.createElement("div");
+  t.className = "st-toast"; t.textContent = msg;
+  stage.appendChild(t);
+  setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 400); }, 3000);
+}
+
+function stTruncate(s, n) { s = s || ""; return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+// Keyboard during a review session: space reveals, 1-4 grade.
+document.addEventListener("keydown", (e) => {
+  if (stageView.kind !== "study" || stageView.view !== "review") return;
+  if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  if ((e.key === " " || e.code === "Space") && !study.revealed && study.idx < study.queue.length) {
+    e.preventDefault(); revealCard();
+  } else if (study.revealed && e.key >= "1" && e.key <= "4") {
+    e.preventDefault(); gradeCard(parseInt(e.key, 10));
+  }
+});

@@ -941,3 +941,81 @@ button.dg-chip { cursor: pointer; }
   @keyframes dg-pulse { 50% { box-shadow: 0 0 10px rgba(197, 106, 74, 0.85); } }
   .doc-tab, .dg-chip, .doc-orow { transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease; }
 }
+
+/* ===== Flashcards Study surface (slice 3b) ===== */
+.sh-btn-study { color: var(--accent); font-weight: 600; }
+.study-head .study-back { margin-right: 4px; color: var(--text-dim); }
+.study { padding: 24px 28px; max-width: 720px; margin: 0 auto; overflow-y: auto; }
+
+/* coverage landing */
+.st-summary { display: flex; gap: 34px; padding: 6px 0 22px; border-bottom: 1px solid var(--edge); }
+.st-metric { display: flex; flex-direction: column; gap: 3px; }
+.st-big { font-size: 30px; font-weight: 600; color: var(--text); line-height: 1; }
+.st-lbl { font-size: 12px; color: var(--text-dim); }
+.st-actions { display: flex; gap: 10px; margin: 20px 0 4px; }
+.st-cta { font: inherit; font-size: 13px; font-weight: 500; padding: 8px 16px; border-radius: var(--radius);
+  border: 1px solid var(--edge); background: var(--surface); color: var(--text); cursor: pointer;
+  transition: background .12s, border-color .12s, transform .06s; }
+.st-cta:hover:not(:disabled) { border-color: var(--accent-line); }
+.st-cta:active:not(:disabled) { transform: translateY(1px); }
+.st-cta:disabled { opacity: .42; cursor: default; }
+.st-cta-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.st-cta-primary:hover:not(:disabled) { filter: brightness(1.06); }
+.st-parts { list-style: none; margin: 14px 0 0; padding: 0; }
+.st-part { display: flex; align-items: center; justify-content: space-between; padding: 9px 2px; border-bottom: 1px solid var(--edge); }
+.st-ppath { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+.st-pcounts { display: flex; gap: 6px; align-items: center; }
+.st-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--sel); color: var(--text-dim); }
+.st-chip.st-due { background: rgba(62,154,128,.16); color: #3E9A80; }
+.st-chip.st-draft { background: rgba(197,106,74,.16); color: #C56A4A; }
+.st-empty { color: var(--text-dim); font-size: 13px; padding: 22px 0; line-height: 1.7; }
+.st-empty code { font-family: var(--font-mono); font-size: 12px; background: var(--sel); padding: 1px 6px; border-radius: 4px; }
+
+/* review — focused single card */
+.study-review { display: flex; flex-direction: column; align-items: center; }
+.st-cardmeta { width: 100%; display: flex; justify-content: space-between; font-size: 12px; color: var(--text-faint); margin-bottom: 12px; }
+.st-part-lbl { font-family: var(--font-mono); }
+.st-card { width: 100%; min-height: 210px; background: var(--surface); border: 1px solid var(--edge);
+  border-radius: 14px; box-shadow: var(--shadow-card); padding: 42px 38px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center; }
+.st-front { font-size: 21px; line-height: 1.45; color: var(--text); font-weight: 500; white-space: pre-wrap; }
+.st-divider { width: 100%; text-align: center; margin: 24px 0 16px; border-top: 1px solid var(--edge); }
+.st-divider span { position: relative; top: -9px; background: var(--surface); padding: 0 12px; font-size: 10px;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--text-faint); }
+.st-back { font-size: 17px; line-height: 1.5; color: var(--text-dim); white-space: pre-wrap; }
+.st-controls { display: flex; gap: 10px; margin-top: 24px; }
+.st-key { font-size: 10px; opacity: .8; margin-left: 8px; border: 1px solid currentColor; border-radius: 4px; padding: 1px 5px; }
+.st-grade { font: inherit; cursor: pointer; min-width: 86px; padding: 9px 10px 7px; border-radius: 10px;
+  border: 1px solid var(--edge); background: var(--surface); display: flex; flex-direction: column; align-items: center; gap: 3px;
+  transition: transform .06s, border-color .12s, background .12s; }
+.st-grade:hover { transform: translateY(-1px); }
+.st-grade:active { transform: translateY(1px); }
+.st-grade b { font-size: 13px; font-weight: 600; }
+.st-grade i { font-size: 10px; font-style: normal; opacity: .5; }
+.st-g1 { color: #C64C40; } .st-g1:hover { border-color: #C64C40; background: rgba(198,76,64,.08); }
+.st-g2 { color: #B8863C; } .st-g2:hover { border-color: #B8863C; background: rgba(184,134,60,.08); }
+.st-g3 { color: #4E9C6A; } .st-g3:hover { border-color: #4E9C6A; background: rgba(78,156,106,.08); }
+.st-g4 { color: #5B7FB8; } .st-g4:hover { border-color: #5B7FB8; background: rgba(91,127,184,.08); }
+
+/* done */
+.study-done { display: flex; flex-direction: column; align-items: center; gap: 12px; padding-top: 72px; }
+.st-done-mark { font-size: 42px; color: var(--accent); }
+.st-done-msg { font-size: 16px; color: var(--text-dim); }
+
+/* curate */
+.st-curate-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 14px; border-bottom: 1px solid var(--edge); font-size: 13px; color: var(--text-dim); }
+.st-drafts { list-style: none; margin: 0; padding: 0; }
+.st-draft { display: flex; gap: 14px; align-items: flex-start; padding: 13px 2px; border-bottom: 1px solid var(--edge); }
+.st-dtext { flex: 1; min-width: 0; }
+.st-dfront { font-size: 13.5px; color: var(--text); font-weight: 500; }
+.st-dback { font-size: 12.5px; color: var(--text-dim); margin-top: 3px; }
+.st-dmeta { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); margin-top: 4px; }
+.st-dacts { display: flex; gap: 6px; flex-shrink: 0; }
+.st-dbtn { font: inherit; font-size: 12px; cursor: pointer; padding: 4px 11px; border-radius: 7px; border: 1px solid var(--edge); background: var(--surface); color: var(--text-dim); }
+.st-keep:hover { border-color: #4E9C6A; color: #4E9C6A; }
+.st-kill:hover { border-color: #C64C40; color: #C64C40; }
+
+/* toast */
+.st-toast { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); background: var(--text); color: var(--bg);
+  font-size: 12.5px; padding: 9px 16px; border-radius: 8px; box-shadow: var(--shadow-card); opacity: 1; transition: opacity .4s; z-index: 40; }
+.st-toast.out { opacity: 0; }
