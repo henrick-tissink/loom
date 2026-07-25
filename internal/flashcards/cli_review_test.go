@@ -47,9 +47,15 @@ func TestRunCLICurateReviewStats(t *testing.T) {
 		t.Fatalf("review did not record a grade for the queued card")
 	}
 
-	// stats: one Good review → 100% measured pass-rate.
+	// review again: the card is now due after 1 day; feed Good again (2000 + 86400 = 88400, so review at 90000).
+	var rev2 bytes.Buffer
+	if err := RunCLI([]string{"review", root}, st, "claude", root, 90000, strings.NewReader("3\n"), &rev2); err != nil {
+		t.Fatalf("review (2nd): %v", err)
+	}
+
+	// stats: one due Good review (first-exposure is excluded) → 100% measured pass-rate.
 	var stx bytes.Buffer
-	if err := RunCLI([]string{"stats", root}, st, "claude", root, 3000, strings.NewReader(""), &stx); err != nil {
+	if err := RunCLI([]string{"stats", root}, st, "claude", root, 100000, strings.NewReader(""), &stx); err != nil {
 		t.Fatalf("stats: %v", err)
 	}
 	if !strings.Contains(stx.String(), "pass-rate: 100%") {

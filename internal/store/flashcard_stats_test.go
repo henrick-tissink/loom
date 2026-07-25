@@ -25,12 +25,13 @@ func TestPartStatsAndPassRate(t *testing.T) {
 		t.Fatalf("a.go stats: %+v", ag)
 	}
 
-	st.AppendReviewLog(a1, 3, true, 500) // pass
-	st.AppendReviewLog(a1, 1, true, 600) // fail
-	st.AppendReviewLog(a1, 4, true, 700) // pass
+	st.AppendReviewLog(a1, 3, true, 500)  // pass
+	st.AppendReviewLog(a1, 1, true, 600)  // fail
+	st.AppendReviewLog(a1, 4, true, 700)  // pass
+	st.AppendReviewLog(a1, 3, false, 550) // first-exposure (not due) — must be EXCLUDED
 	passed, total, err := st.PassRate("p", 0)
 	if err != nil || total != 3 || passed != 2 {
-		t.Fatalf("PassRate: passed=%d total=%d err=%v (want 2/3)", passed, total, err)
+		t.Fatalf("PassRate: passed=%d total=%d err=%v (want 2/3 due-only; first-exposure excluded)", passed, total, err)
 	}
 	if p, _, _ := st.PassRate("p", 650); p != 1 { // only the grade-4 row is in-window
 		t.Fatalf("windowed PassRate passed=%d, want 1", p)
