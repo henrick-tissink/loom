@@ -47,7 +47,7 @@ func (pl *Pipeline) GenerateForPart(project string, p Part, now int64) (stored, 
 // RunCLI dispatches `loom flashcards <generate|curate|review|stats> <projectRoot> [args]`.
 func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, in io.Reader, out io.Writer) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: loom flashcards <generate|curate|review|stats> <projectRoot> [args]")
+		return fmt.Errorf("usage: loom flashcards <generate|curate|review|stats|export> <projectRoot> [args]")
 	}
 	verb, root := args[0], args[1]
 	project := projectName(root)
@@ -61,6 +61,8 @@ func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, i
 		return runReview(rv, project, now, in, out)
 	case "stats":
 		return runStats(rv, project, now, out)
+	case "export":
+		return runExport(args, st, project, out)
 	default:
 		return fmt.Errorf("unknown flashcards command %q", verb)
 	}
@@ -187,6 +189,29 @@ func runStats(rv *Reviewer, project string, now int64, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(out, "pass-rate: %.0f%% over %d review(s)\n", rate*100, n)
+	return nil
+}
+
+// runExport writes the project's active deck to out in the chosen format:
+// export <projectRoot> [csv|md]. csv is Anki-importable; md is a greppable
+// study document. The caller redirects to a file.
+func runExport(args []string, st *store.Store, project string, out io.Writer) error {
+	format := "csv"
+	if len(args) > 2 {
+		format = args[2]
+	}
+	cards, err := st.ExportCards(project)
+	if err != nil {
+		return err
+	}
+	switch format {
+	case "csv":
+		fmt.Fprint(out, ToCSV(cards))
+	case "md", "markdown":
+		fmt.Fprint(out, ToMarkdown(cards))
+	default:
+		return fmt.Errorf("unknown export format %q (want csv or md)", format)
+	}
 	return nil
 }
 
