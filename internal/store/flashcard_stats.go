@@ -2,7 +2,7 @@ package store
 
 // PartStat is per-manifest-part card counts for the coverage view.
 type PartStat struct {
-	Part                    string
+	Part                      string
 	Total, Active, Draft, Due int
 }
 
