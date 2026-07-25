@@ -888,14 +888,16 @@ func TestMigrationV10ToV18FromStaleUserVersion(t *testing.T) {
 // would skip the new slot entirely and open cleanly WITHOUT it — green on every
 // fresh-DB test, broken on every real one. A relative assertion cannot catch
 // that. When a later slice adds a slot, this number moves with it deliberately.
+// (Name kept from the v18 head; v19/v20 added by the 2026-07-25-flashcards-
+// slice1 plan — see TestMigrationHeadIsPinned for that pin.)
 func TestUserVersionIsEighteen(t *testing.T) {
 	s := open(t)
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 18 {
-		t.Fatalf("user_version = %d, want 18", v)
+	if v != 20 {
+		t.Fatalf("user_version = %d, want 20", v)
 	}
 	for _, obj := range []string{"orchestrators", "delegation_runs", "delegation_tasks",
 		"delegation_artifacts", "delegation_amendments"} {
@@ -1073,7 +1075,7 @@ func TestProjectNotesDirSurvivesRepoint(t *testing.T) {
 // means a slot was added, and the question to answer is whether every
 // already-migrated DB in existence will still receive it.
 func TestMigrationHeadIsPinned(t *testing.T) {
-	// 18 since §§9-12 were unparked and their failure modes closed: v14
+	// 20 since §§9-12 were unparked and their failure modes closed: v14
 	// delegation_amendments, v15 delegation_tasks.needs_snapshot, v16
 	// delegation_amendments.rejected_at (§11.3's durable NO), v17
 	// delegation_tasks.seed_owed_since (§12.2's `block-stale` clock, which
@@ -1081,7 +1083,10 @@ func TestMigrationHeadIsPinned(t *testing.T) {
 	// diff shown is the diff applied"). Confirmed rather than assumed — a DB
 	// already at 13 enters the loop at i=13 and receives all five, which
 	// TestMigrationV10ToV18FromStaleUserVersion exercises against a real file.
-	const wantHead = 18
+	// v19/v20 (2026-07-25-flashcards-slice1 plan) added the flashcards and
+	// flashcard_reviews tables — confirmed safe to replay from every stale
+	// version by TestMigrationsReplayFromEveryStaleVersion.
+	const wantHead = 20
 
 	s := open(t)
 	var v int

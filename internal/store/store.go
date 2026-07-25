@@ -443,6 +443,42 @@ func (s *Store) migrate() error {
 		//
 		// Own slot: ALTER has no IF NOT EXISTS.
 		`ALTER TABLE delegation_tasks ADD COLUMN certified_sha TEXT NOT NULL DEFAULT ''`,
+		// v19: flashcards (2026-07-25-flashcards-slice1 plan). A card is one
+		// atomic recall target. (anchor, stem_hash) is the dedup/identity key —
+		// NEVER the card text — so a reworded regeneration re-links to the same
+		// row instead of orphaning review progress (spec §7/§8). answer_hash
+		// drives due-now-on-answer-change in a later slice.
+		`CREATE TABLE IF NOT EXISTS flashcards (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			project     TEXT NOT NULL,
+			part        TEXT NOT NULL,
+			anchor      TEXT NOT NULL,
+			stem_hash   TEXT NOT NULL,
+			type        TEXT NOT NULL,
+			front       TEXT NOT NULL,
+			back        TEXT NOT NULL,
+			source_ref  TEXT NOT NULL DEFAULT '',
+			source_hash TEXT NOT NULL DEFAULT '',
+			answer_hash TEXT NOT NULL DEFAULT '',
+			status      TEXT NOT NULL DEFAULT 'draft',
+			created_at  INTEGER NOT NULL,
+			curated_at  INTEGER NOT NULL DEFAULT 0,
+			UNIQUE(anchor, stem_hash)
+		);
+		CREATE INDEX IF NOT EXISTS idx_flashcards_project ON flashcards(project, id)`,
+		// v20: per-card SM-2 review state (populated in Slice 2). Split from the
+		// card row so regeneration can replace a card's content without touching
+		// its schedule.
+		`CREATE TABLE IF NOT EXISTS flashcard_reviews (
+			card_id       INTEGER PRIMARY KEY,
+			ease          REAL NOT NULL DEFAULT 2.5,
+			interval      INTEGER NOT NULL DEFAULT 0,
+			due_at        INTEGER NOT NULL DEFAULT 0,
+			reps          INTEGER NOT NULL DEFAULT 0,
+			lapses        INTEGER NOT NULL DEFAULT 0,
+			last_grade    INTEGER NOT NULL DEFAULT 0,
+			last_reviewed INTEGER NOT NULL DEFAULT 0
+		)`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {
