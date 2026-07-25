@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/henricktissink/loom/internal/flashcards"
 	"github.com/henricktissink/loom/internal/store"
 )
@@ -120,4 +123,69 @@ func (a *App) FlashcardQueue(project string) []FlashcardDTO {
 
 func cardDTO(c store.Flashcard, wasDue bool) FlashcardDTO {
 	return FlashcardDTO{ID: c.ID, Part: c.Part, Type: c.Type, Front: c.Front, Back: c.Back, Status: c.Status, WasDue: wasDue}
+}
+
+var errFlashNoStore = errors.New("flashcards: no store")
+
+// FlashcardGrade records a grade (1..4) for a card and reports whether the card
+// was auto-suspended as a leech. wasDue must be the value the queue reported for
+// this card (retention vs. first-exposure), so the review log stays honest.
+func (a *App) FlashcardGrade(cardID int64, grade int, wasDue bool) (suspended bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			suspended, err = false, fmt.Errorf("flashcards: grade panicked: %v", r)
+		}
+	}()
+	if a.st == nil {
+		return false, errFlashNoStore
+	}
+	g := flashcards.Grade(grade)
+	if !flashcards.ValidGrade(g) {
+		return false, fmt.Errorf("flashcards: invalid grade %d", grade)
+	}
+	return a.reviewer().Record(cardID, g, wasDue, a.now().Unix())
+}
+
+// FlashcardActivate curates one draft card into the active deck.
+func (a *App) FlashcardActivate(cardID int64) error {
+	if a.st == nil {
+		return errFlashNoStore
+	}
+	return a.st.SetCardStatus(cardID, "active", a.now().Unix())
+}
+
+// FlashcardActivateAll activates every draft in a project and returns the count.
+func (a *App) FlashcardActivateAll(project string) (int, error) {
+	if a.st == nil {
+		return 0, errFlashNoStore
+	}
+	drafts, err := a.st.DraftsForProject(project)
+	if err != nil {
+		return 0, err
+	}
+	now := a.now().Unix()
+	n := 0
+	for _, c := range drafts {
+		if err := a.st.SetCardStatus(c.ID, "active", now); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// FlashcardEdit rewrites a card's text, recomputing its stem and answer hashes.
+func (a *App) FlashcardEdit(cardID int64, front, back string) error {
+	if a.st == nil {
+		return errFlashNoStore
+	}
+	return a.st.EditCardText(cardID, front, back, flashcards.StemHash(front), flashcards.Hash(back), a.now().Unix())
+}
+
+// FlashcardKill deletes a card and its review history (curation reject).
+func (a *App) FlashcardKill(cardID int64) error {
+	if a.st == nil {
+		return errFlashNoStore
+	}
+	return a.st.DeleteCard(cardID)
 }

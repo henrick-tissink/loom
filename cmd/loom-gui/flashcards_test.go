@@ -49,6 +49,75 @@ func TestFlashcardReadBridge_nilStoreEmpty(t *testing.T) {
 	}
 }
 
+func TestFlashcardMutationBridge(t *testing.T) {
+	app, st := newFlashApp(t)
+	draft := seedFCard(t, st, "a.go", "m1", "draft")
+
+	// invalid grade rejected; nil-store sentinels
+	nilApp := newApp(nil, tmux.New(), nil, nil, nil, time.Now)
+	if _, err := nilApp.FlashcardGrade(1, 3, false); err == nil {
+		t.Fatal("nil-store grade should error")
+	}
+	if err := nilApp.FlashcardActivate(1); err == nil {
+		t.Fatal("nil-store activate should error")
+	}
+
+	// activate the draft
+	if err := app.FlashcardActivate(draft); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if d := app.FlashcardDrafts("p"); len(d) != 0 {
+		t.Fatalf("draft still listed after activate: %+v", d)
+	}
+
+	// grade validation
+	if _, err := app.FlashcardGrade(draft, 9, false); err == nil {
+		t.Fatal("invalid grade 9 should error")
+	}
+	// a real grade records a review
+	if _, err := app.FlashcardGrade(draft, 3, false); err != nil {
+		t.Fatalf("Grade: %v", err)
+	}
+	if _, ok, _ := st.GetReview(draft); !ok {
+		t.Fatal("grade did not record a review row")
+	}
+
+	// edit recomputes hashes
+	if err := app.FlashcardEdit(draft, "new front", "new back"); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	cards, _ := st.FlashcardsForProject("p")
+	if cards[0].Front != "new front" || cards[0].StemHash == "m1" || cards[0].AnswerHash == "" {
+		t.Fatalf("edit not applied/hashed: %+v", cards[0])
+	}
+
+	// activate-all count
+	seedFCard(t, st, "b.go", "m2", "draft")
+	seedFCard(t, st, "b.go", "m3", "draft")
+	if n, err := app.FlashcardActivateAll("p"); err != nil || n != 2 {
+		t.Fatalf("ActivateAll = %d err=%v, want 2", n, err)
+	}
+
+	// kill removes the card
+	if err := app.FlashcardKill(draft); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	for _, c := range mustCards(t, st) {
+		if c.ID == draft {
+			t.Fatal("killed card still present")
+		}
+	}
+}
+
+func mustCards(t *testing.T, st *store.Store) []store.Flashcard {
+	t.Helper()
+	c, err := st.FlashcardsForProject("p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
 func TestFlashcardReadBridge_coverageDraftsQueue(t *testing.T) {
 	app, st := newFlashApp(t)
 	a1 := seedFCard(t, st, "a.go", "a1", "active") // will be due
