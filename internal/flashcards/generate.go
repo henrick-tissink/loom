@@ -59,7 +59,7 @@ func (g *Generator) Generate(project string, p Part, now int64) ([]store.Flashca
 		return nil, fmt.Errorf("parse cards: %w", err)
 	}
 
-	srcHash := Hash(p.Source)
+	srcHash := StructuralHash(p.SourceRef, p.Source)
 	var cards []store.Flashcard
 	for _, gc := range payload.Cards {
 		t := CardType(gc.Type)
