@@ -1,6 +1,7 @@
 package flashcards
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -82,82 +83,21 @@ func BuildManifest(projectRoot string) ([]Part, error) {
 			return nil
 		}
 		rel := relTo(projectRoot, path)
-		for _, sec := range headingSections(string(b)) {
-			parts = append(parts, Part{
-				Kind: PartDoc, ID: rel + "#" + sec.slug, Title: sec.title,
-				SourceRef: rel + "#" + sec.slug, Source: sec.body,
-			})
+		usedSlugs := map[string]int{}
+		for _, h := range arch.Headings(string(b)) {
+			slug := h.Slug
+			if usedSlugs[h.Slug] > 0 {
+				slug = fmt.Sprintf("%s-%d", h.Slug, usedSlugs[h.Slug]+1)
+			}
+			usedSlugs[h.Slug]++
+			ref := rel + "#" + slug
+			parts = append(parts, Part{Kind: PartDoc, ID: ref, Title: h.Text, SourceRef: ref, Source: h.Body})
 		}
 		return nil
 	})
 
-	sort.Slice(parts, func(i, j int) bool { return parts[i].ID < parts[j].ID })
+	sort.SliceStable(parts, func(i, j int) bool { return parts[i].ID < parts[j].ID })
 	return parts, nil
-}
-
-type section struct{ title, slug, body string }
-
-// headingSections splits markdown into one section per heading using arch.Render
-// (reused parser, heading Slugs included). A section's body is the source text
-// from the heading up to the next heading of the same or higher level.
-func headingSections(src string) []section {
-	blocks := arch.Render(src)
-	lines := strings.Split(src, "\n")
-	// find the source line index of each heading, in order
-	type h struct {
-		title, slug string
-		level, line int
-	}
-	var hs []h
-	li := 0
-	for _, b := range blocks {
-		if b.Kind != arch.BlockHeading {
-			continue
-		}
-		title := inlineText(b)
-		for li < len(lines) {
-			if isHeadingLine(lines[li], title) {
-				break
-			}
-			li++
-		}
-		hs = append(hs, h{title: title, slug: b.Slug, level: b.Level, line: li})
-		li++
-	}
-	var out []section
-	for i, cur := range hs {
-		end := len(lines)
-		for j := i + 1; j < len(hs); j++ {
-			if hs[j].level <= cur.level {
-				end = hs[j].line
-				break
-			}
-		}
-		body := strings.Join(lines[cur.line:end], "\n")
-		out = append(out, section{title: cur.title, slug: cur.slug, body: body})
-	}
-	return out
-}
-
-func isHeadingLine(line, title string) bool {
-	t := strings.TrimLeft(line, "#")
-	return strings.HasPrefix(line, "#") && strings.TrimSpace(t) == title
-}
-
-func inlineText(b arch.Block) string {
-	var sb strings.Builder
-	writeInline(&sb, b.Inline)
-	return strings.TrimSpace(sb.String())
-}
-
-// writeInline flattens inline nodes to plain text, recursing into Children so
-// an emphasized/linked word in a heading (arch.Inline{Text:"", Children:...})
-// is not dropped.
-func writeInline(sb *strings.Builder, ins []arch.Inline) {
-	for _, in := range ins {
-		sb.WriteString(in.Text)
-		writeInline(sb, in.Children)
-	}
 }
 
 func relTo(root, path string) string {

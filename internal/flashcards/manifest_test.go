@@ -73,3 +73,34 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestBuildManifestHandlesFormattedAndDuplicateHeadings(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "docs", "g.md"),
+		"# `internal/gui` API\nintro\n"+
+			"```sh\n# install\n```\n"+
+			"## Overview\nfirst overview\n"+
+			"## Overview\nsecond overview\n")
+	parts, err := BuildManifest(root) // must not panic on formatted/fenced/duplicate headings
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	var docCount int
+	ids := map[string]bool{}
+	for _, p := range parts {
+		if p.Kind != PartDoc {
+			continue
+		}
+		docCount++
+		if ids[p.ID] {
+			t.Fatalf("duplicate doc part ID: %q", p.ID)
+		}
+		ids[p.ID] = true
+		if contains(p.Title, "`") || contains(p.Title, "#") {
+			t.Fatalf("doc title not stripped of markdown: %q", p.Title)
+		}
+	}
+	if docCount != 3 { // gui-API + two Overviews; the fenced "# install" is not a heading
+		t.Fatalf("doc parts = %d, want 3", docCount)
+	}
+}

@@ -146,6 +146,47 @@ func PlainText(in []Inline) string {
 	return sb.String()
 }
 
+// Heading is one heading paired with its plain-text title, anchor slug, and the
+// source of its section body — everything a caller needs to turn a document into
+// per-heading units without re-deriving line positions itself. Body runs from
+// the heading line down to (not including) the next heading of the same or
+// higher level (lower level NUMBER = higher in the hierarchy).
+type Heading struct {
+	Level int
+	Text  string // markdown stripped (== PlainText of the heading's inline)
+	Slug  string
+	Body  string
+}
+
+// Headings returns every heading in source order, fence-aware (a "# ..." line
+// inside a code fence is not a heading), with each heading's section body.
+func Headings(src string) []Heading {
+	lines := splitLines(src)
+	type mark struct {
+		level      int
+		text, slug string
+		line       int
+	}
+	var marks []mark
+	walk(lines, func(b Block, line int) {
+		if b.Kind == BlockHeading {
+			marks = append(marks, mark{b.Level, PlainText(b.Inline), b.Slug, line})
+		}
+	})
+	out := make([]Heading, len(marks))
+	for i, cur := range marks {
+		end := len(lines)
+		for j := i + 1; j < len(marks); j++ {
+			if marks[j].level <= cur.level {
+				end = marks[j].line
+				break
+			}
+		}
+		out[i] = Heading{Level: cur.level, Text: cur.text, Slug: cur.slug, Body: strings.Join(lines[cur.line:end], "\n")}
+	}
+	return out
+}
+
 func splitLines(src string) []string {
 	src = strings.ReplaceAll(src, "\r\n", "\n")
 	src = strings.ReplaceAll(src, "\r", "\n")
@@ -156,8 +197,12 @@ func splitLines(src string) []string {
 	return strings.Split(src, "\n")
 }
 
-func parseBlocks(lines []string) []Block {
-	var out []Block
+// walk dispatches src's lines into blocks exactly as the document is parsed,
+// invoking visit for each block with the source line index (into the caller's
+// splitLines slice) it started on. Both parseBlocks (for Render) and Headings
+// use it, so the two can never disagree on what is a block/heading or where it
+// starts — in particular a "# ..." line inside a code fence is opaque to both.
+func walk(lines []string, visit func(b Block, line int)) {
 	i := 0
 	for i < len(lines) {
 		line := lines[i]
@@ -168,32 +213,37 @@ func parseBlocks(lines []string) []Block {
 		switch {
 		case isFence(line):
 			b, next := parseFence(lines, i)
-			out = append(out, b)
+			visit(b, i)
 			i = next
 		case headingLevel(line) > 0:
-			out = append(out, parseHeading(line))
+			visit(parseHeading(line), i)
 			i++
 		case isRule(line):
-			out = append(out, Block{Kind: BlockRule})
+			visit(Block{Kind: BlockRule}, i)
 			i++
 		case strings.HasPrefix(strings.TrimLeft(line, " \t"), ">"):
 			b, next := parseQuote(lines, i)
-			out = append(out, b)
+			visit(b, i)
 			i = next
 		case listMarker(line) != nil:
 			b, next := parseList(lines, i)
-			out = append(out, b)
+			visit(b, i)
 			i = next
 		case isTableStart(lines, i):
 			b, next := parseTable(lines, i)
-			out = append(out, b)
+			visit(b, i)
 			i = next
 		default:
 			b, next := parseParagraph(lines, i)
-			out = append(out, b)
+			visit(b, i)
 			i = next
 		}
 	}
+}
+
+func parseBlocks(lines []string) []Block {
+	var out []Block
+	walk(lines, func(b Block, _ int) { out = append(out, b) })
 	return out
 }
 
