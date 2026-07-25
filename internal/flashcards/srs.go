@@ -69,6 +69,7 @@ func Schedule(r Review, g Grade, now int64) Review {
 	if r.Interval > maxInterval {
 		r.Interval = maxInterval
 	}
+	// Belt-and-suspenders: every multiplier is > 1 and prev >= 1, so this floor is not reachable in practice — kept as a guard against future factor changes.
 	if r.Interval < 1 {
 		r.Interval = 1
 	}
@@ -95,7 +96,12 @@ func nextInterval(r Review, g Grade) int {
 		}
 		switch g {
 		case GradeHard:
-			return int(math.Round(float64(prev) * hardFactor))
+			// Floor, not round, so Hard stays STRICTLY below Good even when ease
+			// sits at the 1.3 floor and the interval is small — round() lets the
+			// two tie (e.g. prev=8, ease=1.3: round(9.6)=round(10.4)=10). prev is
+			// always >= 6 in this branch (the fixed 1→6 steps precede it), so
+			// flooring still grows the interval.
+			return int(math.Floor(float64(prev) * hardFactor))
 		case GradeEasy:
 			return int(math.Round(float64(prev) * r.Ease * easyBonus))
 		default: // Good
@@ -104,6 +110,7 @@ func nextInterval(r Review, g Grade) int {
 	}
 }
 
+// Ease has a floor but intentionally no ceiling: repeated Easy grades let a card's interval accelerate toward the 365-day cap.
 func clampEase(e float64) float64 {
 	if e < minEase {
 		return minEase

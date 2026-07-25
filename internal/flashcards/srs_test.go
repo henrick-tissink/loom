@@ -56,3 +56,15 @@ func TestScheduleGradeOrderingAndEaseFloor(t *testing.T) {
 		t.Fatal("ValidGrade wrong")
 	}
 }
+
+// Near the ease floor with a small interval, round() would tie Hard and Good;
+// flooring Hard keeps the ordering strict. (Counterexample: prev=8, ease=1.3.)
+func TestScheduleHardStrictlyBelowGoodNearFloor(t *testing.T) {
+	base := Review{CardID: 1, Ease: 1.3, Interval: 8, Reps: 5}
+	hard := Schedule(base, GradeHard, 0).Interval
+	good := Schedule(base, GradeGood, 0).Interval
+	easy := Schedule(base, GradeEasy, 0).Interval
+	if !(hard < good && good <= easy) {
+		t.Fatalf("near floor ordering: hard=%d good=%d easy=%d (want hard < good <= easy)", hard, good, easy)
+	}
+}
