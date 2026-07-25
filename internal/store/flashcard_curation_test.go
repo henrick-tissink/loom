@@ -46,4 +46,11 @@ func TestCurationLifecycle(t *testing.T) {
 	if _, ok, _ := st.GetReview(id); ok {
 		t.Fatalf("review row not cascaded on delete")
 	}
+	var logRows int
+	if err := st.db.QueryRow("SELECT COUNT(*) FROM flashcard_review_log WHERE card_id=?", id).Scan(&logRows); err != nil {
+		t.Fatalf("count log rows: %v", err)
+	}
+	if logRows != 0 {
+		t.Fatalf("review log not cascaded on delete: %d row(s) remain", logRows)
+	}
 }

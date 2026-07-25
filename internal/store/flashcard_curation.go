@@ -40,6 +40,10 @@ func (s *Store) DeleteCard(id int64) (err error) {
 		}
 		err = tx.Commit()
 	}()
+	// Delete order (log → reviews → card) is a defensive convention: this schema
+	// declares no FOREIGN KEY constraints, so the order is not required for
+	// correctness, but keeping children-before-parent avoids surprises if FKs are
+	// ever added.
 	for _, q := range []string{
 		"DELETE FROM flashcard_review_log WHERE card_id=?",
 		"DELETE FROM flashcard_reviews WHERE card_id=?",
