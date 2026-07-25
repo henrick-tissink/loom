@@ -44,10 +44,10 @@ func (pl *Pipeline) GenerateForPart(project string, p Part, now int64) (stored, 
 	return stored, rejected, nil
 }
 
-// RunCLI dispatches `loom flashcards <generate|curate|review|stats|export> <projectRoot> [args]`.
+// RunCLI dispatches `loom flashcards <generate|curate|review|stats|export|check> <projectRoot> [args]`.
 func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, in io.Reader, out io.Writer) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: loom flashcards <generate|curate|review|stats|export> <projectRoot> [args]")
+		return fmt.Errorf("usage: loom flashcards <generate|curate|review|stats|export|check> <projectRoot> [args]")
 	}
 	verb, root := args[0], args[1]
 	project := projectName(root)
@@ -63,6 +63,8 @@ func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, i
 		return runStats(rv, project, now, out)
 	case "export":
 		return runExport(args, st, project, out)
+	case "check":
+		return runCheck(st, project, root, now, out)
 	default:
 		return fmt.Errorf("unknown flashcards command %q", verb)
 	}
@@ -213,6 +215,21 @@ func runExport(args []string, st *store.Store, project string, out io.Writer) er
 		fmt.Fprint(out, ToCSV(cards))
 	} else {
 		fmt.Fprint(out, ToMarkdown(cards))
+	}
+	return nil
+}
+
+// runCheck reconciles a project's active deck against its current source,
+// flagging drifted (stale) and vanished (orphan) cards: check <projectRoot>.
+func runCheck(st *store.Store, project, root string, now int64, out io.Writer) error {
+	res, err := CheckStale(st, project, root, now)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "checked %d active card(s): %d stale (source changed), %d orphaned (source gone)\n",
+		res.Checked, res.Stale, res.Orphan)
+	if res.Stale+res.Orphan > 0 {
+		fmt.Fprintln(out, "regenerate the affected parts (loom flashcards generate) and curate the fresh cards.")
 	}
 	return nil
 }
