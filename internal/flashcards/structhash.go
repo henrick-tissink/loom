@@ -9,9 +9,12 @@ import (
 
 // StructuralHash fingerprints a card's source so that only a MEANINGFUL change
 // marks its cards stale. For a Go source that parses, it hashes the go/printer
-// reprint of the AST parsed WITHOUT comments — so a comment or whitespace edit
-// normalizes away and does not churn. Non-Go sources, and Go that does not parse
-// (e.g. a file truncated at maxCodeSource), fall back to hashing the raw text.
+// reprint of the AST parsed WITHOUT comments — so a comment edit, and
+// indentation/spacing WITHIN the existing layout, normalize away and do not
+// churn. (go/printer, like gofmt, preserves an author's single-line-vs-multi-line
+// block layout from the retained token positions, so a reformat that changes
+// THAT still churns — rare in already-gofmt'd code.) Non-Go sources, and Go that
+// does not parse (e.g. a file truncated at maxCodeSource), fall back to the raw text.
 //
 // This is FILE-level, not symbol-level: a card is stale if anything in its file
 // changed. Symbol-level anchoring (spec §8, key by qualified symbol) needs a
