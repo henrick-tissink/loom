@@ -99,37 +99,97 @@ func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, i
 	}
 }
 
-// runGenerate implements `loom flashcards generate <projectRoot> [partSubstr]`.
+// runGenerate implements
+//
+//	loom flashcards generate <projectRoot> [pathSubstr] [--scope <name>] [--fresh]
+//
+// --scope picks a no-path preset (subsystems|docs|uncovered|all); without it the
+// positional substring filters over every manifest part (legacy behaviour).
+// --fresh clears the project's existing cards first — used to switch a deck from
+// the old granular file cards to the high-level subsystem cards.
 func runGenerate(args []string, st *store.Store, binary, workDir string, now int64, out io.Writer) error {
 	root := args[1]
-	var filter string
-	if len(args) > 2 {
-		filter = args[2]
+	var filter, scope string
+	fresh := false
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--fresh":
+			fresh = true
+		case "--scope":
+			if i+1 < len(args) {
+				i++
+				scope = args[i]
+			}
+		default:
+			if !strings.HasPrefix(args[i], "--") {
+				filter = args[i]
+			}
+		}
 	}
 	parts, err := BuildManifest(root)
 	if err != nil {
 		return fmt.Errorf("build manifest: %w", err)
 	}
+	project := projectName(root)
+
+	if fresh {
+		existing, err := st.PartsForProject(project)
+		if err != nil {
+			return fmt.Errorf("list existing parts: %w", err)
+		}
+		wiped := 0
+		for _, part := range existing {
+			d, derr := st.DeleteCardsForPart(project, part)
+			if derr != nil {
+				return fmt.Errorf("clear %s: %w", part, derr)
+			}
+			wiped += d
+		}
+		fmt.Fprintf(out, "fresh: cleared %d card(s) across %d existing part(s)\n", wiped, len(existing))
+	}
+
+	var todo []Part
+	if scope != "" {
+		var covered map[string]bool
+		if GenScope(scope) == ScopeUncovered {
+			cp, cerr := st.PartsForProject(project)
+			if cerr != nil {
+				return cerr
+			}
+			covered = make(map[string]bool, len(cp))
+			for _, id := range cp {
+				covered[id] = true
+			}
+		}
+		todo = SelectParts(parts, GenScope(scope), filter, covered)
+	} else {
+		for _, p := range parts {
+			if filter != "" && !strings.Contains(p.ID, filter) {
+				continue
+			}
+			todo = append(todo, p)
+		}
+	}
+	if len(todo) == 0 {
+		return fmt.Errorf("nothing to generate for that scope/filter")
+	}
+
 	pl := &Pipeline{
 		Store: st,
 		Gen:   &Generator{Binary: binary, WorkDir: workDir},
 		Ver:   &Verifier{Binary: binary, WorkDir: workDir},
 	}
-	project := projectName(root)
 	var totStored, totRej, done int
-	for _, p := range parts {
-		if filter != "" && !strings.Contains(p.ID, filter) {
-			continue
-		}
+	for _, p := range todo {
 		s, r, gerr := pl.GenerateForPart(project, p, now)
 		if gerr != nil {
-			fmt.Fprintf(out, "  %-50s gen_failed: %v\n", p.ID, gerr)
+			fmt.Fprintf(out, "  %-40s gen_failed: %v\n", p.ID, gerr)
 			continue
 		}
 		done++
 		totStored += s
 		totRej += r
-		fmt.Fprintf(out, "  %-50s stored=%d rejected=%d\n", p.ID, s, r)
+		fmt.Fprintf(out, "  %-40s stored=%d rejected=%d\n", p.ID, s, r)
 	}
 	fmt.Fprintf(out, "flashcards: %d parts, stored=%d rejected=%d\n", done, totStored, totRej)
 	return nil
