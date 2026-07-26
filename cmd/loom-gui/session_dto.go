@@ -21,6 +21,7 @@ type SessionDTO struct {
 	Status      string `json:"status"`    // running | needs_you | idle | done | error | unknown
 	CtxTokens   int64  `json:"ctxTokens"` // approx context tokens in the last turn; 0 = unknown
 	LastTool    string `json:"lastTool"`  // tool the session is currently running, if any
+	Activity    int64  `json:"activity"`  // unix seconds of last tmux activity; 0 = unknown (for idle-age)
 }
 
 // snapshotToDTOs flattens a status.Snapshot's live rows into SessionDTOs,
@@ -44,6 +45,7 @@ func snapshotToDTOs(s status.Snapshot, at *delegate.Attributor) []SessionDTO {
 			Status:      string(r.Status),
 			CtxTokens:   r.CtxTokens,
 			LastTool:    r.LastTool,
+			Activity:    r.Activity,
 		})
 	}
 	return out

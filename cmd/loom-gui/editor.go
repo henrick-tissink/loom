@@ -143,3 +143,15 @@ func (a *App) OpenInEditor(sessionName, path string, line int) error {
 	}
 	return nil
 }
+
+// RevealInFinder opens macOS Finder with path selected. A no-op-style helper for
+// the project overview's repo rows — jump to a repo on disk without retyping it.
+func (a *App) RevealInFinder(path string) error {
+	if path == "" {
+		return fmt.Errorf("no path")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("path not found: %s", path)
+	}
+	return exec.Command("open", "-R", path).Start()
+}

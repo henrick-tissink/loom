@@ -146,6 +146,42 @@ function ctxGaugeHtml(tokens) {
   return `<span class="ctxbar${cls}" title="~${k} / 200k context tokens (${pct}%)"><i style="width:${pct}%"></i></span>`;
 }
 
+// fmtAge renders a compact duration ("47m", "3h", "2d") from seconds.
+function fmtAge(sec) {
+  if (sec < 60) return sec + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m";
+  if (sec < 86400) return Math.floor(sec / 3600) + "h";
+  return Math.floor(sec / 86400) + "d";
+}
+
+// idleSuffix shows how long a session has sat idle, so a 3-minute idle and a
+// 3-day one don't read identically. Blank for fresh (<1m) idles to avoid churn.
+function idleSuffix(s) {
+  if (s.status !== "idle" || !s.activity) return "";
+  const age = Math.floor(Date.now() / 1000) - s.activity;
+  if (age < 60) return "";
+  return ` <span class="tage">${fmtAge(age)}</span>`;
+}
+
+// armAction turns a button into a two-step confirm (the killButton idiom) for a
+// bulk/destructive action: first click arms and relabels, second click fires;
+// it disarms itself after 2.5s.
+function armAction(btn, label, fn) {
+  if (!btn) return;
+  const orig = btn.textContent;
+  let armed = false, timer = null;
+  btn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!armed) {
+      armed = true; btn.textContent = label; btn.classList.add("armed");
+      timer = setTimeout(() => { armed = false; btn.textContent = orig; btn.classList.remove("armed"); }, 2500);
+      return;
+    }
+    clearTimeout(timer); armed = false; btn.classList.remove("armed"); btn.textContent = orig;
+    await fn();
+  });
+}
+
 // ---- rail (status-grouped, attention first) ----
 const GROUPS = [
   { key: "Needs you", match: (s) => s === "needs_you" },
@@ -223,7 +259,7 @@ function appendLiveRow(s, projLabel) {
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}</span>${ctxGaugeHtml(s.ctxTokens)}</span>` +
-    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}</span><span class="tactions"></span></span>`;
+    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
   acts.appendChild(killButton(s.name));
@@ -737,13 +773,15 @@ function projectSessionsHtml(root) {
     `<li class="po-sess" data-name="${esc(s.name)}" data-kind="${kind}">
        <span class="po-dot" style="background:${statusColor(s.status)}"></span>
        <span class="po-sname">${esc(displayName(s))}</span>
-       <span class="po-sstatus">${esc(kind === "live" ? statusWord(s.status) : s.status)}</span>
+       <span class="po-sstatus">${kind === "live" ? esc(statusWord(s.status)) + idleSuffix(s) : esc(s.status)}</span>
      </li>`;
-  const block = (title, rows) =>
-    `<div class="po-sub">${title}</div>` +
+  const block = (title, rows, action) =>
+    `<div class="po-sub"><span>${title}</span>${action || ""}</div>` +
     (rows.length ? `<ul class="po-list">${rows.join("")}</ul>` : `<div class="po-empty">none</div>`);
-  return block("Live", live.map((s) => row(s, "live"))) +
-    block("Finished", fin.map((s) => row(s, "finished")));
+  const killAll = live.length ? `<button class="po-subact" id="po-killall">Kill all</button>` : "";
+  const clearFin = fin.length ? `<button class="po-subact" id="po-clearfin">Clear finished</button>` : "";
+  return block("Live", live.map((s) => row(s, "live")), killAll) +
+    block("Finished", fin.map((s) => row(s, "finished")), clearFin);
 }
 
 function wireProjectSessions(host) {
@@ -757,6 +795,19 @@ function wireProjectSessions(host) {
         catch (e) { console.error("resume", e); }
       });
     }
+  });
+  const root = stageView.root;
+  armAction(host.querySelector("#po-killall"), "Kill all?", async () => {
+    for (const s of latestSessions.filter((s) => (s.projectRoot || "") === root)) {
+      try { await window.go.main.App.KillSession(s.name); } catch (e) { console.error("killall", e); }
+    }
+    poll();
+  });
+  armAction(host.querySelector("#po-clearfin"), "Clear all?", async () => {
+    for (const s of latestRecent.filter((s) => (s.projectRoot || "") === root)) {
+      try { await window.go.main.App.DismissSession(s.name); } catch (e) { console.error("clearfin", e); }
+    }
+    poll();
   });
 }
 
@@ -782,6 +833,8 @@ function renderProject() {
       ${r.missing ? `<span class="po-tag">missing</span>` : ""}
       <span class="po-racts">
         <button class="tact po-launch"${r.missing ? " disabled" : ""} title="${r.missing ? "Directory is gone — re-point the project first" : "New session here"}">launch</button>
+        <button class="tact po-reveal"${r.missing ? " disabled" : ""} title="Reveal in Finder">reveal</button>
+        <button class="tact po-copy" title="Copy path">copy</button>
         <button class="tact po-remove" title="Move this repo to a project of its own">remove</button>
       </span>
     </li>`;
@@ -856,6 +909,16 @@ function renderProject() {
     const path = li.getAttribute("data-path");
     const launch = li.querySelector(".po-launch");
     if (launch && !launch.disabled) launch.addEventListener("click", () => openLauncher(path));
+    const reveal = li.querySelector(".po-reveal");
+    if (reveal && !reveal.disabled) reveal.addEventListener("click", () =>
+      window.go.main.App.RevealInFinder(path).catch((e) => console.error("reveal", e)));
+    li.querySelector(".po-copy").addEventListener("click", async (e) => {
+      const b = e.currentTarget;
+      try {
+        await navigator.clipboard.writeText(path);
+        const t = b.textContent; b.textContent = "copied"; setTimeout(() => { b.textContent = t; }, 1200);
+      } catch (err) { console.error("copy", err); }
+    });
     li.querySelector(".po-remove").addEventListener("click", () =>
       projectAction(() => window.go.main.App.RemoveProjectRepo(path)));
   });
