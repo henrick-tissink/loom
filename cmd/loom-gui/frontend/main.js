@@ -182,6 +182,37 @@ function armAction(btn, label, fn) {
   });
 }
 
+// sparklineSvg draws the daily due-review pass-rate as a tiny trend line.
+function sparklineSvg(trend) {
+  const pts = (trend || []).filter((d) => d.total > 0).map((d) => d.passed / d.total);
+  if (pts.length < 2) return "";
+  const W = 116, H = 28, pad = 3;
+  const x = (i) => pad + (i / (pts.length - 1)) * (W - 2 * pad);
+  const y = (v) => pad + (1 - v) * (H - 2 * pad);
+  const poly = pts.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  return `<svg class="st-spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">` +
+    `<polyline points="${poly}" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>` +
+    `<circle cx="${x(pts.length - 1).toFixed(1)}" cy="${y(pts[pts.length - 1]).toFixed(1)}" r="2.4" fill="var(--accent)"/></svg>`;
+}
+
+// gradeRingSvg draws the Again/Hard/Good/Easy split as a donut.
+function gradeRingSvg(grades) {
+  const g = grades || [];
+  const total = g.reduce((a, b) => a + (b || 0), 0);
+  if (!total) return "";
+  const colors = ["#C64C40", "#B8863C", "#4E9C6A", "#5B7FB8"];
+  const C = 2 * Math.PI * 15.9;
+  let off = 0;
+  const arcs = g.map((n, i) => {
+    if (!n) return "";
+    const dash = (n / total) * C;
+    const el = `<circle cx="21" cy="21" r="15.9" fill="none" stroke="${colors[i]}" stroke-width="6" stroke-dasharray="${dash.toFixed(2)} ${(C - dash).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 21 21)"/>`;
+    off += dash;
+    return el;
+  }).join("");
+  return `<svg class="st-ring" width="34" height="34" viewBox="0 0 42 42" aria-hidden="true"><circle cx="21" cy="21" r="15.9" fill="none" stroke="var(--edge)" stroke-width="6"/>${arcs}</svg>`;
+}
+
 // fmtBytes renders a byte count as a compact human size.
 function fmtBytes(n) {
   if (!n) return "0 B";
@@ -4580,6 +4611,9 @@ async function renderStudyCoverage() {
   let changed = [];
   const changedFn = bound("FlashcardChangedParts");
   if (changedFn) { try { changed = (await changedFn(root)) || []; } catch (e) { console.error("fc changed", e); } }
+  let struggling = [];
+  const strFn = bound("FlashcardStruggling");
+  if (strFn) { try { struggling = (await strFn(root)) || []; } catch (e) { console.error("fc struggling", e); } }
   if (stageView.kind !== "study" || stageView.root !== root) return;
   const changedSet = new Set(changed);
   const parts = stats.parts || [];
@@ -4625,7 +4659,13 @@ async function renderStudyCoverage() {
         <div class="st-metric"><span class="st-big">${totalCards}</span><span class="st-lbl">cards</span></div>
         <div class="st-metric"><span class="st-big">${totalDue}</span><span class="st-lbl">due now</span></div>
         <div class="st-metric"><span class="st-big">${stats.reviews ? pct + "%" : "—"}</span><span class="st-lbl">${stats.reviews ? "recall over " + stats.reviews + " reviews" : "no reviews yet"}</span></div>
+        ${(sparklineSvg(stats.trend) || gradeRingSvg(stats.grades)) ? `<div class="st-inswrap">
+          ${sparklineSvg(stats.trend) ? `<div class="st-ins"><span class="st-inslbl">recall trend</span>${sparklineSvg(stats.trend)}</div>` : ""}
+          ${gradeRingSvg(stats.grades) ? `<div class="st-ins"><span class="st-inslbl">grade mix</span>${gradeRingSvg(stats.grades)}</div>` : ""}
+        </div>` : ""}
       </div>
+      ${struggling.length ? `<div class="st-genbanner struggle"><span>⚠ ${struggling.length} struggling card${struggling.length === 1 ? "" : "s"} — heading for auto-suspend</span></div>
+        <ul class="st-struggle">${struggling.map((c) => `<li><span class="st-str-front">${esc(c.front)}</span><span class="st-str-meta">${esc(c.part)} · ${c.lapses} lapse${c.lapses === 1 ? "" : "s"}</span></li>`).join("")}</ul>` : ""}
       ${busy ? `<div class="st-genbanner run"><span class="st-spin"></span><span class="st-genmsg">generating — running the verify gate, this takes a bit…</span><button class="st-cta" id="st-genstop">Stop</button></div>` : ""}
       ${!busy && changed.length ? `<div class="st-genbanner stale"><span>⚠ ${changed.length} part${changed.length === 1 ? "" : "s"} changed since their cards were made</span><button class="st-cta st-cta-primary" id="st-regenchanged">Regenerate changed</button></div>` : ""}
       <div class="st-actions">

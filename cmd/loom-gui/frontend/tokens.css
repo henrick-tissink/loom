@@ -1108,6 +1108,18 @@ button.dg-chip { cursor: pointer; }
   border: 1px solid var(--edge); background: var(--surface); color: var(--text-dim); margin-left: 4px; }
 .st-practice:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
 .st-practice:disabled { opacity: .4; cursor: default; }
+
+/* ===== Batch 4b: recall trend, grade ring, struggling list ===== */
+.st-summary { align-items: center; }
+.st-inswrap { display: flex; gap: 26px; margin-left: auto; align-items: center; }
+.st-ins { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.st-inslbl { font-size: 10.5px; letter-spacing: .04em; color: var(--text-faint); }
+.st-spark, .st-ring { display: block; }
+.st-genbanner.struggle { background: rgba(197,106,74,.07); border: 1px solid var(--accent-line); color: var(--accent); }
+.st-struggle { list-style: none; margin: 8px 0 4px; padding: 0; }
+.st-struggle li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 2px; border-bottom: 1px solid var(--edge); font-size: 12.5px; }
+.st-str-front { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-str-meta { color: var(--text-faint); font-family: var(--font-mono); font-size: 11px; flex: none; }
 .st-genbanner { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin: 14px 0 4px; padding: 10px 14px; border-radius: var(--radius); font-size: 12.5px; }
 .st-genbanner.stale { background: rgba(197,106,74,.10); color: var(--text); border: 1px solid rgba(197,106,74,.28); }

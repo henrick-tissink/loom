@@ -36,10 +36,12 @@ type CoverageDTO struct {
 
 // FlashcardStatsDTO is the project's measured pass-rate (over due reviews) and coverage.
 type FlashcardStatsDTO struct {
-	PassRate   float64       `json:"passRate"` // 0..1
-	Reviews    int           `json:"reviews"`
-	Reviewable int           `json:"reviewable"` // cards a session would serve now: due + the day's new budget
-	Parts      []CoverageDTO `json:"parts"`
+	PassRate   float64         `json:"passRate"` // 0..1
+	Reviews    int             `json:"reviews"`
+	Reviewable int             `json:"reviewable"` // cards a session would serve now: due + the day's new budget
+	Trend      []store.DayStat `json:"trend"`      // per-day due-review pass tallies (recall sparkline)
+	Grades     []int           `json:"grades"`     // grade 1..4 counts over all reviews (distribution ring)
+	Parts      []CoverageDTO   `json:"parts"`
 }
 
 // flashProjectKey is the store key for a project: its ROOT's basename, matching
@@ -74,7 +76,7 @@ func (a *App) FlashcardCoverage(projectRoot string) []CoverageDTO {
 
 // FlashcardStats returns the measured pass-rate (over due reviews) plus coverage.
 func (a *App) FlashcardStats(projectRoot string) FlashcardStatsDTO {
-	out := FlashcardStatsDTO{Parts: []CoverageDTO{}}
+	out := FlashcardStatsDTO{Parts: []CoverageDTO{}, Trend: []store.DayStat{}, Grades: []int{}}
 	defer func() { _ = recover() }()
 	if a.st == nil {
 		return out
@@ -95,7 +97,32 @@ func (a *App) FlashcardStats(projectRoot string) FlashcardStatsDTO {
 	if q, qerr := a.reviewer().BuildQueue(project, now, now-now%86400); qerr == nil {
 		out.Reviewable = len(q)
 	}
+	if trend, terr := a.st.DailyReviewStats(project, 0); terr == nil && trend != nil {
+		out.Trend = trend
+	}
+	if gc, gerr := a.st.GradeCounts(project, 0); gerr == nil {
+		out.Grades = gc[:]
+	}
 	return out
+}
+
+// FlashcardStruggling lists active cards racking up lapses — approaching the
+// leech auto-suspend — so they can be fixed or killed before they vanish.
+func (a *App) FlashcardStruggling(projectRoot string) []store.StrugglingCard {
+	out := []store.StrugglingCard{}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	min := flashcards.DefaultReviewConfig().LeechThreshold - 3
+	if min < 2 {
+		min = 2
+	}
+	cards, err := a.st.LapsingCards(flashProjectKey(projectRoot), min)
+	if err != nil || cards == nil {
+		return out
+	}
+	return cards
 }
 
 // FlashcardDrafts returns a project's uncurated cards.
