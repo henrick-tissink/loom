@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // resolveFile resolves path (possibly relative to cwd) to an existing absolute
@@ -135,6 +136,46 @@ func (a *App) OpenInEditor(sessionName, path string, line int) error {
 	// The open-at-line command must start before the activate so the file is
 	// already loading when the window rises.
 	for _, argv := range editorCommands(pickEditor(exec.LookPath, preferred), abs, line) {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		go func() { _ = cmd.Wait() }()
+	}
+	return nil
+}
+
+// RevealInFinder opens macOS Finder with path selected. A no-op-style helper for
+// the project overview's repo rows — jump to a repo on disk without retyping it.
+func (a *App) RevealInFinder(path string) error {
+	if path == "" {
+		return fmt.Errorf("no path")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("path not found: %s", path)
+	}
+	return exec.Command("open", "-R", path).Start()
+}
+
+// OpenSource opens a flashcard's cited source (its part / SourceRef, with any
+// "#slug" stripped) in the user's editor, resolved against the project root.
+// Depth-on-demand from a card: jump to the code it summarizes.
+func (a *App) OpenSource(projectRoot, sourceRef string) error {
+	if i := strings.IndexByte(sourceRef, '#'); i >= 0 {
+		sourceRef = sourceRef[:i]
+	}
+	if sourceRef == "" {
+		return fmt.Errorf("no source")
+	}
+	abs := filepath.Join(projectRoot, filepath.FromSlash(sourceRef))
+	if _, err := os.Stat(abs); err != nil {
+		return fmt.Errorf("source not found: %s", sourceRef)
+	}
+	preferred := ""
+	if a.settings != nil {
+		preferred = a.settings.get().Editor
+	}
+	for _, argv := range editorCommands(pickEditor(exec.LookPath, preferred), abs, 0) {
 		cmd := exec.Command(argv[0], argv[1:]...)
 		if err := cmd.Start(); err != nil {
 			return err

@@ -146,6 +146,104 @@ function ctxGaugeHtml(tokens) {
   return `<span class="ctxbar${cls}" title="~${k} / 200k context tokens (${pct}%)"><i style="width:${pct}%"></i></span>`;
 }
 
+// fmtAge renders a compact duration ("47m", "3h", "2d") from seconds.
+function fmtAge(sec) {
+  if (sec < 60) return sec + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m";
+  if (sec < 86400) return Math.floor(sec / 3600) + "h";
+  return Math.floor(sec / 86400) + "d";
+}
+
+// idleSuffix shows how long a session has sat idle, so a 3-minute idle and a
+// 3-day one don't read identically. Blank for fresh (<1m) idles to avoid churn.
+function idleSuffix(s) {
+  if (s.status !== "idle" || !s.activity) return "";
+  const age = Math.floor(Date.now() / 1000) - s.activity;
+  if (age < 60) return "";
+  return ` <span class="tage">${fmtAge(age)}</span>`;
+}
+
+// armAction turns a button into a two-step confirm (the killButton idiom) for a
+// bulk/destructive action: first click arms and relabels, second click fires;
+// it disarms itself after 2.5s.
+function armAction(btn, label, fn) {
+  if (!btn) return;
+  const orig = btn.textContent;
+  let armed = false, timer = null;
+  btn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!armed) {
+      armed = true; btn.textContent = label; btn.classList.add("armed");
+      timer = setTimeout(() => { armed = false; btn.textContent = orig; btn.classList.remove("armed"); }, 2500);
+      return;
+    }
+    clearTimeout(timer); armed = false; btn.classList.remove("armed"); btn.textContent = orig;
+    await fn();
+  });
+}
+
+// sparklineSvg draws the daily due-review pass-rate as a tiny trend line.
+function sparklineSvg(trend) {
+  const pts = (trend || []).filter((d) => d.total > 0).map((d) => d.passed / d.total);
+  if (pts.length < 2) return "";
+  const W = 116, H = 28, pad = 3;
+  const x = (i) => pad + (i / (pts.length - 1)) * (W - 2 * pad);
+  const y = (v) => pad + (1 - v) * (H - 2 * pad);
+  const poly = pts.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  return `<svg class="st-spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">` +
+    `<polyline points="${poly}" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>` +
+    `<circle cx="${x(pts.length - 1).toFixed(1)}" cy="${y(pts[pts.length - 1]).toFixed(1)}" r="2.4" fill="var(--accent)"/></svg>`;
+}
+
+// gradeRingSvg draws the Again/Hard/Good/Easy split as a donut.
+function gradeRingSvg(grades) {
+  const g = grades || [];
+  const total = g.reduce((a, b) => a + (b || 0), 0);
+  if (!total) return "";
+  const colors = ["#C64C40", "#B8863C", "#4E9C6A", "#5B7FB8"];
+  const C = 2 * Math.PI * 15.9;
+  let off = 0;
+  const arcs = g.map((n, i) => {
+    if (!n) return "";
+    const dash = (n / total) * C;
+    const el = `<circle cx="21" cy="21" r="15.9" fill="none" stroke="${colors[i]}" stroke-width="6" stroke-dasharray="${dash.toFixed(2)} ${(C - dash).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 21 21)"/>`;
+    off += dash;
+    return el;
+  }).join("");
+  return `<svg class="st-ring" width="34" height="34" viewBox="0 0 42 42" aria-hidden="true"><circle cx="21" cy="21" r="15.9" fill="none" stroke="var(--edge)" stroke-width="6"/>${arcs}</svg>`;
+}
+
+// fmtBytes renders a byte count as a compact human size.
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + " " + u[i];
+}
+
+// confirmModal shows a modal with Cancel / <okLabel> and resolves to a boolean.
+// body is trusted HTML (callers build it). Reused by the cleanup flows.
+function confirmModal(title, body, okLabel) {
+  return new Promise((resolve) => {
+    if (document.querySelector(".modal-backdrop")) return resolve(false);
+    const bd = document.createElement("div");
+    bd.className = "modal-backdrop";
+    bd.innerHTML =
+      `<div class="modal" role="dialog" aria-label="${esc(title)}"><h2>${esc(title)}</h2>` +
+      `<div class="cm-body">${body}</div>` +
+      `<div class="modal-actions"><button class="btn-ghost" id="cm-no">Cancel</button>` +
+      `<button class="btn-launch" id="cm-yes">${esc(okLabel)}</button></div></div>`;
+    document.body.appendChild(bd);
+    const done = (v) => { document.removeEventListener("keydown", onEsc, true); bd.remove(); resolve(v); };
+    const onEsc = (e) => { if (e.key === "Escape") done(false); };
+    document.addEventListener("keydown", onEsc, true);
+    bd.addEventListener("click", (e) => { if (e.target === bd) done(false); });
+    bd.querySelector("#cm-no").addEventListener("click", () => done(false));
+    bd.querySelector("#cm-yes").addEventListener("click", () => done(true));
+  });
+}
+
 // ---- rail (status-grouped, attention first) ----
 const GROUPS = [
   { key: "Needs you", match: (s) => s === "needs_you" },
@@ -223,7 +321,7 @@ function appendLiveRow(s, projLabel) {
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}</span>${ctxGaugeHtml(s.ctxTokens)}</span>` +
-    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}</span><span class="tactions"></span></span>`;
+    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
   acts.appendChild(killButton(s.name));
@@ -342,23 +440,36 @@ function railSections(sessions, recent) {
   ];
 }
 
+// projectMissingRepos counts a project's MEMBER repos that have vanished from
+// disk — surfaced in the rail so a deleted sub-repo isn't silent until you open
+// the overview. (A missing project ROOT is a separate, already-shown signal.)
+function projectMissingRepos(root) {
+  const p = latestProjects.find((x) => x.root === root);
+  if (!p || !p.repos) return 0;
+  return p.repos.filter((r) => r.missing).length;
+}
+
 function appendSectionHead(sec) {
   const li = document.createElement("li");
   const isCollapsed = collapsedRoots.has(sec.root);
   const urgent = sec.live.filter((s) => s.status === "needs_you").length;
+  const miss = projectMissingRepos(sec.root);
   li.className = "psec" + (isCollapsed ? " collapsed" : "") + (urgent ? " urgent" : "");
   li.innerHTML =
     `<button class="psec-caret" title="${isCollapsed ? "Expand" : "Collapse"}">${isCollapsed ? "▸" : "▾"}</button>` +
     `<span class="psec-name">${esc(sec.name)}</span>` +
+    (miss ? `<span class="psec-warn" title="${miss} member repo${miss === 1 ? "" : "s"} missing">!</span>` : "") +
     // The dot survives collapse on purpose: collapsing a section must never be
     // the reason an urgent session goes unnoticed.
     (urgent ? `<span class="psec-dot" title="${urgent} need you"></span>` : "") +
-    `<span class="psec-count">${sec.live.length || ""}</span>`;
+    `<span class="psec-count">${sec.live.length || ""}</span>` +
+    `<button class="psec-add" title="New session in ${esc(sec.name)}">+</button>`;
   li.querySelector(".psec-caret").addEventListener("click", (e) => {
     e.stopPropagation();
     setCollapsed(sec.root, !collapsedRoots.has(sec.root));
     renderRail(latestSessions, latestRecent);
   });
+  li.querySelector(".psec-add").addEventListener("click", (e) => { e.stopPropagation(); openLauncher(sec.root); });
   // Clicking the header itself is §8's "replace the stage with the overview".
   li.addEventListener("click", () => openProject(sec.root));
   threadsEl.appendChild(li);
@@ -388,10 +499,14 @@ function appendProjectIndex(shownRoots) {
   if (isCollapsed) return;
   for (const p of rest) {
     const li = document.createElement("li");
+    const miss = projectMissingRepos(p.root);
     li.className = "prow" + (p.missing ? " missing" : "");
     li.innerHTML = `<span class="prow-name">${esc(p.name)}</span>` +
-      (p.missing ? `<span class="prow-tag">missing</span>` : "");
+      (miss ? `<span class="psec-warn" title="${miss} member repo${miss === 1 ? "" : "s"} missing">!</span>` : "") +
+      (p.missing ? `<span class="prow-tag">missing</span>` : "") +
+      `<button class="psec-add prow-add" title="New session here">+</button>`;
     li.addEventListener("click", () => openProject(p.root));
+    li.querySelector(".prow-add").addEventListener("click", (e) => { e.stopPropagation(); openLauncher(p.root); });
     threadsEl.appendChild(li);
   }
 }
@@ -737,13 +852,15 @@ function projectSessionsHtml(root) {
     `<li class="po-sess" data-name="${esc(s.name)}" data-kind="${kind}">
        <span class="po-dot" style="background:${statusColor(s.status)}"></span>
        <span class="po-sname">${esc(displayName(s))}</span>
-       <span class="po-sstatus">${esc(kind === "live" ? statusWord(s.status) : s.status)}</span>
+       <span class="po-sstatus">${kind === "live" ? esc(statusWord(s.status)) + idleSuffix(s) : esc(s.status)}</span>
      </li>`;
-  const block = (title, rows) =>
-    `<div class="po-sub">${title}</div>` +
+  const block = (title, rows, action) =>
+    `<div class="po-sub"><span>${title}</span>${action || ""}</div>` +
     (rows.length ? `<ul class="po-list">${rows.join("")}</ul>` : `<div class="po-empty">none</div>`);
-  return block("Live", live.map((s) => row(s, "live"))) +
-    block("Finished", fin.map((s) => row(s, "finished")));
+  const killAll = live.length ? `<button class="po-subact" id="po-killall">Kill all</button>` : "";
+  const clearFin = fin.length ? `<button class="po-subact" id="po-clearfin">Clear finished</button>` : "";
+  return block("Live", live.map((s) => row(s, "live")), killAll) +
+    block("Finished", fin.map((s) => row(s, "finished")), clearFin);
 }
 
 function wireProjectSessions(host) {
@@ -757,6 +874,19 @@ function wireProjectSessions(host) {
         catch (e) { console.error("resume", e); }
       });
     }
+  });
+  const root = stageView.root;
+  armAction(host.querySelector("#po-killall"), "Kill all?", async () => {
+    for (const s of latestSessions.filter((s) => (s.projectRoot || "") === root)) {
+      try { await window.go.main.App.KillSession(s.name); } catch (e) { console.error("killall", e); }
+    }
+    poll();
+  });
+  armAction(host.querySelector("#po-clearfin"), "Clear all?", async () => {
+    for (const s of latestRecent.filter((s) => (s.projectRoot || "") === root)) {
+      try { await window.go.main.App.DismissSession(s.name); } catch (e) { console.error("clearfin", e); }
+    }
+    poll();
   });
 }
 
@@ -782,6 +912,8 @@ function renderProject() {
       ${r.missing ? `<span class="po-tag">missing</span>` : ""}
       <span class="po-racts">
         <button class="tact po-launch"${r.missing ? " disabled" : ""} title="${r.missing ? "Directory is gone — re-point the project first" : "New session here"}">launch</button>
+        <button class="tact po-reveal"${r.missing ? " disabled" : ""} title="Reveal in Finder">reveal</button>
+        <button class="tact po-copy" title="Copy path">copy</button>
         <button class="tact po-remove" title="Move this repo to a project of its own">remove</button>
       </span>
     </li>`;
@@ -799,6 +931,7 @@ function renderProject() {
         <button class="sh-btn" id="po-solo">${p.solo ? "Leave solo" : "Solo"}</button>
         <button class="sh-btn" id="po-rename">Rename</button>
         <button class="sh-btn" id="po-repoint">Re-point</button>
+        <button class="sh-btn" id="po-clean">Clean repo</button>
       </span>
     </div>
     <div class="po">
@@ -836,6 +969,7 @@ function renderProject() {
     if (el && ungrouped) el.disabled = true;
   }
   on("po-study", () => openStudy(p.root));
+  on("po-clean", () => repoCleanupDialog(p.root));
   on("po-hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !p.hidden)));
   on("po-solo", () => projectAction(() => window.go.main.App.SetProjectSolo(p.root, !p.solo)));
   on("po-rename", async () => {
@@ -856,6 +990,16 @@ function renderProject() {
     const path = li.getAttribute("data-path");
     const launch = li.querySelector(".po-launch");
     if (launch && !launch.disabled) launch.addEventListener("click", () => openLauncher(path));
+    const reveal = li.querySelector(".po-reveal");
+    if (reveal && !reveal.disabled) reveal.addEventListener("click", () =>
+      window.go.main.App.RevealInFinder(path).catch((e) => console.error("reveal", e)));
+    li.querySelector(".po-copy").addEventListener("click", async (e) => {
+      const b = e.currentTarget;
+      try {
+        await navigator.clipboard.writeText(path);
+        const t = b.textContent; b.textContent = "copied"; setTimeout(() => { b.textContent = t; }, 1200);
+      } catch (err) { console.error("copy", err); }
+    });
     li.querySelector(".po-remove").addEventListener("click", () =>
       projectAction(() => window.go.main.App.RemoveProjectRepo(path)));
   });
@@ -4240,7 +4384,7 @@ function openSearch() {
 // GUI App (slice 3a). poll() only refreshes a kind==="project" stage, so this
 // surface is never clobbered mid-review.
 
-let study = { queue: [], idx: 0, revealed: false, drafts: [] };
+let study = { queue: [], idx: 0, revealed: false, drafts: [], graded: [], editing: null, graph: null };
 
 // Generation job state (slice 6b). A (re)generate runs in the Go bridge as a
 // background job emitting "flashcards:progress"/"flashcards:done"; this mirrors
@@ -4309,7 +4453,7 @@ async function flashGenDialog(root) {
         <h2>Generate cards</h2>
         <div class="fg-opts">
           <label class="fg-opt"><input type="radio" name="fg-scope" value="subsystems" checked><span class="fg-txt"><b>Subsystems — high-level</b><i>${sc.subsystems} subsystem${plural(sc.subsystems)} — how the system works &amp; why</i></span></label>
-          <label class="fg-opt"><input type="radio" name="fg-scope" value="docs"><span class="fg-txt"><b>Architecture &amp; decisions</b><i>${sc.docs} doc section${plural(sc.docs)} — the “why”</i></span></label>
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="docs"><span class="fg-txt"><b>Architecture &amp; decisions</b><i>${sc.docs ? sc.docs + " doc section" + plural(sc.docs) + " — the “why”" : "no docs yet — synthesize ARCHITECTURE.md &amp; cards"}</i></span></label>
           <label class="fg-opt"><input type="radio" name="fg-scope" value="uncovered"><span class="fg-txt"><b>Uncovered parts</b><i>${sc.uncovered} part${plural(sc.uncovered)} with no cards yet</i></span></label>
           <label class="fg-opt"><input type="radio" name="fg-scope" value="all"><span class="fg-txt"><b>Whole project</b><i>${sc.all} part${plural(sc.all)} — subsystems &amp; docs together</i></span></label>
           <label class="fg-opt"><input type="radio" name="fg-scope" value="path"><span class="fg-txt"><b>Target a path…</b><i>a specific subsystem or subtree</i></span></label>
@@ -4341,9 +4485,90 @@ async function flashGenDialog(root) {
       const scope = scopeVal();
       const filter = pathInput.value.trim();
       if (scope === "path" && !filter) { pathInput.focus(); return; }
+      // Architecture & decisions with no docs yet → synthesize the doc first.
+      if (scope === "docs" && !sc.docs) { done(null); runArchSynth(root); return; }
       done({ scope, filter });
     });
   });
+}
+
+// runArchSynth writes docs/ARCHITECTURE.md from a code digest (confirming an
+// overwrite if one exists), then card generation from its sections runs in the
+// background — the normal generating banner takes over.
+async function runArchSynth(root) {
+  const fn = bound("FlashcardSynthesizeArch");
+  if (!fn) return;
+  studyToast("Synthesizing ARCHITECTURE.md from the code…");
+  try {
+    let res = await fn(root, false);
+    if (res && res.exists) {
+      const ok = await confirmModal("Overwrite ARCHITECTURE.md?",
+        "This repo already has an <code>ARCHITECTURE.md</code>. Synthesizing replaces it with a fresh version written from the code.", "Overwrite");
+      if (!ok) return;
+      res = await fn(root, true);
+    }
+    if (res && res.wrote) {
+      studyToast(`Wrote ARCHITECTURE.md — generating ${res.sections} section${res.sections === 1 ? "" : "s"}…`);
+      renderStudyCoverage();
+    }
+  } catch (e) { console.error("arch synth", e); studyToast(genErr(e)); }
+}
+
+// flashCleanupDialog previews a project's disposable cards and clears them.
+async function flashCleanupDialog(root) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const fn = bound("FlashcardDeckInspect");
+  let d = { orphaned: 0, stale: 0, drafts: 0 };
+  if (fn) { try { d = (await fn(root)) || d; } catch (e) { console.error("deck inspect", e); } }
+  const junk = (d.orphaned || 0) + (d.stale || 0);
+  const drafts = d.drafts || 0;
+  const pl = (n) => (n === 1 ? "" : "s");
+  const line = (n, label) => `<div class="cln-row"><b>${n}</b><span>${label}</span></div>`;
+  const body = (junk || drafts)
+    ? `<div class="cln-list">${line(d.orphaned || 0, "orphaned — the part no longer exists")}${line(d.stale || 0, "stale — source drifted since the cards were made")}${line(drafts, "drafts — never curated")}</div>` +
+      (junk > 0 && drafts > 0 ? `<label class="cln-check"><input type="checkbox" id="cln-drafts"> Also drop the ${drafts} never-curated draft${pl(drafts)}</label>` : "")
+    : `<div class="cln-empty">Nothing to clean — the deck is tidy.</div>`;
+  const action = junk > 0 ? `Clean ${junk} card${pl(junk)}` : (drafts > 0 ? `Drop ${drafts} draft${pl(drafts)}` : "");
+  const bd = document.createElement("div");
+  bd.className = "modal-backdrop";
+  bd.innerHTML =
+    `<div class="modal" role="dialog" aria-label="Clean up deck"><h2>Clean up deck</h2><div class="cm-body">${body}</div>` +
+    `<div class="modal-actions"><button class="btn-ghost" id="cln-cancel">${action ? "Cancel" : "Close"}</button>` +
+    (action ? `<button class="btn-launch" id="cln-go">${action}</button>` : "") + `</div></div>`;
+  document.body.appendChild(bd);
+  const done = () => { document.removeEventListener("keydown", onEsc, true); bd.remove(); };
+  const onEsc = (e) => { if (e.key === "Escape") done(); };
+  document.addEventListener("keydown", onEsc, true);
+  bd.addEventListener("click", (e) => { if (e.target === bd) done(); });
+  bd.querySelector("#cln-cancel").addEventListener("click", done);
+  const go = bd.querySelector("#cln-go");
+  if (go) go.addEventListener("click", async () => {
+    const cb = bd.querySelector("#cln-drafts");
+    const drop = junk > 0 ? !!(cb && cb.checked) : true;
+    const cfn = bound("FlashcardDeckClean");
+    try { const n = cfn ? await cfn(root, drop) : 0; studyToast(`Cleaned ${n} card${pl(n)}`); }
+    catch (e) { console.error("deck clean", e); studyToast("cleanup failed"); }
+    done(); renderStudyCoverage();
+  });
+}
+
+// repoCleanupDialog previews git-ignored build junk in a project's repos and
+// deletes it on confirm.
+async function repoCleanupDialog(root) {
+  const fn = bound("RepoCleanupPreview");
+  let d = { entries: [], total: 0 };
+  if (fn) { try { d = (await fn(root)) || d; } catch (e) { console.error("repo scan", e); } }
+  const entries = d.entries || [];
+  if (!entries.length) { await confirmModal("Clean repo", `<div class="cln-empty">Nothing to clean — no build junk found.</div>`, "OK"); return; }
+  const rows = entries.map((e) => `<div class="cln-file"><span class="cln-fp">${esc(e.rel)}${e.isDir ? "/" : ""}</span><span class="cln-fs">${fmtBytes(e.size)}</span></div>`).join("");
+  const body = `<div class="cln-note">Only git-ignored build junk — tracked files and configs like <code>.env</code> are never touched.</div><div class="cln-files">${rows}</div>`;
+  const ok = await confirmModal("Clean repo", body, `Delete ${entries.length} · ${fmtBytes(d.total)}`);
+  if (!ok) return;
+  const rfn = bound("RepoCleanupRun");
+  try {
+    const freed = rfn ? await rfn(root, entries.map((e) => e.abs)) : 0;
+    await confirmModal("Cleaned", `<div class="cln-empty">Freed ${fmtBytes(freed)}.</div>`, "Done");
+  } catch (e) { console.error("repo clean", e); await confirmModal("Cleanup failed", `<div class="cln-empty">Could not remove some paths.</div>`, "OK"); }
 }
 
 function studyProjName(root) {
@@ -4373,6 +4598,7 @@ function renderStudy() {
   if (stageView.kind !== "study") return;
   if (stageView.view === "review") return renderStudyReview();
   if (stageView.view === "curate") return renderStudyCurate();
+  if (stageView.view === "map") return renderStudyMap();
   return renderStudyCoverage();
 }
 
@@ -4386,6 +4612,9 @@ async function renderStudyCoverage() {
   let changed = [];
   const changedFn = bound("FlashcardChangedParts");
   if (changedFn) { try { changed = (await changedFn(root)) || []; } catch (e) { console.error("fc changed", e); } }
+  let struggling = [];
+  const strFn = bound("FlashcardStruggling");
+  if (strFn) { try { struggling = (await strFn(root)) || []; } catch (e) { console.error("fc struggling", e); } }
   if (stageView.kind !== "study" || stageView.root !== root) return;
   const changedSet = new Set(changed);
   const parts = stats.parts || [];
@@ -4402,7 +4631,7 @@ async function renderStudyCoverage() {
     return `<span class="st-genstat ok">+${g.stored || 0}${g.rejected ? ` · ${g.rejected} rejected` : ""}</span>`;
   };
   const rows = parts.map((p) => `
-      <li class="st-part${changedSet.has(p.part) ? " stale" : ""}">
+      <li class="st-part${changedSet.has(p.part) ? " stale" : ""}" data-part="${esc(p.part)}">
         <span class="st-ppath">${esc(p.part)}</span>
         <span class="st-pcounts">
           ${changedSet.has(p.part) ? `<span class="st-chip st-stalechip">changed</span>` : ""}
@@ -4410,9 +4639,20 @@ async function renderStudyCoverage() {
           ${p.due ? `<span class="st-chip st-due">${p.due} due</span>` : ""}
           ${p.draft ? `<span class="st-chip st-draft">${p.draft} draft</span>` : ""}
           ${genStatus(p.part)}
+          ${p.active ? `<button class="st-practice" data-part="${esc(p.part)}"${busy ? " disabled" : ""} title="Drill this subsystem's cards now">practice</button>` : ""}
           <button class="st-regen" data-part="${esc(p.part)}"${busy ? " disabled" : ""}>regenerate</button>
         </span>
       </li>`).join("");
+  // Heatmap overview: one tile per subsystem, shaded by how much of it is
+  // activated (draft-heavy reads faint), dashed if its source drifted, green
+  // corner if anything's due. A fast read of 20+ packages before the list.
+  const heatTiles = parts.map((p) => {
+    const ratio = p.total ? p.active / p.total : 0;
+    const lvl = p.total === 0 ? 0 : ratio === 0 ? 0 : ratio < 0.34 ? 1 : ratio < 0.67 ? 2 : 3;
+    const cls = ["st-htile", changedSet.has(p.part) ? "changed" : "", p.due ? "due" : ""].filter(Boolean).join(" ");
+    const t = `${p.part} · ${p.total} card${p.total === 1 ? "" : "s"}${p.draft ? ` · ${p.draft} draft` : ""}${p.due ? ` · ${p.due} due` : ""}`;
+    return `<button class="${cls}" data-l="${lvl}" data-part="${esc(p.part)}" title="${esc(t)}"></button>`;
+  }).join("");
   stage.replaceChildren();
   stage.innerHTML = studyHeader("Study", studyProjName(root)) + `
     <div class="study">
@@ -4420,26 +4660,114 @@ async function renderStudyCoverage() {
         <div class="st-metric"><span class="st-big">${totalCards}</span><span class="st-lbl">cards</span></div>
         <div class="st-metric"><span class="st-big">${totalDue}</span><span class="st-lbl">due now</span></div>
         <div class="st-metric"><span class="st-big">${stats.reviews ? pct + "%" : "—"}</span><span class="st-lbl">${stats.reviews ? "recall over " + stats.reviews + " reviews" : "no reviews yet"}</span></div>
+        ${(sparklineSvg(stats.trend) || gradeRingSvg(stats.grades)) ? `<div class="st-inswrap">
+          ${sparklineSvg(stats.trend) ? `<div class="st-ins"><span class="st-inslbl">recall trend</span>${sparklineSvg(stats.trend)}</div>` : ""}
+          ${gradeRingSvg(stats.grades) ? `<div class="st-ins"><span class="st-inslbl">grade mix</span>${gradeRingSvg(stats.grades)}</div>` : ""}
+        </div>` : ""}
       </div>
+      ${struggling.length ? `<div class="st-genbanner struggle"><span>⚠ ${struggling.length} struggling card${struggling.length === 1 ? "" : "s"} — heading for auto-suspend</span></div>
+        <ul class="st-struggle">${struggling.map((c) => `<li><span class="st-str-front">${esc(c.front)}</span><span class="st-str-meta">${esc(c.part)} · ${c.lapses} lapse${c.lapses === 1 ? "" : "s"}</span></li>`).join("")}</ul>` : ""}
       ${busy ? `<div class="st-genbanner run"><span class="st-spin"></span><span class="st-genmsg">generating — running the verify gate, this takes a bit…</span><button class="st-cta" id="st-genstop">Stop</button></div>` : ""}
       ${!busy && changed.length ? `<div class="st-genbanner stale"><span>⚠ ${changed.length} part${changed.length === 1 ? "" : "s"} changed since their cards were made</span><button class="st-cta st-cta-primary" id="st-regenchanged">Regenerate changed</button></div>` : ""}
       <div class="st-actions">
         <button class="st-cta st-cta-primary" id="st-review"${reviewable && !busy ? "" : " disabled"}>Review ${reviewable}</button>
         <button class="st-cta" id="st-curate"${totalDraft && !busy ? "" : " disabled"}>Curate ${totalDraft} draft${totalDraft === 1 ? "" : "s"}</button>
         <button class="st-cta" id="st-generate"${busy ? " disabled" : ""}>Generate…</button>
+        <button class="st-cta" id="st-cleanup"${busy ? " disabled" : ""}>Clean up</button>
+        ${parts.length ? `<button class="st-cta" id="st-map">Map</button>` : ""}
       </div>
-      ${parts.length ? `<ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet. Click <b>Generate…</b> above (a file or package path), or run <code>loom flashcards generate ${esc(root)}</code>.</div>`}
+      ${parts.length ? `<div class="st-heat">${heatTiles}</div><ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet. Click <b>Generate…</b> above (a file or package path), or run <code>loom flashcards generate ${esc(root)}</code>.</div>`}
     </div>`;
   const back = document.getElementById("st-back"); if (back) back.addEventListener("click", () => openProject(root));
   const rev = document.getElementById("st-review"); if (rev && reviewable && !busy) rev.addEventListener("click", () => startReview(root));
   const cur = document.getElementById("st-curate"); if (cur && totalDraft && !busy) cur.addEventListener("click", () => startCurate(root));
   const gen = document.getElementById("st-generate"); if (gen && !busy) gen.addEventListener("click", () => promptFlashGen(root));
+  const clean = document.getElementById("st-cleanup"); if (clean && !busy) clean.addEventListener("click", () => flashCleanupDialog(root));
+  const map = document.getElementById("st-map"); if (map) map.addEventListener("click", () => openStudyMap(root));
   const rgs = document.getElementById("st-regenchanged"); if (rgs) rgs.addEventListener("click", () => runFlashGenChanged(root));
   const stop = document.getElementById("st-genstop"); if (stop) stop.addEventListener("click", () => { const cf = bound("FlashcardGenerateCancel"); if (cf) cf(); studyToast("stopping after the current part…"); });
   if (!busy) {
     stage.querySelectorAll(".st-regen").forEach((b) =>
       b.addEventListener("click", () => runFlashGen(root, "path", b.getAttribute("data-part"))));
+    stage.querySelectorAll(".st-practice").forEach((b) =>
+      b.addEventListener("click", () => startPractice(root, b.getAttribute("data-part"))));
   }
+  // a heatmap tile jumps to its row in the list below
+  stage.querySelectorAll(".st-htile").forEach((t) =>
+    t.addEventListener("click", () => {
+      const row = stage.querySelector(`.st-part[data-part="${CSS.escape(t.getAttribute("data-part"))}"]`);
+      if (row) { row.scrollIntoView({ behavior: "smooth", block: "center" }); row.classList.add("st-flash"); setTimeout(() => row.classList.remove("st-flash"), 1100); }
+    }));
+}
+
+// openStudyMap fetches the subsystem dependency graph (import edges + coverage +
+// drift) and renders it.
+async function openStudyMap(root) {
+  const fn = bound("SubsystemGraph");
+  let g = { nodes: [], edges: [], width: 0, height: 0, nodeW: 224, nodeH: 58 };
+  if (fn) { try { g = (await fn(root)) || g; } catch (e) { console.error("subsys graph", e); } }
+  if (stageView.kind !== "study" || stageView.root !== root) return;
+  study.graph = g;
+  stageView.view = "map";
+  renderStudyMap();
+}
+
+// renderStudyMap draws the dependency graph: nodes are subsystems shaded by card
+// coverage (and dashed when their source has drifted), edges are imports. Click a
+// node to drill its cards.
+function renderStudyMap() {
+  const stage = document.getElementById("stage");
+  if (!stage) return;
+  const root = stageView.root;
+  const g = study.graph || { nodes: [], edges: [] };
+  const nw = g.nodeW || 224, nh = g.nodeH || 58, pad = 30;
+  const byId = {};
+  (g.nodes || []).forEach((n) => { byId[n.id] = n; });
+  const cx = (n) => n.x + nw / 2 + pad, cy = (n) => n.y + nh / 2 + pad;
+  const W = (g.width || nw) + pad * 2, H = (g.height || nh) + pad * 2;
+  const edges = (g.edges || []).map((e) => {
+    const a = byId[e.from], b = byId[e.to];
+    if (!a || !b) return "";
+    return `<line x1="${cx(a)}" y1="${cy(a)}" x2="${cx(b)}" y2="${cy(b)}" class="dgm-edge" marker-end="url(#dgm-arrow)"/>`;
+  }).join("");
+  const nodes = (g.nodes || []).map((n) => {
+    const lvl = n.cards === 0 ? 0 : n.cards >= 6 ? 3 : n.cards >= 3 ? 2 : 1;
+    return `<g class="dgm-node dgm-l${lvl}${n.changed ? " changed" : ""}" data-part="${esc(n.id)}" transform="translate(${n.x + pad},${n.y + pad})">
+      <rect width="${nw}" height="${nh}" rx="10"/>
+      <text class="dgm-title" x="15" y="25">${esc(n.title)}</text>
+      <text class="dgm-sub" x="15" y="43">${esc(n.id)}</text>
+      <text class="dgm-cards" x="${nw - 15}" y="25" text-anchor="end">${n.cards ? n.cards + " cards" : "no cards"}</text>
+      ${n.changed ? `<text class="dgm-drift" x="${nw - 15}" y="43" text-anchor="end">drifted</text>` : ""}
+    </g>`;
+  }).join("");
+  stage.replaceChildren();
+  stage.innerHTML = studyHeader("Map", studyProjName(root)) + `
+    <div class="study study-map">
+      <div class="dgm-legend"><span class="dgm-lg"><i class="dgm-sw dgm-l3"></i>covered</span><span class="dgm-lg"><i class="dgm-sw dgm-l0"></i>no cards</span><span class="dgm-lg"><i class="dgm-sw dgm-dashed"></i>drifted</span><span class="dgm-hint">click a node to drill its cards</span></div>
+      <div class="dgm-canvas">
+        <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Subsystem dependency graph">
+          <defs><marker id="dgm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker></defs>
+          ${edges}${nodes}
+        </svg>
+      </div>
+      ${(g.nodes || []).length ? "" : `<div class="st-empty">No subsystems to map.</div>`}
+    </div>`;
+  document.getElementById("st-back").addEventListener("click", () => { stageView.view = "coverage"; renderStudy(); });
+  stage.querySelectorAll(".dgm-node").forEach((el) =>
+    el.addEventListener("click", () => startPractice(root, el.getAttribute("data-part"))));
+}
+
+// startPractice drills one subsystem's active cards on demand, ignoring the due
+// schedule — useful before you touch a package. Grades still record.
+async function startPractice(root, part) {
+  let q = [];
+  const fn = bound("FlashcardPractice");
+  if (fn) { try { q = (await fn(root, part)) || []; } catch (e) { console.error("fc practice", e); } }
+  if (!q.length) { studyToast("no active cards in this subsystem yet"); return; }
+  if (stageView.kind !== "study" || stageView.root !== root) return;
+  study.queue = q; study.idx = 0; study.revealed = false; study.graded = [];
+  stageView.view = "review";
+  renderStudyReview();
 }
 
 async function startReview(root) {
@@ -4447,7 +4775,7 @@ async function startReview(root) {
   const fn = bound("FlashcardQueue");
   if (fn) { try { q = (await fn(root)) || []; } catch (e) { console.error("fc queue", e); } }
   if (stageView.kind !== "study" || stageView.root !== root) return;
-  study.queue = q; study.idx = 0; study.revealed = false;
+  study.queue = q; study.idx = 0; study.revealed = false; study.graded = [];
   stageView.view = "review";
   renderStudyReview();
 }
@@ -4459,10 +4787,12 @@ function renderStudyReview() {
   const q = study.queue;
   stage.replaceChildren();
   if (study.idx >= q.length) {
+    const done = study.graded.length;
     stage.innerHTML = studyHeader("Study", studyProjName(root)) + `
       <div class="study study-done">
         <div class="st-done-mark">✦</div>
-        <div class="st-done-msg">${q.length ? "All caught up." : "Nothing due right now."}</div>
+        <div class="st-done-msg">${done ? "Session complete." : (q.length ? "All caught up." : "Nothing due right now.")}</div>
+        ${done ? renderRecap(study.graded) : ""}
         <button class="st-cta" id="st-done-back">Back to coverage</button>
       </div>`;
     document.getElementById("st-back").addEventListener("click", () => openProject(root));
@@ -4473,7 +4803,7 @@ function renderStudyReview() {
   const revealed = study.revealed;
   stage.innerHTML = studyHeader("Review", "") + `
     <div class="study study-review">
-      <div class="st-cardmeta"><span class="st-part-lbl">${esc(card.part)} · ${esc(card.type)}</span><span class="st-count">${study.idx + 1} / ${q.length}</span></div>
+      <div class="st-cardmeta"><span class="st-metaleft"><span class="st-part-lbl">${esc(card.part)} · ${esc(card.type)}</span><button class="st-opensrc" title="Open the cited source in your editor">source ↗</button></span><span class="st-count">${study.idx + 1} / ${q.length}</span></div>
       <div class="st-card${revealed ? " revealed" : ""}">
         <div class="st-front">${esc(card.front)}</div>
         ${revealed ? `<div class="st-divider"><span>answer</span></div><div class="st-back">${esc(card.back)}</div>` : ""}
@@ -4488,12 +4818,34 @@ function renderStudyReview() {
       </div>
     </div>`;
   document.getElementById("st-back").addEventListener("click", () => openProject(root));
+  const osrc = stage.querySelector(".st-opensrc");
+  if (osrc) osrc.addEventListener("click", () => {
+    const f = bound("OpenSource"); if (f) f(root, card.part).catch((e) => console.error("open source", e));
+  });
   if (!revealed) {
     document.getElementById("st-reveal").addEventListener("click", revealCard);
   } else {
     stage.querySelectorAll(".st-grade").forEach((b) =>
       b.addEventListener("click", () => gradeCard(parseInt(b.getAttribute("data-g"), 10))));
   }
+}
+
+// renderRecap summarizes a just-finished review session: totals, a recalled-vs-
+// lapsed split, and a proportional bar coloured by grade (reusing the g1-g4
+// palette). Replays of a missed card count as separate reviews, matching how the
+// grades were actually recorded.
+function renderRecap(graded) {
+  const n = graded.length;
+  const again = graded.filter((x) => x.grade === 1).length;
+  const by = [0, 0, 0, 0];
+  graded.forEach((x) => { if (x.grade >= 1 && x.grade <= 4) by[x.grade - 1]++; });
+  const parts = new Set(graded.map((x) => x.part)).size;
+  const seg = by.map((c, i) => c ? `<span class="st-recap-seg g${i + 1}" style="flex:${c}" title="${["Again", "Hard", "Good", "Easy"][i]}: ${c}"></span>` : "").join("");
+  const stat = (v, l) => `<div class="st-recap-stat"><b>${v}</b><span>${l}</span></div>`;
+  return `<div class="st-recap">
+      <div class="st-recap-row">${stat(n, "reviewed")}${stat(n - again, "recalled")}${stat(again, "lapsed")}${stat(parts, "subsystem" + (parts === 1 ? "" : "s"))}</div>
+      <div class="st-recap-bar">${seg}</div>
+    </div>`;
 }
 
 function revealCard() {
@@ -4507,12 +4859,21 @@ async function gradeCard(grade) {
   if (stageView.kind !== "study" || stageView.view !== "review" || !study.revealed) return;
   const card = study.queue[study.idx];
   if (!card) return;
+  let suspended = false;
   const fn = bound("FlashcardGrade");
   if (fn) {
     try {
-      const susp = await fn(card.id, grade, !!card.wasDue);
-      if (susp) studyToast(`"${stTruncate(card.front, 40)}" suspended — repeated lapses`);
+      suspended = await fn(card.id, grade, !!card.wasDue);
+      if (suspended) studyToast(`"${stTruncate(card.front, 40)}" suspended — repeated lapses`);
     } catch (e) { console.error("fc grade", e); }
+  }
+  study.graded.push({ grade, part: card.part }); // for the end-of-session recap
+  // Same-session relearning: a missed card (Again) resurfaces a few cards later
+  // this sitting — the moment re-testing actually cements recall. Not if it was
+  // just suspended as a leech.
+  if (grade === 1 && !suspended) {
+    const at = Math.min(study.idx + 4, study.queue.length);
+    study.queue.splice(at, 0, card);
   }
   study.idx++; study.revealed = false;
   renderStudyReview();
@@ -4524,6 +4885,7 @@ async function startCurate(root) {
   if (fn) { try { drafts = (await fn(root)) || []; } catch (e) { console.error("fc drafts", e); } }
   if (stageView.kind !== "study" || stageView.root !== root) return;
   study.drafts = drafts;
+  study.editing = null;
   stageView.view = "curate";
   renderStudyCurate();
 }
@@ -4533,11 +4895,22 @@ function renderStudyCurate() {
   if (!stage) return;
   const root = stageView.root;
   const drafts = study.drafts || [];
-  const rows = drafts.map((c) => `
-      <li class="st-draft" data-id="${c.id}">
+  const rows = drafts.map((c) => {
+    if (c.id === study.editing) {
+      return `<li class="st-draft st-editing" data-id="${c.id}">
+        <div class="st-dtext">
+          <textarea class="st-efront" rows="2">${esc(c.front)}</textarea>
+          <textarea class="st-eback" rows="2">${esc(c.back)}</textarea>
+          <div class="st-dmeta">${esc(c.part)} · ${esc(c.type)}</div>
+        </div>
+        <div class="st-dacts"><button class="st-dbtn st-save">save</button><button class="st-dbtn st-cancel">cancel</button></div>
+      </li>`;
+    }
+    return `<li class="st-draft" data-id="${c.id}">
         <div class="st-dtext"><div class="st-dfront">${esc(c.front)}</div><div class="st-dback">${esc(c.back)}</div><div class="st-dmeta">${esc(c.part)} · ${esc(c.type)}</div></div>
-        <div class="st-dacts"><button class="st-dbtn st-keep">keep</button><button class="st-dbtn st-kill">kill</button></div>
-      </li>`).join("");
+        <div class="st-dacts"><button class="st-dbtn st-edit">edit</button><button class="st-dbtn st-keep">keep</button><button class="st-dbtn st-kill">kill</button></div>
+      </li>`;
+  }).join("");
   stage.replaceChildren();
   stage.innerHTML = studyHeader("Curate", studyProjName(root)) + `
     <div class="study study-curate">
@@ -4556,6 +4929,20 @@ function renderStudyCurate() {
   });
   stage.querySelectorAll(".st-draft").forEach((li) => {
     const id = parseInt(li.getAttribute("data-id"), 10);
+    if (id === study.editing) {
+      const front = li.querySelector(".st-efront"), back = li.querySelector(".st-eback");
+      front.focus();
+      li.querySelector(".st-save").addEventListener("click", async () => {
+        const f = front.value.trim(), b = back.value.trim();
+        if (!f || !b) { (f ? back : front).focus(); return; }
+        const efn = bound("FlashcardEdit");
+        if (efn) { try { await efn(id, f, b); } catch (e) { console.error("fc edit", e); studyToast("edit failed"); } }
+        study.editing = null; startCurate(root);
+      });
+      li.querySelector(".st-cancel").addEventListener("click", () => { study.editing = null; renderStudyCurate(); });
+      return;
+    }
+    li.querySelector(".st-edit").addEventListener("click", () => { study.editing = id; renderStudyCurate(); });
     li.querySelector(".st-keep").addEventListener("click", async () => {
       const kfn = bound("FlashcardActivate"); if (kfn) { try { await kfn(id); } catch (e) { console.error(e); } }
       startCurate(root);

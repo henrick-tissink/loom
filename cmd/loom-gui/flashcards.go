@@ -36,10 +36,12 @@ type CoverageDTO struct {
 
 // FlashcardStatsDTO is the project's measured pass-rate (over due reviews) and coverage.
 type FlashcardStatsDTO struct {
-	PassRate   float64       `json:"passRate"` // 0..1
-	Reviews    int           `json:"reviews"`
-	Reviewable int           `json:"reviewable"` // cards a session would serve now: due + the day's new budget
-	Parts      []CoverageDTO `json:"parts"`
+	PassRate   float64         `json:"passRate"` // 0..1
+	Reviews    int             `json:"reviews"`
+	Reviewable int             `json:"reviewable"` // cards a session would serve now: due + the day's new budget
+	Trend      []store.DayStat `json:"trend"`      // per-day due-review pass tallies (recall sparkline)
+	Grades     []int           `json:"grades"`     // grade 1..4 counts over all reviews (distribution ring)
+	Parts      []CoverageDTO   `json:"parts"`
 }
 
 // flashProjectKey is the store key for a project: its ROOT's basename, matching
@@ -74,7 +76,7 @@ func (a *App) FlashcardCoverage(projectRoot string) []CoverageDTO {
 
 // FlashcardStats returns the measured pass-rate (over due reviews) plus coverage.
 func (a *App) FlashcardStats(projectRoot string) FlashcardStatsDTO {
-	out := FlashcardStatsDTO{Parts: []CoverageDTO{}}
+	out := FlashcardStatsDTO{Parts: []CoverageDTO{}, Trend: []store.DayStat{}, Grades: []int{}}
 	defer func() { _ = recover() }()
 	if a.st == nil {
 		return out
@@ -95,7 +97,32 @@ func (a *App) FlashcardStats(projectRoot string) FlashcardStatsDTO {
 	if q, qerr := a.reviewer().BuildQueue(project, now, now-now%86400); qerr == nil {
 		out.Reviewable = len(q)
 	}
+	if trend, terr := a.st.DailyReviewStats(project, 0); terr == nil && trend != nil {
+		out.Trend = trend
+	}
+	if gc, gerr := a.st.GradeCounts(project, 0); gerr == nil {
+		out.Grades = gc[:]
+	}
 	return out
+}
+
+// FlashcardStruggling lists active cards racking up lapses — approaching the
+// leech auto-suspend — so they can be fixed or killed before they vanish.
+func (a *App) FlashcardStruggling(projectRoot string) []store.StrugglingCard {
+	out := []store.StrugglingCard{}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	min := flashcards.DefaultReviewConfig().LeechThreshold - 3
+	if min < 2 {
+		min = 2
+	}
+	cards, err := a.st.LapsingCards(flashProjectKey(projectRoot), min)
+	if err != nil || cards == nil {
+		return out
+	}
+	return cards
 }
 
 // FlashcardDrafts returns a project's uncurated cards.
@@ -415,4 +442,133 @@ func (a *App) emitFlash(event string, data any) {
 	if a.ctx != nil {
 		wruntime.EventsEmit(a.ctx, event, data)
 	}
+}
+
+// ---- deck cleanup (Batch 3) ----
+
+// FlashcardDeckInspect previews the disposable cards in a project's deck:
+// orphaned (part gone), stale (source drifted), and never-curated drafts.
+func (a *App) FlashcardDeckInspect(projectRoot string) flashcards.DeckCleanup {
+	out := flashcards.DeckCleanup{OrphanedParts: []string{}, StaleParts: []string{}}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	insp, err := flashcards.InspectDeck(a.st, flashProjectKey(projectRoot), projectRoot)
+	if err != nil {
+		return out
+	}
+	if insp.OrphanedParts == nil {
+		insp.OrphanedParts = []string{}
+	}
+	if insp.StaleParts == nil {
+		insp.StaleParts = []string{}
+	}
+	return insp
+}
+
+// FlashcardDeckClean removes orphaned + stale cards (always) and, if dropDrafts,
+// the never-curated drafts. Returns cards deleted.
+func (a *App) FlashcardDeckClean(projectRoot string, dropDrafts bool) (int, error) {
+	if a.st == nil {
+		return 0, errFlashNoStore
+	}
+	return flashcards.CleanDeck(a.st, flashProjectKey(projectRoot), projectRoot, dropDrafts)
+}
+
+// ---- architecture from scratch (Batch 3) ----
+
+// ArchSynthDTO reports the outcome of an architecture synthesis request.
+type ArchSynthDTO struct {
+	Exists   bool   `json:"exists"` // ARCHITECTURE.md already there; caller must confirm overwrite
+	Wrote    bool   `json:"wrote"`
+	Path     string `json:"path"`
+	Sections int    `json:"sections"` // doc sections whose card generation was kicked off
+}
+
+// FlashcardSynthesizeArch writes docs/ARCHITECTURE.md from a whole-repo code
+// digest (unless it exists and overwrite is false — then it reports Exists so the
+// UI can confirm), then kicks off card generation from the doc's sections in the
+// background (the normal generation progress events follow).
+func (a *App) FlashcardSynthesizeArch(projectRoot string, overwrite bool) (ArchSynthDTO, error) {
+	var dto ArchSynthDTO
+	if a.st == nil {
+		return dto, errFlashNoStore
+	}
+	gen := &flashcards.Generator{Binary: "claude", WorkDir: a.loomDir}
+	path, wrote, err := flashcards.SynthesizeArchitecture(gen, projectRoot, overwrite)
+	if err != nil {
+		return dto, err
+	}
+	dto.Path = path
+	if !wrote {
+		dto.Exists = true
+		return dto, nil
+	}
+	dto.Wrote = true
+	parts, err := flashcards.BuildManifest(projectRoot)
+	if err != nil {
+		return dto, err
+	}
+	rel := flashDocRel(projectRoot, path)
+	var todo []flashcards.Part
+	for _, p := range parts {
+		if p.Kind == flashcards.PartDoc && strings.HasPrefix(p.ID, rel+"#") {
+			todo = append(todo, p)
+		}
+	}
+	dto.Sections = len(todo)
+	if len(todo) > 0 {
+		if err := a.startGeneration(flashProjectKey(projectRoot), todo); err != nil {
+			return dto, err
+		}
+	}
+	return dto, nil
+}
+
+func flashDocRel(root, abs string) string {
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "docs/ARCHITECTURE.md"
+	}
+	return filepath.ToSlash(rel)
+}
+
+// FlashcardPractice returns a subsystem's active cards as a drill queue,
+// ignoring the due schedule (WasDue=false — practice, not a scored session).
+func (a *App) FlashcardPractice(projectRoot, part string) []FlashcardDTO {
+	out := []FlashcardDTO{}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	cards, err := a.st.ActiveCardsForPart(flashProjectKey(projectRoot), part)
+	if err != nil {
+		return out
+	}
+	for _, c := range cards {
+		out = append(out, cardDTO(c, false))
+	}
+	return out
+}
+
+// SubsystemGraph returns the project's subsystem import graph with per-node card
+// coverage and drift overlaid (the dependency-graph view).
+func (a *App) SubsystemGraph(projectRoot string) flashcards.DepGraph {
+	out := flashcards.DepGraph{Nodes: []flashcards.DepNode{}, Edges: []flashcards.DepEdge{}}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	g, err := flashcards.BuildDepGraph(a.st, flashProjectKey(projectRoot), projectRoot)
+	if err != nil {
+		return out
+	}
+	if g.Nodes == nil {
+		g.Nodes = []flashcards.DepNode{}
+	}
+	if g.Edges == nil {
+		g.Edges = []flashcards.DepEdge{}
+	}
+	return g
 }

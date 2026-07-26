@@ -465,7 +465,13 @@ body {
 .po-bhead { display: flex; align-items: center; gap: 10px; }
 .po-block h3 { margin: 0; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-faint); font-weight: 700; }
 .po-bhead .sh-btn { margin-left: auto; }
-.po-sub { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); margin-top: 6px; }
+.po-sub { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); margin-top: 6px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.po-subact { font: inherit; font-size: 10.5px; letter-spacing: 0; text-transform: none; cursor: pointer;
+  border: 1px solid var(--edge); background: var(--surface); color: var(--text-dim); border-radius: 6px; padding: 2px 9px; }
+.po-subact:hover { border-color: var(--accent-line); color: var(--accent); }
+.po-subact.armed { color: #fff; background: #C5604C; border-color: #C5604C; }
+.tage { color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .po-empty { font-size: 12px; color: var(--text-faint); padding: 2px 0; }
 .po-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 .po-repo, .po-sess {
@@ -1036,6 +1042,108 @@ button.dg-chip { cursor: pointer; }
 .st-genstat.run { color: var(--accent); }
 .st-genstat.ok { color: #4E9C6A; }
 .st-genstat.err { color: #C64C40; }
+
+/* ===== Study tweaks: recap, inline edit, coverage heatmap ===== */
+
+/* end-of-session recap */
+.st-recap { width: 100%; max-width: 400px; margin: 6px 0 4px; display: flex; flex-direction: column; gap: 14px; }
+.st-recap-row { display: flex; justify-content: center; gap: 30px; }
+.st-recap-stat { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.st-recap-stat b { font-size: 23px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.st-recap-stat span { font-size: 11px; color: var(--text-dim); }
+.st-recap-bar { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--edge); }
+.st-recap-seg { display: block; }
+.st-recap-seg.g1 { background: #C64C40; } .st-recap-seg.g2 { background: #B8863C; }
+.st-recap-seg.g3 { background: #4E9C6A; } .st-recap-seg.g4 { background: #5B7FB8; }
+
+/* inline draft edit */
+.st-editing .st-dtext { display: flex; flex-direction: column; gap: 6px; }
+.st-efront, .st-eback { width: 100%; font: inherit; font-size: 13px; color: var(--text); background: var(--surface);
+  border: 1px solid var(--edge); border-radius: 7px; padding: 7px 9px; resize: vertical; }
+.st-eback { font-size: 12.5px; color: var(--text-dim); }
+.st-efront:focus, .st-eback:focus { outline: none; border-color: var(--accent-line); }
+.st-save:hover { border-color: #4E9C6A; color: #4E9C6A; }
+.st-cancel:hover { border-color: var(--text-dim); color: var(--text); }
+
+/* coverage heatmap */
+.st-heat { display: flex; flex-wrap: wrap; gap: 5px; margin: 16px 0 4px; }
+.st-htile { width: 22px; height: 22px; border-radius: 5px; border: 1px solid transparent; padding: 0;
+  cursor: pointer; position: relative; background: rgba(197,106,74,.16); transition: transform .1s; }
+.st-htile:hover { transform: scale(1.14); }
+.st-htile[data-l="0"] { background: transparent; border-color: var(--edge); }
+.st-htile[data-l="1"] { background: rgba(197,106,74,.24); }
+.st-htile[data-l="2"] { background: rgba(197,106,74,.48); }
+.st-htile[data-l="3"] { background: rgba(197,106,74,.80); }
+.st-htile.changed { border-color: var(--accent); border-style: dashed; }
+.st-htile.due::after { content: ""; position: absolute; top: 2px; right: 2px; width: 5px; height: 5px;
+  border-radius: 50%; background: #3E9A80; box-shadow: 0 0 0 1.5px var(--surface); }
+.st-part.st-flash { background: rgba(197,106,74,.10); }
+
+/* ===== Cleanup dialogs (deck + repo) ===== */
+.cm-body { font-size: 13px; color: var(--text-dim); }
+.cln-list { display: flex; flex-direction: column; gap: 7px; margin: 2px 0; }
+.cln-row { display: flex; align-items: baseline; gap: 10px; }
+.cln-row b { font-size: 18px; font-weight: 600; color: var(--text); min-width: 28px; font-variant-numeric: tabular-nums; }
+.cln-row span { font-size: 12.5px; color: var(--text-dim); }
+.cln-check { display: flex; align-items: center; gap: 7px; margin-top: 13px; font-size: 12.5px; color: var(--text); cursor: pointer; }
+.cln-note { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; line-height: 1.5; }
+.cln-files { max-height: 260px; overflow-y: auto; border: 1px solid var(--edge); border-radius: 8px; }
+.cln-file { display: flex; justify-content: space-between; gap: 10px; padding: 6px 11px; border-bottom: 1px solid var(--edge); font-family: var(--font-mono); font-size: 11.5px; }
+.cln-file:last-child { border-bottom: none; }
+.cln-fp { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cln-fs { color: var(--text-faint); flex: none; font-variant-numeric: tabular-nums; }
+.cln-empty { font-size: 13px; color: var(--text-dim); padding: 6px 0; }
+
+/* ===== Batch 4a: rail one-click launch + missing-repo, practice, open-source ===== */
+.psec-warn { color: #C56A4A; font-weight: 700; font-size: 12px; flex: none; margin-left: 3px; cursor: default; }
+.psec-add, .prow-add { font: inherit; font-size: 15px; line-height: 1; color: var(--text-faint); background: none;
+  border: none; cursor: pointer; padding: 0 5px; opacity: 0; transition: opacity .12s, color .12s; flex: none; }
+.psec:hover .psec-add, .prow:hover .prow-add { opacity: 1; }
+.psec-add:hover, .prow-add:hover { color: var(--accent); }
+.st-metaleft { display: flex; align-items: center; gap: 12px; }
+.st-opensrc { font: inherit; font-size: 11px; color: var(--text-faint); background: none; border: none;
+  cursor: pointer; padding: 0; }
+.st-opensrc:hover { color: var(--accent); }
+.st-practice { font: inherit; font-size: 11px; cursor: pointer; padding: 3px 9px; border-radius: 6px;
+  border: 1px solid var(--edge); background: var(--surface); color: var(--text-dim); margin-left: 4px; }
+.st-practice:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
+.st-practice:disabled { opacity: .4; cursor: default; }
+
+/* ===== Batch 4b: recall trend, grade ring, struggling list ===== */
+.st-summary { align-items: center; }
+.st-inswrap { display: flex; gap: 26px; margin-left: auto; align-items: center; }
+.st-ins { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.st-inslbl { font-size: 10.5px; letter-spacing: .04em; color: var(--text-faint); }
+.st-spark, .st-ring { display: block; }
+.st-genbanner.struggle { background: rgba(197,106,74,.07); border: 1px solid var(--accent-line); color: var(--accent); }
+.st-struggle { list-style: none; margin: 8px 0 4px; padding: 0; }
+.st-struggle li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 2px; border-bottom: 1px solid var(--edge); font-size: 12.5px; }
+.st-str-front { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-str-meta { color: var(--text-faint); font-family: var(--font-mono); font-size: 11px; flex: none; }
+
+/* ===== Batch 4c: subsystem dependency graph (Map) ===== */
+.study-map { max-width: none; }
+.dgm-legend { display: flex; align-items: center; gap: 16px; font-size: 11.5px; color: var(--text-dim); margin-bottom: 14px; flex-wrap: wrap; }
+.dgm-lg { display: inline-flex; align-items: center; gap: 6px; }
+.dgm-sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.dgm-sw.dgm-l3 { background: rgba(197,106,74,.78); }
+.dgm-sw.dgm-l0 { background: transparent; border: 1px solid var(--edge); }
+.dgm-sw.dgm-dashed { border: 1px dashed var(--accent); }
+.dgm-hint { color: var(--text-faint); margin-left: auto; }
+.dgm-canvas { overflow: auto; border: 1px solid var(--edge); border-radius: 12px; background: var(--stage); padding: 4px; }
+.dgm-edge { stroke: var(--accent-line); stroke-width: 1.5; opacity: .75; }
+#dgm-arrow path { fill: var(--accent-line); }
+.dgm-node { cursor: pointer; }
+.dgm-node rect { fill: var(--surface); stroke: var(--edge); stroke-width: 1; transition: stroke .12s; }
+.dgm-node:hover rect { stroke: var(--accent); }
+.dgm-l1 rect { fill: rgba(197,106,74,.10); }
+.dgm-l2 rect { fill: rgba(197,106,74,.22); }
+.dgm-l3 rect { fill: rgba(197,106,74,.34); }
+.dgm-node.changed rect { stroke: var(--accent); stroke-dasharray: 6 4; }
+.dgm-title { font-family: var(--font-mono); font-size: 13px; font-weight: 600; fill: var(--text); }
+.dgm-sub { font-family: var(--font-mono); font-size: 10px; fill: var(--text-faint); }
+.dgm-cards { font-size: 11px; fill: var(--text-dim); }
+.dgm-drift { font-size: 10px; fill: var(--accent); font-weight: 600; }
 .st-genbanner { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin: 14px 0 4px; padding: 10px 14px; border-radius: var(--radius); font-size: 12.5px; }
 .st-genbanner.stale { background: rgba(197,106,74,.10); color: var(--text); border: 1px solid rgba(197,106,74,.28); }
