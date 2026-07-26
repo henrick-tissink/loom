@@ -1120,6 +1120,30 @@ button.dg-chip { cursor: pointer; }
 .st-struggle li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 2px; border-bottom: 1px solid var(--edge); font-size: 12.5px; }
 .st-str-front { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .st-str-meta { color: var(--text-faint); font-family: var(--font-mono); font-size: 11px; flex: none; }
+
+/* ===== Batch 4c: subsystem dependency graph (Map) ===== */
+.study-map { max-width: none; }
+.dgm-legend { display: flex; align-items: center; gap: 16px; font-size: 11.5px; color: var(--text-dim); margin-bottom: 14px; flex-wrap: wrap; }
+.dgm-lg { display: inline-flex; align-items: center; gap: 6px; }
+.dgm-sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.dgm-sw.dgm-l3 { background: rgba(197,106,74,.78); }
+.dgm-sw.dgm-l0 { background: transparent; border: 1px solid var(--edge); }
+.dgm-sw.dgm-dashed { border: 1px dashed var(--accent); }
+.dgm-hint { color: var(--text-faint); margin-left: auto; }
+.dgm-canvas { overflow: auto; border: 1px solid var(--edge); border-radius: 12px; background: var(--stage); padding: 4px; }
+.dgm-edge { stroke: var(--accent-line); stroke-width: 1.5; opacity: .75; }
+#dgm-arrow path { fill: var(--accent-line); }
+.dgm-node { cursor: pointer; }
+.dgm-node rect { fill: var(--surface); stroke: var(--edge); stroke-width: 1; transition: stroke .12s; }
+.dgm-node:hover rect { stroke: var(--accent); }
+.dgm-l1 rect { fill: rgba(197,106,74,.10); }
+.dgm-l2 rect { fill: rgba(197,106,74,.22); }
+.dgm-l3 rect { fill: rgba(197,106,74,.34); }
+.dgm-node.changed rect { stroke: var(--accent); stroke-dasharray: 6 4; }
+.dgm-title { font-family: var(--font-mono); font-size: 13px; font-weight: 600; fill: var(--text); }
+.dgm-sub { font-family: var(--font-mono); font-size: 10px; fill: var(--text-faint); }
+.dgm-cards { font-size: 11px; fill: var(--text-dim); }
+.dgm-drift { font-size: 10px; fill: var(--accent); font-weight: 600; }
 .st-genbanner { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin: 14px 0 4px; padding: 10px 14px; border-radius: var(--radius); font-size: 12.5px; }
 .st-genbanner.stale { background: rgba(197,106,74,.10); color: var(--text); border: 1px solid rgba(197,106,74,.28); }

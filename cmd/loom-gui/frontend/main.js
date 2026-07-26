@@ -4384,7 +4384,7 @@ function openSearch() {
 // GUI App (slice 3a). poll() only refreshes a kind==="project" stage, so this
 // surface is never clobbered mid-review.
 
-let study = { queue: [], idx: 0, revealed: false, drafts: [], graded: [], editing: null };
+let study = { queue: [], idx: 0, revealed: false, drafts: [], graded: [], editing: null, graph: null };
 
 // Generation job state (slice 6b). A (re)generate runs in the Go bridge as a
 // background job emitting "flashcards:progress"/"flashcards:done"; this mirrors
@@ -4598,6 +4598,7 @@ function renderStudy() {
   if (stageView.kind !== "study") return;
   if (stageView.view === "review") return renderStudyReview();
   if (stageView.view === "curate") return renderStudyCurate();
+  if (stageView.view === "map") return renderStudyMap();
   return renderStudyCoverage();
 }
 
@@ -4673,6 +4674,7 @@ async function renderStudyCoverage() {
         <button class="st-cta" id="st-curate"${totalDraft && !busy ? "" : " disabled"}>Curate ${totalDraft} draft${totalDraft === 1 ? "" : "s"}</button>
         <button class="st-cta" id="st-generate"${busy ? " disabled" : ""}>Generate…</button>
         <button class="st-cta" id="st-cleanup"${busy ? " disabled" : ""}>Clean up</button>
+        ${parts.length ? `<button class="st-cta" id="st-map">Map</button>` : ""}
       </div>
       ${parts.length ? `<div class="st-heat">${heatTiles}</div><ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet. Click <b>Generate…</b> above (a file or package path), or run <code>loom flashcards generate ${esc(root)}</code>.</div>`}
     </div>`;
@@ -4681,6 +4683,7 @@ async function renderStudyCoverage() {
   const cur = document.getElementById("st-curate"); if (cur && totalDraft && !busy) cur.addEventListener("click", () => startCurate(root));
   const gen = document.getElementById("st-generate"); if (gen && !busy) gen.addEventListener("click", () => promptFlashGen(root));
   const clean = document.getElementById("st-cleanup"); if (clean && !busy) clean.addEventListener("click", () => flashCleanupDialog(root));
+  const map = document.getElementById("st-map"); if (map) map.addEventListener("click", () => openStudyMap(root));
   const rgs = document.getElementById("st-regenchanged"); if (rgs) rgs.addEventListener("click", () => runFlashGenChanged(root));
   const stop = document.getElementById("st-genstop"); if (stop) stop.addEventListener("click", () => { const cf = bound("FlashcardGenerateCancel"); if (cf) cf(); studyToast("stopping after the current part…"); });
   if (!busy) {
@@ -4695,6 +4698,63 @@ async function renderStudyCoverage() {
       const row = stage.querySelector(`.st-part[data-part="${CSS.escape(t.getAttribute("data-part"))}"]`);
       if (row) { row.scrollIntoView({ behavior: "smooth", block: "center" }); row.classList.add("st-flash"); setTimeout(() => row.classList.remove("st-flash"), 1100); }
     }));
+}
+
+// openStudyMap fetches the subsystem dependency graph (import edges + coverage +
+// drift) and renders it.
+async function openStudyMap(root) {
+  const fn = bound("SubsystemGraph");
+  let g = { nodes: [], edges: [], width: 0, height: 0, nodeW: 224, nodeH: 58 };
+  if (fn) { try { g = (await fn(root)) || g; } catch (e) { console.error("subsys graph", e); } }
+  if (stageView.kind !== "study" || stageView.root !== root) return;
+  study.graph = g;
+  stageView.view = "map";
+  renderStudyMap();
+}
+
+// renderStudyMap draws the dependency graph: nodes are subsystems shaded by card
+// coverage (and dashed when their source has drifted), edges are imports. Click a
+// node to drill its cards.
+function renderStudyMap() {
+  const stage = document.getElementById("stage");
+  if (!stage) return;
+  const root = stageView.root;
+  const g = study.graph || { nodes: [], edges: [] };
+  const nw = g.nodeW || 224, nh = g.nodeH || 58, pad = 30;
+  const byId = {};
+  (g.nodes || []).forEach((n) => { byId[n.id] = n; });
+  const cx = (n) => n.x + nw / 2 + pad, cy = (n) => n.y + nh / 2 + pad;
+  const W = (g.width || nw) + pad * 2, H = (g.height || nh) + pad * 2;
+  const edges = (g.edges || []).map((e) => {
+    const a = byId[e.from], b = byId[e.to];
+    if (!a || !b) return "";
+    return `<line x1="${cx(a)}" y1="${cy(a)}" x2="${cx(b)}" y2="${cy(b)}" class="dgm-edge" marker-end="url(#dgm-arrow)"/>`;
+  }).join("");
+  const nodes = (g.nodes || []).map((n) => {
+    const lvl = n.cards === 0 ? 0 : n.cards >= 6 ? 3 : n.cards >= 3 ? 2 : 1;
+    return `<g class="dgm-node dgm-l${lvl}${n.changed ? " changed" : ""}" data-part="${esc(n.id)}" transform="translate(${n.x + pad},${n.y + pad})">
+      <rect width="${nw}" height="${nh}" rx="10"/>
+      <text class="dgm-title" x="15" y="25">${esc(n.title)}</text>
+      <text class="dgm-sub" x="15" y="43">${esc(n.id)}</text>
+      <text class="dgm-cards" x="${nw - 15}" y="25" text-anchor="end">${n.cards ? n.cards + " cards" : "no cards"}</text>
+      ${n.changed ? `<text class="dgm-drift" x="${nw - 15}" y="43" text-anchor="end">drifted</text>` : ""}
+    </g>`;
+  }).join("");
+  stage.replaceChildren();
+  stage.innerHTML = studyHeader("Map", studyProjName(root)) + `
+    <div class="study study-map">
+      <div class="dgm-legend"><span class="dgm-lg"><i class="dgm-sw dgm-l3"></i>covered</span><span class="dgm-lg"><i class="dgm-sw dgm-l0"></i>no cards</span><span class="dgm-lg"><i class="dgm-sw dgm-dashed"></i>drifted</span><span class="dgm-hint">click a node to drill its cards</span></div>
+      <div class="dgm-canvas">
+        <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Subsystem dependency graph">
+          <defs><marker id="dgm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker></defs>
+          ${edges}${nodes}
+        </svg>
+      </div>
+      ${(g.nodes || []).length ? "" : `<div class="st-empty">No subsystems to map.</div>`}
+    </div>`;
+  document.getElementById("st-back").addEventListener("click", () => { stageView.view = "coverage"; renderStudy(); });
+  stage.querySelectorAll(".dgm-node").forEach((el) =>
+    el.addEventListener("click", () => startPractice(root, el.getAttribute("data-part"))));
 }
 
 // startPractice drills one subsystem's active cards on demand, ignoring the due

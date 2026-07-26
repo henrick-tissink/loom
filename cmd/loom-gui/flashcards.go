@@ -551,3 +551,24 @@ func (a *App) FlashcardPractice(projectRoot, part string) []FlashcardDTO {
 	}
 	return out
 }
+
+// SubsystemGraph returns the project's subsystem import graph with per-node card
+// coverage and drift overlaid (the dependency-graph view).
+func (a *App) SubsystemGraph(projectRoot string) flashcards.DepGraph {
+	out := flashcards.DepGraph{Nodes: []flashcards.DepNode{}, Edges: []flashcards.DepEdge{}}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	g, err := flashcards.BuildDepGraph(a.st, flashProjectKey(projectRoot), projectRoot)
+	if err != nil {
+		return out
+	}
+	if g.Nodes == nil {
+		g.Nodes = []flashcards.DepNode{}
+	}
+	if g.Edges == nil {
+		g.Edges = []flashcards.DepEdge{}
+	}
+	return g
+}
