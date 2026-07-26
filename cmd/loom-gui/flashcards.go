@@ -506,3 +506,21 @@ func flashDocRel(root, abs string) string {
 	}
 	return filepath.ToSlash(rel)
 }
+
+// FlashcardPractice returns a subsystem's active cards as a drill queue,
+// ignoring the due schedule (WasDue=false — practice, not a scored session).
+func (a *App) FlashcardPractice(projectRoot, part string) []FlashcardDTO {
+	out := []FlashcardDTO{}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	cards, err := a.st.ActiveCardsForPart(flashProjectKey(projectRoot), part)
+	if err != nil {
+		return out
+	}
+	for _, c := range cards {
+		out = append(out, cardDTO(c, false))
+	}
+	return out
+}

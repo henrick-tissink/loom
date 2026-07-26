@@ -409,23 +409,36 @@ function railSections(sessions, recent) {
   ];
 }
 
+// projectMissingRepos counts a project's MEMBER repos that have vanished from
+// disk — surfaced in the rail so a deleted sub-repo isn't silent until you open
+// the overview. (A missing project ROOT is a separate, already-shown signal.)
+function projectMissingRepos(root) {
+  const p = latestProjects.find((x) => x.root === root);
+  if (!p || !p.repos) return 0;
+  return p.repos.filter((r) => r.missing).length;
+}
+
 function appendSectionHead(sec) {
   const li = document.createElement("li");
   const isCollapsed = collapsedRoots.has(sec.root);
   const urgent = sec.live.filter((s) => s.status === "needs_you").length;
+  const miss = projectMissingRepos(sec.root);
   li.className = "psec" + (isCollapsed ? " collapsed" : "") + (urgent ? " urgent" : "");
   li.innerHTML =
     `<button class="psec-caret" title="${isCollapsed ? "Expand" : "Collapse"}">${isCollapsed ? "▸" : "▾"}</button>` +
     `<span class="psec-name">${esc(sec.name)}</span>` +
+    (miss ? `<span class="psec-warn" title="${miss} member repo${miss === 1 ? "" : "s"} missing">!</span>` : "") +
     // The dot survives collapse on purpose: collapsing a section must never be
     // the reason an urgent session goes unnoticed.
     (urgent ? `<span class="psec-dot" title="${urgent} need you"></span>` : "") +
-    `<span class="psec-count">${sec.live.length || ""}</span>`;
+    `<span class="psec-count">${sec.live.length || ""}</span>` +
+    `<button class="psec-add" title="New session in ${esc(sec.name)}">+</button>`;
   li.querySelector(".psec-caret").addEventListener("click", (e) => {
     e.stopPropagation();
     setCollapsed(sec.root, !collapsedRoots.has(sec.root));
     renderRail(latestSessions, latestRecent);
   });
+  li.querySelector(".psec-add").addEventListener("click", (e) => { e.stopPropagation(); openLauncher(sec.root); });
   // Clicking the header itself is §8's "replace the stage with the overview".
   li.addEventListener("click", () => openProject(sec.root));
   threadsEl.appendChild(li);
@@ -455,10 +468,14 @@ function appendProjectIndex(shownRoots) {
   if (isCollapsed) return;
   for (const p of rest) {
     const li = document.createElement("li");
+    const miss = projectMissingRepos(p.root);
     li.className = "prow" + (p.missing ? " missing" : "");
     li.innerHTML = `<span class="prow-name">${esc(p.name)}</span>` +
-      (p.missing ? `<span class="prow-tag">missing</span>` : "");
+      (miss ? `<span class="psec-warn" title="${miss} member repo${miss === 1 ? "" : "s"} missing">!</span>` : "") +
+      (p.missing ? `<span class="prow-tag">missing</span>` : "") +
+      `<button class="psec-add prow-add" title="New session here">+</button>`;
     li.addEventListener("click", () => openProject(p.root));
+    li.querySelector(".prow-add").addEventListener("click", (e) => { e.stopPropagation(); openLauncher(p.root); });
     threadsEl.appendChild(li);
   }
 }
@@ -4587,6 +4604,7 @@ async function renderStudyCoverage() {
           ${p.due ? `<span class="st-chip st-due">${p.due} due</span>` : ""}
           ${p.draft ? `<span class="st-chip st-draft">${p.draft} draft</span>` : ""}
           ${genStatus(p.part)}
+          ${p.active ? `<button class="st-practice" data-part="${esc(p.part)}"${busy ? " disabled" : ""} title="Drill this subsystem's cards now">practice</button>` : ""}
           <button class="st-regen" data-part="${esc(p.part)}"${busy ? " disabled" : ""}>regenerate</button>
         </span>
       </li>`).join("");
@@ -4628,6 +4646,8 @@ async function renderStudyCoverage() {
   if (!busy) {
     stage.querySelectorAll(".st-regen").forEach((b) =>
       b.addEventListener("click", () => runFlashGen(root, "path", b.getAttribute("data-part"))));
+    stage.querySelectorAll(".st-practice").forEach((b) =>
+      b.addEventListener("click", () => startPractice(root, b.getAttribute("data-part"))));
   }
   // a heatmap tile jumps to its row in the list below
   stage.querySelectorAll(".st-htile").forEach((t) =>
@@ -4635,6 +4655,19 @@ async function renderStudyCoverage() {
       const row = stage.querySelector(`.st-part[data-part="${CSS.escape(t.getAttribute("data-part"))}"]`);
       if (row) { row.scrollIntoView({ behavior: "smooth", block: "center" }); row.classList.add("st-flash"); setTimeout(() => row.classList.remove("st-flash"), 1100); }
     }));
+}
+
+// startPractice drills one subsystem's active cards on demand, ignoring the due
+// schedule — useful before you touch a package. Grades still record.
+async function startPractice(root, part) {
+  let q = [];
+  const fn = bound("FlashcardPractice");
+  if (fn) { try { q = (await fn(root, part)) || []; } catch (e) { console.error("fc practice", e); } }
+  if (!q.length) { studyToast("no active cards in this subsystem yet"); return; }
+  if (stageView.kind !== "study" || stageView.root !== root) return;
+  study.queue = q; study.idx = 0; study.revealed = false; study.graded = [];
+  stageView.view = "review";
+  renderStudyReview();
 }
 
 async function startReview(root) {
@@ -4670,7 +4703,7 @@ function renderStudyReview() {
   const revealed = study.revealed;
   stage.innerHTML = studyHeader("Review", "") + `
     <div class="study study-review">
-      <div class="st-cardmeta"><span class="st-part-lbl">${esc(card.part)} · ${esc(card.type)}</span><span class="st-count">${study.idx + 1} / ${q.length}</span></div>
+      <div class="st-cardmeta"><span class="st-metaleft"><span class="st-part-lbl">${esc(card.part)} · ${esc(card.type)}</span><button class="st-opensrc" title="Open the cited source in your editor">source ↗</button></span><span class="st-count">${study.idx + 1} / ${q.length}</span></div>
       <div class="st-card${revealed ? " revealed" : ""}">
         <div class="st-front">${esc(card.front)}</div>
         ${revealed ? `<div class="st-divider"><span>answer</span></div><div class="st-back">${esc(card.back)}</div>` : ""}
@@ -4685,6 +4718,10 @@ function renderStudyReview() {
       </div>
     </div>`;
   document.getElementById("st-back").addEventListener("click", () => openProject(root));
+  const osrc = stage.querySelector(".st-opensrc");
+  if (osrc) osrc.addEventListener("click", () => {
+    const f = bound("OpenSource"); if (f) f(root, card.part).catch((e) => console.error("open source", e));
+  });
   if (!revealed) {
     document.getElementById("st-reveal").addEventListener("click", revealCard);
   } else {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // resolveFile resolves path (possibly relative to cwd) to an existing absolute
@@ -154,4 +155,32 @@ func (a *App) RevealInFinder(path string) error {
 		return fmt.Errorf("path not found: %s", path)
 	}
 	return exec.Command("open", "-R", path).Start()
+}
+
+// OpenSource opens a flashcard's cited source (its part / SourceRef, with any
+// "#slug" stripped) in the user's editor, resolved against the project root.
+// Depth-on-demand from a card: jump to the code it summarizes.
+func (a *App) OpenSource(projectRoot, sourceRef string) error {
+	if i := strings.IndexByte(sourceRef, '#'); i >= 0 {
+		sourceRef = sourceRef[:i]
+	}
+	if sourceRef == "" {
+		return fmt.Errorf("no source")
+	}
+	abs := filepath.Join(projectRoot, filepath.FromSlash(sourceRef))
+	if _, err := os.Stat(abs); err != nil {
+		return fmt.Errorf("source not found: %s", sourceRef)
+	}
+	preferred := ""
+	if a.settings != nil {
+		preferred = a.settings.get().Editor
+	}
+	for _, argv := range editorCommands(pickEditor(exec.LookPath, preferred), abs, 0) {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		go func() { _ = cmd.Wait() }()
+	}
+	return nil
 }

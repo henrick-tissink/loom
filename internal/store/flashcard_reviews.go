@@ -81,3 +81,13 @@ func (s *Store) NewActiveCards(project string, limit int) ([]Flashcard, error) {
 	}
 	return scanCards(rows)
 }
+
+// ActiveCardsForPart returns a subsystem's active cards regardless of the due
+// schedule — the basis for an on-demand "practice this subsystem" drill.
+func (s *Store) ActiveCardsForPart(project, part string) ([]Flashcard, error) {
+	rows, err := s.db.Query("SELECT "+flashcardCols+" FROM flashcards WHERE project=? AND part=? AND status='active' ORDER BY id", project, part)
+	if err != nil {
+		return nil, err
+	}
+	return scanCards(rows)
+}
