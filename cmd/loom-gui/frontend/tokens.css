@@ -945,7 +945,7 @@ button.dg-chip { cursor: pointer; }
 /* ===== Flashcards Study surface (slice 3b) ===== */
 .sh-btn-study { color: var(--accent); font-weight: 600; }
 .study-head .study-back { margin-right: 4px; color: var(--text-dim); }
-.study { padding: 24px 28px; max-width: 720px; margin: 0 auto; overflow-y: auto; }
+.study { flex: 1; min-height: 0; width: 100%; max-width: 760px; margin: 0 auto; padding: 24px 30px; box-sizing: border-box; overflow-y: auto; }
 
 /* coverage landing */
 .st-summary { display: flex; gap: 34px; padding: 6px 0 22px; border-bottom: 1px solid var(--edge); }
@@ -964,10 +964,14 @@ button.dg-chip { cursor: pointer; }
 .st-parts { list-style: none; margin: 14px 0 0; padding: 0; }
 .st-part { display: flex; align-items: center; justify-content: space-between; padding: 9px 2px; border-bottom: 1px solid var(--edge); }
 .st-ppath { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
-.st-pcounts { display: flex; gap: 6px; align-items: center; }
-.st-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--sel); color: var(--text-dim); }
-.st-chip.st-due { background: rgba(62,154,128,.16); color: #3E9A80; }
-.st-chip.st-draft { background: rgba(197,106,74,.16); color: #C56A4A; }
+.st-pcounts { display: flex; gap: 9px; align-items: center; }
+.st-count { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* Crisp hairline-outlined chips — a defined shape with readable text, never a
+   pale low-opacity fill that reads as a blob at a glance. */
+.st-chip { font-size: 11px; font-weight: 500; padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--edge); background: transparent; color: var(--text-dim); }
+.st-chip.st-due { border-color: rgba(62,154,128,.5); color: #3E9A80; }
+.st-chip.st-draft { border-color: var(--accent-line); color: var(--accent); }
 .st-empty { color: var(--text-dim); font-size: 13px; padding: 22px 0; line-height: 1.7; }
 .st-empty code { font-family: var(--font-mono); font-size: 12px; background: var(--sel); padding: 1px 6px; border-radius: 4px; }
 
@@ -1021,9 +1025,9 @@ button.dg-chip { cursor: pointer; }
 .st-toast.out { opacity: 0; }
 
 /* ===== Flashcards generate/regenerate (slice 6b) ===== */
-.st-part { gap: 8px; }
+.st-part { gap: 12px; padding: 10px 4px; }
 .st-part.stale { background: rgba(197,106,74,.05); }
-.st-stalechip { background: rgba(197,106,74,.16) !important; color: #C56A4A !important; font-weight: 600; }
+.st-stalechip { border-color: var(--accent-line) !important; color: var(--accent) !important; background: transparent !important; font-weight: 600; }
 .st-regen { font: inherit; font-size: 11px; cursor: pointer; padding: 3px 9px; border-radius: 6px;
   border: 1px solid var(--edge); background: var(--surface); color: var(--text-dim); margin-left: 4px; }
 .st-regen:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }

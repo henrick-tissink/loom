@@ -4405,7 +4405,7 @@ async function renderStudyCoverage() {
         <span class="st-ppath">${esc(p.part)}</span>
         <span class="st-pcounts">
           ${changedSet.has(p.part) ? `<span class="st-chip st-stalechip">changed</span>` : ""}
-          <span class="st-chip">${p.total}</span>
+          <span class="st-count">${p.total} card${p.total === 1 ? "" : "s"}</span>
           ${p.due ? `<span class="st-chip st-due">${p.due} due</span>` : ""}
           ${p.draft ? `<span class="st-chip st-draft">${p.draft} draft</span>` : ""}
           ${genStatus(p.part)}
