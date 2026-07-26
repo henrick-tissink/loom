@@ -16,9 +16,10 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func TestBuildManifestEnumeratesCodeAndDocHeadings(t *testing.T) {
+func TestBuildManifestEnumeratesSubsystemsAndDocHeadings(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "status.go"), "package status\nfunc Fuse() int { return 1 }\n")
+	writeFile(t, filepath.Join(root, "internal", "status", "status.go"), "package status\nfunc Fuse() int { return 1 }\n")
+	writeFile(t, filepath.Join(root, "internal", "status", "pane.go"), "package status\nfunc Pane() bool { return true }\n")
 	writeFile(t, filepath.Join(root, "docs", "ARCHITECTURE.md"),
 		"# Loom\nintro\n## Status\nhow status works\n## Data model\nthe db\n")
 
@@ -27,20 +28,32 @@ func TestBuildManifestEnumeratesCodeAndDocHeadings(t *testing.T) {
 		t.Fatalf("BuildManifest: %v", err)
 	}
 
-	var code, docs int
+	var subsystems, docs int
 	for _, p := range parts {
 		switch p.Kind {
 		case PartCode:
-			code++
+			t.Fatalf("no file-level code parts expected, got %+v", p)
+		case PartSubsystem:
+			subsystems++
 			if p.Source == "" || p.SourceRef == "" {
-				t.Fatalf("code part missing source/ref: %+v", p)
+				t.Fatalf("subsystem part missing source/ref: %+v", p)
+			}
+			if p.ID == "internal/status" {
+				if p.Title != "status" {
+					t.Fatalf("subsystem title = %q, want last dir segment 'status'", p.Title)
+				}
+				// the whole directory is fed at once, each file behind a separator
+				if !contains(p.Source, subsystemFilePrefix) ||
+					!contains(p.Source, "func Fuse()") || !contains(p.Source, "func Pane()") {
+					t.Fatalf("subsystem Source should join both files: %q", p.Source)
+				}
 			}
 		case PartDoc:
 			docs++
 		}
 	}
-	if code < 1 {
-		t.Fatalf("want >=1 code part, got %d", code)
+	if subsystems != 1 { // internal/status is one subsystem (two files)
+		t.Fatalf("want 1 subsystem part, got %d", subsystems)
 	}
 	if docs != 3 { // three headings: Loom, Status, Data model
 		t.Fatalf("want 3 doc heading parts, got %d", docs)

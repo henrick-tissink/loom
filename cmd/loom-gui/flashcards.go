@@ -232,9 +232,10 @@ func (a *App) FlashcardChangedParts(projectRoot string) []string {
 
 // GenScopesDTO is the part count each no-path scope would cover, for the dialog.
 type GenScopesDTO struct {
-	All       int `json:"all"`
-	Docs      int `json:"docs"`
-	Uncovered int `json:"uncovered"`
+	All        int `json:"all"`
+	Subsystems int `json:"subsystems"`
+	Docs       int `json:"docs"`
+	Uncovered  int `json:"uncovered"`
 }
 
 // FlashcardGenerateScopes returns how many parts each no-path scope covers, so
@@ -257,7 +258,10 @@ func (a *App) FlashcardGenerateScopes(projectRoot string) GenScopesDTO {
 	}
 	for _, p := range parts {
 		out.All++
-		if p.Kind == flashcards.PartDoc {
+		switch p.Kind {
+		case flashcards.PartSubsystem:
+			out.Subsystems++
+		case flashcards.PartDoc:
 			out.Docs++
 		}
 		if !covered[p.ID] {

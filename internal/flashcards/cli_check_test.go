@@ -12,12 +12,12 @@ import (
 func TestRunCLICheck(t *testing.T) {
 	st := openStore(t)
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "a.go"), "package a\nfunc F() int { return 1 }\n")
+	writeFile(t, filepath.Join(root, "internal", "a", "a.go"), "package a\nfunc F() int { return 1 }\n")
 	proj := projectName(root)
-	// an active card for a.go carrying a stale source hash
+	// an active card for the internal/a subsystem carrying a stale source hash
 	if _, _, err := st.InsertFlashcard(store.Flashcard{
-		Project: proj, Part: "a.go", Anchor: "c1", StemHash: "c1", Type: "code",
-		Front: "q", Back: "a", SourceRef: "a.go", SourceHash: "OLD", Status: "active", CreatedAt: 1,
+		Project: proj, Part: "internal/a", Anchor: "c1", StemHash: "c1", Type: "code",
+		Front: "q", Back: "a", SourceRef: "internal/a", SourceHash: "OLD", Status: "active", CreatedAt: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}

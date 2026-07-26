@@ -8,10 +8,11 @@ import "strings"
 type GenScope string
 
 const (
-	ScopeDocs      GenScope = "docs"      // the "why": doc SECTIONS only (arch headings, specs)
-	ScopeUncovered GenScope = "uncovered" // parts that have no cards yet
-	ScopeAll       GenScope = "all"       // every manifest part (whole project)
-	ScopePath      GenScope = "path"      // parts whose ID contains a path filter (targeted)
+	ScopeSubsystems GenScope = "subsystems" // high-level: one directory/package at a time
+	ScopeDocs       GenScope = "docs"       // the "why": doc SECTIONS only (arch headings, specs)
+	ScopeUncovered  GenScope = "uncovered"  // parts that have no cards yet
+	ScopeAll        GenScope = "all"        // every manifest part (whole project)
+	ScopePath       GenScope = "path"       // parts whose ID contains a path filter (targeted)
 )
 
 // SelectParts chooses which manifest parts a generation job covers, given a
@@ -22,6 +23,8 @@ func SelectParts(parts []Part, scope GenScope, filter string, covered map[string
 	for _, p := range parts {
 		keep := false
 		switch scope {
+		case ScopeSubsystems:
+			keep = p.Kind == PartSubsystem
 		case ScopeDocs:
 			keep = p.Kind == PartDoc
 		case ScopeUncovered:

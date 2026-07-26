@@ -23,26 +23,26 @@ func seedActive(t *testing.T, st *store.Store, project, part, anchor, srcHash st
 func TestCheckStaleFlagsDriftAndOrphans(t *testing.T) {
 	st := openStore(t)
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "a.go"), "package a\nfunc F() int { return 1 }\n")
+	writeFile(t, filepath.Join(root, "internal", "a", "a.go"), "package a\nfunc F() int { return 1 }\n")
 
-	// the current structural hash of a.go's part, from the manifest
+	// the current structural hash of the subsystem's part, from the manifest
 	parts, err := BuildManifest(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var partID, curHash string
 	for _, p := range parts {
-		if p.Kind == PartCode {
+		if p.Kind == PartSubsystem {
 			partID, curHash = p.ID, StructuralHash(p.SourceRef, p.Source)
 		}
 	}
 	if partID == "" {
-		t.Fatal("manifest produced no code part")
+		t.Fatal("manifest produced no subsystem part")
 	}
 
 	fresh := seedActive(t, st, "p", partID, "f1", curHash)   // matches → stays active
 	drift := seedActive(t, st, "p", partID, "d1", "OLDHASH") // mismatch → stale
-	orphan := seedActive(t, st, "p", "gone.go", "o1", "x")   // part gone → orphan
+	orphan := seedActive(t, st, "p", "internal/gone", "o1", "x") // part gone → orphan
 
 	res, err := CheckStale(st, "p", root, 1000)
 	if err != nil {
@@ -67,16 +67,16 @@ func TestCheckStaleFlagsDriftAndOrphans(t *testing.T) {
 func TestChangedPartsDetectsDriftNonMutating(t *testing.T) {
 	st := openStore(t)
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "a.go"), "package a\nfunc F() int { return 1 }\n")
-	writeFile(t, filepath.Join(root, "b.go"), "package b\nfunc G() int { return 2 }\n")
+	writeFile(t, filepath.Join(root, "internal", "a", "a.go"), "package a\nfunc F() int { return 1 }\n")
+	writeFile(t, filepath.Join(root, "internal", "b", "b.go"), "package b\nfunc G() int { return 2 }\n")
 	parts, _ := BuildManifest(root)
 	h := map[string]string{}
 	for _, p := range parts {
-		if p.Kind == PartCode {
+		if p.Kind == PartSubsystem {
 			h[p.ID] = StructuralHash(p.SourceRef, p.Source)
 		}
 	}
-	// a.go fresh (stored hash == current), b.go drifted (old hash), gone.go orphan
+	// internal/a fresh (stored hash == current), internal/b drifted (old hash), gone orphan
 	mk := func(part, anchor, srcHash string) {
 		if _, _, err := st.InsertFlashcard(store.Flashcard{
 			Project: "p", Part: part, Anchor: anchor, StemHash: anchor, Type: "code",
@@ -85,16 +85,16 @@ func TestChangedPartsDetectsDriftNonMutating(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mk("a.go", "f1", h["a.go"])
-	mk("b.go", "d1", "OLDHASH")
-	mk("gone.go", "o1", "X")
+	mk("internal/a", "f1", h["internal/a"])
+	mk("internal/b", "d1", "OLDHASH")
+	mk("internal/gone", "o1", "X")
 
 	got, err := ChangedParts(st, "p", root)
 	if err != nil {
 		t.Fatalf("ChangedParts: %v", err)
 	}
-	if len(got) != 1 || got[0] != "b.go" {
-		t.Fatalf("ChangedParts = %v, want [b.go] (a.go fresh, gone.go orphan-excluded)", got)
+	if len(got) != 1 || got[0] != "internal/b" {
+		t.Fatalf("ChangedParts = %v, want [internal/b] (internal/a fresh, gone orphan-excluded)", got)
 	}
 	// non-mutating: no card's status changed
 	cards, _ := st.FlashcardsForProject("p")

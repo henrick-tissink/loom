@@ -20,15 +20,31 @@ type Pipeline struct {
 // concept/decision are rationale with no code ground truth (spec §6).
 func needsVerify(t string) bool { return t == string(TypeCode) || t == string(TypeCloze) }
 
-// GenerateForPart authors cards for one part, gates behavioral cards through the
-// verifier, and stores survivors as drafts. Verify errors fail closed (reject).
+// GenerateForPart authors cards for one part, gates them through the verifier,
+// and stores survivors as drafts. Verify errors fail closed (reject).
+//
+// The gate depends on the part kind: a SUBSYSTEM's high-level cards are judged
+// by fair characterization (every card), and survivors are capped at
+// maxSubsystemCards (few, dense). Other kinds keep the strict gate, applied only
+// to behavioral (code/cloze) cards.
 func (pl *Pipeline) GenerateForPart(project string, p Part, now int64) (stored, rejected int, err error) {
 	cards, err := pl.Gen.Generate(project, p, now)
 	if err != nil {
 		return 0, 0, fmt.Errorf("generate %s: %w", p.ID, err)
 	}
+	subsystem := p.Kind == PartSubsystem
 	for _, c := range cards {
-		if needsVerify(c.Type) {
+		if subsystem && stored >= maxSubsystemCards {
+			break // enough dense cards for this subsystem
+		}
+		switch {
+		case subsystem:
+			ok, _, verr := pl.Ver.VerifyCharacterization(c, p.Source)
+			if verr != nil || !ok {
+				rejected++
+				continue
+			}
+		case needsVerify(c.Type):
 			ok, _, verr := pl.Ver.Verify(c, p.Source)
 			if verr != nil || !ok {
 				rejected++
