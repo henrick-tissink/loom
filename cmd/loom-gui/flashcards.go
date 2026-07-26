@@ -36,9 +36,10 @@ type CoverageDTO struct {
 
 // FlashcardStatsDTO is the project's measured pass-rate (over due reviews) and coverage.
 type FlashcardStatsDTO struct {
-	PassRate float64       `json:"passRate"` // 0..1
-	Reviews  int           `json:"reviews"`
-	Parts    []CoverageDTO `json:"parts"`
+	PassRate   float64       `json:"passRate"` // 0..1
+	Reviews    int           `json:"reviews"`
+	Reviewable int           `json:"reviewable"` // cards a session would serve now: due + the day's new budget
+	Parts      []CoverageDTO `json:"parts"`
 }
 
 // flashProjectKey is the store key for a project: its ROOT's basename, matching
@@ -78,13 +79,22 @@ func (a *App) FlashcardStats(projectRoot string) FlashcardStatsDTO {
 	if a.st == nil {
 		return out
 	}
-	rate, n, err := a.reviewer().PassRate(flashProjectKey(projectRoot), 0)
+	project := flashProjectKey(projectRoot)
+	rate, n, err := a.reviewer().PassRate(project, 0)
 	if err != nil {
 		return out
 	}
 	out.PassRate = rate
 	out.Reviews = n
 	out.Parts = a.FlashcardCoverage(projectRoot)
+	// Reviewable is what a session would actually serve now — due cards plus the
+	// day's remaining new-card budget — so the Review affordance counts new
+	// (never-reviewed) active cards, not only scheduled-due ones. Without this,
+	// freshly curated cards (all "new") leave the button reading "0 due".
+	now := a.now().Unix()
+	if q, qerr := a.reviewer().BuildQueue(project, now, now-now%86400); qerr == nil {
+		out.Reviewable = len(q)
+	}
 	return out
 }
 

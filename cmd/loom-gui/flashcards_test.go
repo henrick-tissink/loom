@@ -170,6 +170,30 @@ func TestFlashProjectKeyResolvesRootToBasename(t *testing.T) {
 	}
 }
 
+// Regression: freshly curated cards are "new" (no review row), so a stats/Review
+// affordance keyed only on scheduled-due would read 0 and the button would be
+// disabled. Reviewable must count new active cards the queue actually serves.
+func TestFlashcardStatsReviewableCountsNewActiveCards(t *testing.T) {
+	app, st := newFlashApp(t)
+	seedFCard(t, st, "internal/status", "n1", "active") // new active (never reviewed)
+	seedFCard(t, st, "internal/status", "n2", "active")
+	seedFCard(t, st, "internal/status", "n3", "active")
+	seedFCard(t, st, "internal/status", "d1", "draft") // a draft must NOT be reviewable
+
+	s := app.FlashcardStats("/some/root/p") // project key resolves to basename "p"
+	if s.Reviewable != 3 {
+		t.Fatalf("Reviewable = %d, want 3 (new active cards, drafts excluded)", s.Reviewable)
+	}
+	// and coverage still reports 0 scheduled-due, proving the fix isn't just aliasing due
+	var due int
+	for _, p := range s.Parts {
+		due += p.Due
+	}
+	if due != 0 {
+		t.Fatalf("expected 0 scheduled-due, got %d — Reviewable must count NEW cards, not due", due)
+	}
+}
+
 func TestFlashcardGenerateGuards(t *testing.T) {
 	app, _ := newFlashApp(t)
 	if err := app.FlashcardGenerate("/x/loom", "path", ""); err == nil {

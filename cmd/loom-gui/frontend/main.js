@@ -4391,6 +4391,7 @@ async function renderStudyCoverage() {
   const parts = stats.parts || [];
   const sum = (k) => parts.reduce((n, p) => n + (p[k] || 0), 0);
   const totalDue = sum("due"), totalDraft = sum("draft"), totalCards = sum("total");
+  const reviewable = stats.reviewable || 0; // due + the day's new-card budget — what a session actually serves
   const pct = Math.round((stats.passRate || 0) * 100);
   const busy = flashGen.active;
   const genStatus = (id) => {
@@ -4423,14 +4424,14 @@ async function renderStudyCoverage() {
       ${busy ? `<div class="st-genbanner run"><span class="st-spin"></span><span class="st-genmsg">generating — running the verify gate, this takes a bit…</span><button class="st-cta" id="st-genstop">Stop</button></div>` : ""}
       ${!busy && changed.length ? `<div class="st-genbanner stale"><span>⚠ ${changed.length} part${changed.length === 1 ? "" : "s"} changed since their cards were made</span><button class="st-cta st-cta-primary" id="st-regenchanged">Regenerate changed</button></div>` : ""}
       <div class="st-actions">
-        <button class="st-cta st-cta-primary" id="st-review"${totalDue && !busy ? "" : " disabled"}>Review ${totalDue} due</button>
+        <button class="st-cta st-cta-primary" id="st-review"${reviewable && !busy ? "" : " disabled"}>Review ${reviewable}</button>
         <button class="st-cta" id="st-curate"${totalDraft && !busy ? "" : " disabled"}>Curate ${totalDraft} draft${totalDraft === 1 ? "" : "s"}</button>
         <button class="st-cta" id="st-generate"${busy ? " disabled" : ""}>Generate…</button>
       </div>
       ${parts.length ? `<ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet. Click <b>Generate…</b> above (a file or package path), or run <code>loom flashcards generate ${esc(root)}</code>.</div>`}
     </div>`;
   const back = document.getElementById("st-back"); if (back) back.addEventListener("click", () => openProject(root));
-  const rev = document.getElementById("st-review"); if (rev && totalDue && !busy) rev.addEventListener("click", () => startReview(root));
+  const rev = document.getElementById("st-review"); if (rev && reviewable && !busy) rev.addEventListener("click", () => startReview(root));
   const cur = document.getElementById("st-curate"); if (cur && totalDraft && !busy) cur.addEventListener("click", () => startCurate(root));
   const gen = document.getElementById("st-generate"); if (gen && !busy) gen.addEventListener("click", () => promptFlashGen(root));
   const rgs = document.getElementById("st-regenchanged"); if (rgs) rgs.addEventListener("click", () => runFlashGenChanged(root));
