@@ -227,32 +227,85 @@ func (a *App) FlashcardStaleParts(projectRoot string) []string {
 // listens and refreshes the coverage view. REPLACE semantics: a (re)generated
 // part's existing cards are wiped before re-authoring (user's choice).
 
-// FlashcardGenerate (re)generates, in the background, every manifest part whose
-// ID contains `filter` (an exact part id regenerates just that part; a broader
-// substring covers a subtree). A filter is required — this deliberately refuses
-// to regenerate a whole project in one unattended burst. Returns once queued, or
-// an error if a job is already running / nothing matches.
-func (a *App) FlashcardGenerate(projectRoot, filter string) error {
+// GenScopesDTO is the part count each no-path scope would cover, for the dialog.
+type GenScopesDTO struct {
+	All       int `json:"all"`
+	Docs      int `json:"docs"`
+	Uncovered int `json:"uncovered"`
+}
+
+// FlashcardGenerateScopes returns how many parts each no-path scope covers, so
+// the Generate dialog can be honest up front ("whole project — 120 parts").
+func (a *App) FlashcardGenerateScopes(projectRoot string) GenScopesDTO {
+	out := GenScopesDTO{}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	parts, err := flashcards.BuildManifest(projectRoot)
+	if err != nil {
+		return out
+	}
+	covered := map[string]bool{}
+	if cp, err := a.st.PartsForProject(flashProjectKey(projectRoot)); err == nil {
+		for _, id := range cp {
+			covered[id] = true
+		}
+	}
+	for _, p := range parts {
+		out.All++
+		if p.Kind == flashcards.PartDoc {
+			out.Docs++
+		}
+		if !covered[p.ID] {
+			out.Uncovered++
+		}
+	}
+	return out
+}
+
+// FlashcardGenerate (re)generates, in the background, the manifest parts a scope
+// selects — a no-path preset ("docs" = the architecture's sections, "uncovered",
+// "all") or "path" + a filter to target a file/subtree. Returns once queued, or
+// an error if a job is already running / the scope selects nothing.
+func (a *App) FlashcardGenerate(projectRoot, scope, filter string) error {
 	if a.st == nil {
 		return errFlashNoStore
 	}
-	if strings.TrimSpace(filter) == "" {
-		return fmt.Errorf("flashcards: a part filter is required")
+	gs := flashcards.GenScope(scope)
+	if gs == flashcards.ScopePath && strings.TrimSpace(filter) == "" {
+		return fmt.Errorf("flashcards: a path filter is required")
 	}
 	parts, err := flashcards.BuildManifest(projectRoot)
 	if err != nil {
 		return err
 	}
-	var todo []flashcards.Part
-	for _, p := range parts {
-		if strings.Contains(p.ID, filter) {
-			todo = append(todo, p)
+	project := flashProjectKey(projectRoot)
+	var covered map[string]bool
+	if gs == flashcards.ScopeUncovered {
+		cp, err := a.st.PartsForProject(project)
+		if err != nil {
+			return err
+		}
+		covered = make(map[string]bool, len(cp))
+		for _, id := range cp {
+			covered[id] = true
 		}
 	}
+	todo := flashcards.SelectParts(parts, gs, filter, covered)
 	if len(todo) == 0 {
-		return fmt.Errorf("flashcards: no parts match %q", filter)
+		return fmt.Errorf("flashcards: nothing to generate for that scope")
 	}
-	return a.startGeneration(flashProjectKey(projectRoot), todo)
+	return a.startGeneration(project, todo)
+}
+
+// FlashcardGenerateCancel asks a running job to stop after the part it is on.
+func (a *App) FlashcardGenerateCancel() {
+	a.genMu.Lock()
+	if a.genBusy {
+		a.genCancel = true
+	}
+	a.genMu.Unlock()
 }
 
 // FlashcardRegenerateStale regenerates every part carrying a stale card, in the
@@ -302,6 +355,7 @@ func (a *App) startGeneration(project string, todo []flashcards.Part) error {
 		return fmt.Errorf("flashcards: a generation job is already running")
 	}
 	a.genBusy = true
+	a.genCancel = false
 	a.genMu.Unlock()
 	go a.runGeneration(project, todo)
 	return nil
@@ -312,6 +366,7 @@ func (a *App) runGeneration(project string, todo []flashcards.Part) {
 		_ = recover()
 		a.genMu.Lock()
 		a.genBusy = false
+		a.genCancel = false
 		a.genMu.Unlock()
 		a.emitFlash("flashcards:done", map[string]any{"project": project})
 	}()
@@ -321,6 +376,12 @@ func (a *App) runGeneration(project string, todo []flashcards.Part) {
 		Ver:   &flashcards.Verifier{Binary: "claude", WorkDir: a.loomDir},
 	}
 	for _, p := range todo {
+		a.genMu.Lock()
+		stop := a.genCancel
+		a.genMu.Unlock()
+		if stop {
+			return // user asked to stop; the deferred "done" fires
+		}
 		a.emitFlash("flashcards:progress", map[string]any{"project": project, "part": p.ID, "running": true})
 		deleted, stored, rejected, err := pl.RegeneratePart(project, p, a.now().Unix())
 		ev := map[string]any{"project": project, "part": p.ID, "running": false, "deleted": deleted, "stored": stored, "rejected": rejected}

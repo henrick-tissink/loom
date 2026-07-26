@@ -4266,12 +4266,12 @@ function wireFlashGenEvents() {
 
 function genErr(e) { return String((e && e.message) || e).replace(/^.*flashcards: /, ""); }
 
-async function runFlashGen(root, filter) {
+async function runFlashGen(root, scope, filter) {
   const fn = bound("FlashcardGenerate");
   if (!fn) return;
   flashGen.active = true; flashGen.progress = {};
   renderStudyCoverage();
-  try { await fn(root, filter); } // completion arrives via the "flashcards:done" event
+  try { await fn(root, scope, filter || ""); } // completion arrives via the "flashcards:done" event
   catch (e) { flashGen.active = false; studyToast(genErr(e)); renderStudyCoverage(); }
 }
 
@@ -4287,8 +4287,62 @@ async function runFlashGenStale(root) {
 }
 
 async function promptFlashGen(root) {
-  const filter = await promptModal({ title: "Generate cards", label: "Path filter — a file or package (e.g. internal/status)", value: "", okText: "Generate" });
-  if (filter && filter.trim()) runFlashGen(root, filter.trim());
+  const sel = await flashGenDialog(root);
+  if (sel) runFlashGen(root, sel.scope, sel.filter);
+}
+
+// A no-path scope picker: the user chooses WHAT to cover (the architecture's doc
+// sections, uncovered parts, the whole project) rather than typing a path; loom
+// supplies the parts from the manifest. Counts come from the bridge so the
+// choice is honest ("whole project — 120 parts"). Returns {scope, filter}|null.
+async function flashGenDialog(root) {
+  if (document.querySelector(".modal-backdrop")) return null;
+  let sc = { all: 0, docs: 0, uncovered: 0 };
+  const cf = bound("FlashcardGenerateScopes");
+  if (cf) { try { sc = (await cf(root)) || sc; } catch (e) { console.error("fc scopes", e); } }
+  const plural = (n) => (n === 1 ? "" : "s");
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" role="dialog" aria-label="Generate cards">
+        <h2>Generate cards</h2>
+        <div class="fg-opts">
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="docs" checked><span class="fg-txt"><b>Architecture &amp; decisions</b><i>${sc.docs} doc section${plural(sc.docs)} — the “why”</i></span></label>
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="uncovered"><span class="fg-txt"><b>Uncovered parts</b><i>${sc.uncovered} part${plural(sc.uncovered)} with no cards yet</i></span></label>
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="all"><span class="fg-txt"><b>Whole project</b><i>${sc.all} part${plural(sc.all)} — thorough, but slow &amp; covers boilerplate</i></span></label>
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="path"><span class="fg-txt"><b>Target a path…</b><i>a specific file or package</i></span></label>
+        </div>
+        <div class="field fg-pathrow" style="display:none">
+          <input id="fg-path" class="search-input" type="text" placeholder="e.g. internal/status" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="fg-cancel">Cancel</button>
+          <button class="btn-launch" id="fg-ok">Generate</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    const pathRow = backdrop.querySelector(".fg-pathrow");
+    const pathInput = backdrop.querySelector("#fg-path");
+    const scopeVal = () => backdrop.querySelector('input[name="fg-scope"]:checked').value;
+    backdrop.querySelectorAll('input[name="fg-scope"]').forEach((r) =>
+      r.addEventListener("change", () => {
+        const isPath = scopeVal() === "path";
+        pathRow.style.display = isPath ? "" : "none";
+        if (isPath) pathInput.focus();
+      }));
+    const onEsc = (e) => { if (e.key === "Escape") done(null); };
+    document.addEventListener("keydown", onEsc, true);
+    const done = (v) => { document.removeEventListener("keydown", onEsc, true); backdrop.remove(); resolve(v); };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) done(null); });
+    backdrop.querySelector("#fg-cancel").addEventListener("click", () => done(null));
+    backdrop.querySelector("#fg-ok").addEventListener("click", () => {
+      const scope = scopeVal();
+      const filter = pathInput.value.trim();
+      if (scope === "path" && !filter) { pathInput.focus(); return; }
+      done({ scope, filter });
+    });
+  });
 }
 
 function studyProjName(root) {
@@ -4365,7 +4419,7 @@ async function renderStudyCoverage() {
         <div class="st-metric"><span class="st-big">${totalDue}</span><span class="st-lbl">due now</span></div>
         <div class="st-metric"><span class="st-big">${stats.reviews ? pct + "%" : "—"}</span><span class="st-lbl">${stats.reviews ? "recall over " + stats.reviews + " reviews" : "no reviews yet"}</span></div>
       </div>
-      ${busy ? `<div class="st-genbanner run"><span class="st-spin"></span>generating — running the verify gate, this takes a bit…</div>` : ""}
+      ${busy ? `<div class="st-genbanner run"><span class="st-spin"></span><span class="st-genmsg">generating — running the verify gate, this takes a bit…</span><button class="st-cta" id="st-genstop">Stop</button></div>` : ""}
       ${!busy && stale.length ? `<div class="st-genbanner stale"><span>⚠ ${stale.length} part${stale.length === 1 ? "" : "s"} stale — source changed since these were made</span><button class="st-cta st-cta-primary" id="st-regenstale">Regenerate all</button></div>` : ""}
       <div class="st-actions">
         <button class="st-cta st-cta-primary" id="st-review"${totalDue && !busy ? "" : " disabled"}>Review ${totalDue} due</button>
@@ -4379,9 +4433,10 @@ async function renderStudyCoverage() {
   const cur = document.getElementById("st-curate"); if (cur && totalDraft && !busy) cur.addEventListener("click", () => startCurate(root));
   const gen = document.getElementById("st-generate"); if (gen && !busy) gen.addEventListener("click", () => promptFlashGen(root));
   const rgs = document.getElementById("st-regenstale"); if (rgs) rgs.addEventListener("click", () => runFlashGenStale(root));
+  const stop = document.getElementById("st-genstop"); if (stop) stop.addEventListener("click", () => { const cf = bound("FlashcardGenerateCancel"); if (cf) cf(); studyToast("stopping after the current part…"); });
   if (!busy) {
     stage.querySelectorAll(".st-regen").forEach((b) =>
-      b.addEventListener("click", () => runFlashGen(root, b.getAttribute("data-part"))));
+      b.addEventListener("click", () => runFlashGen(root, "path", b.getAttribute("data-part"))));
   }
 }
 

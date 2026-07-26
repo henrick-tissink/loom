@@ -61,3 +61,23 @@ func (s *Store) StalePartsForProject(project string) ([]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// PartsForProject returns the distinct parts that already have at least one card
+// (any status) in the project, ordered by part — the "already covered" set for an
+// uncovered-only generate.
+func (s *Store) PartsForProject(project string) ([]string, error) {
+	rows, err := s.db.Query("SELECT DISTINCT part FROM flashcards WHERE project=? ORDER BY part", project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

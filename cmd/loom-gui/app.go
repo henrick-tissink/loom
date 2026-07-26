@@ -93,10 +93,12 @@ type App struct {
 	sumBusy  bool
 
 	// flashcard generation guard: genBusy keeps at most one (re)generation job
-	// running at a time (each spends claude quota, like summarize). See
-	// flashcards.go startGeneration/runGeneration.
-	genMu   sync.Mutex
-	genBusy bool
+	// running at a time (each spends claude quota, like summarize); genCancel is
+	// a cooperative stop the job checks between parts. See flashcards.go
+	// startGeneration/runGeneration.
+	genMu     sync.Mutex
+	genBusy   bool
+	genCancel bool
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {

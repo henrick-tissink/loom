@@ -172,14 +172,17 @@ func TestFlashProjectKeyResolvesRootToBasename(t *testing.T) {
 
 func TestFlashcardGenerateGuards(t *testing.T) {
 	app, _ := newFlashApp(t)
-	if err := app.FlashcardGenerate("/x/loom", ""); err == nil {
-		t.Fatal("empty filter must error (refuse whole-project burst)")
+	if err := app.FlashcardGenerate("/x/loom", "path", ""); err == nil {
+		t.Fatal("path scope with an empty filter must error")
 	}
-	if err := app.FlashcardGenerate(t.TempDir(), "nonexistent"); err == nil {
-		t.Fatal("a filter matching no manifest part must error")
+	if err := app.FlashcardGenerate(t.TempDir(), "path", "nonexistent"); err == nil {
+		t.Fatal("a path filter matching no manifest part must error")
+	}
+	if err := app.FlashcardGenerate(t.TempDir(), "docs", ""); err == nil {
+		t.Fatal("a scope that selects nothing (no doc parts in an empty dir) must error")
 	}
 	nilApp := newApp(nil, tmux.New(), nil, nil, nil, time.Now)
-	if err := nilApp.FlashcardGenerate("/x", "y"); err == nil {
+	if err := nilApp.FlashcardGenerate("/x", "all", ""); err == nil {
 		t.Fatal("nil store must error")
 	}
 }

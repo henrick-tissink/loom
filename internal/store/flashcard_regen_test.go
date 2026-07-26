@@ -56,3 +56,15 @@ func TestStalePartsForProject(t *testing.T) {
 		t.Fatalf("stale parts = %v, want [a.go b.go] (a.go has 2 stale cards → 1 entry via DISTINCT)", parts)
 	}
 }
+
+func TestPartsForProject(t *testing.T) {
+	st := openTestStore(t)
+	seedCard(t, st, "p", "a.go", "a1", "active")
+	seedCard(t, st, "p", "a.go", "a2", "draft") // same part, still one entry
+	seedCard(t, st, "p", "b.go", "b1", "stale")
+	seedCard(t, st, "q", "c.go", "c1", "active") // other project
+	parts, err := st.PartsForProject("p")
+	if err != nil || len(parts) != 2 || parts[0] != "a.go" || parts[1] != "b.go" {
+		t.Fatalf("PartsForProject = %v err=%v, want [a.go b.go]", parts, err)
+	}
+}

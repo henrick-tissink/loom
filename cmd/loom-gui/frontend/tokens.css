@@ -1039,3 +1039,17 @@ button.dg-chip { cursor: pointer; }
 .st-spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--accent-line);
   border-top-color: var(--accent); display: inline-block; margin-right: 9px; animation: st-spin .8s linear infinite; }
 @keyframes st-spin { to { transform: rotate(360deg); } }
+
+/* ===== Flashcards generate scope dialog (slice 6c) ===== */
+.fg-opts { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 2px; }
+.fg-opt { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; border: 1px solid var(--edge);
+  border-radius: var(--radius); cursor: pointer; transition: border-color .12s, background .12s; }
+.fg-opt:hover { border-color: var(--accent-line); }
+.fg-opt:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.fg-opt input { margin-top: 3px; accent-color: var(--accent); }
+.fg-txt { display: flex; flex-direction: column; gap: 1px; }
+.fg-txt b { font-size: 13px; color: var(--text); font-weight: 600; }
+.fg-txt i { font-size: 11.5px; color: var(--text-dim); font-style: normal; }
+.fg-pathrow { margin-top: 8px; }
+.st-genbanner.run .st-genmsg { flex: 1; }
+.st-genbanner.run .st-cta { padding: 4px 12px; font-size: 12px; }
