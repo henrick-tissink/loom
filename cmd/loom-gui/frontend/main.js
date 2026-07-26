@@ -4242,6 +4242,55 @@ function openSearch() {
 
 let study = { queue: [], idx: 0, revealed: false, drafts: [] };
 
+// Generation job state (slice 6b). A (re)generate runs in the Go bridge as a
+// background job emitting "flashcards:progress"/"flashcards:done"; this mirrors
+// it so the coverage view can show live per-part status and disable actions.
+let flashGen = { active: false, progress: {} }; // progress: partID -> {running, stored, rejected, error}
+let flashGenWired = false;
+
+function wireFlashGenEvents() {
+  if (flashGenWired || !window.runtime || !window.runtime.EventsOn) return;
+  flashGenWired = true;
+  window.runtime.EventsOn("flashcards:progress", (ev) => {
+    if (!ev || !ev.part) return;
+    flashGen.active = true;
+    flashGen.progress[ev.part] = ev;
+    if (stageView.kind === "study" && stageView.view === "coverage") renderStudyCoverage();
+  });
+  window.runtime.EventsOn("flashcards:done", () => {
+    flashGen.active = false;
+    flashGen.progress = {};
+    if (stageView.kind === "study" && stageView.view === "coverage") renderStudyCoverage();
+  });
+}
+
+function genErr(e) { return String((e && e.message) || e).replace(/^.*flashcards: /, ""); }
+
+async function runFlashGen(root, filter) {
+  const fn = bound("FlashcardGenerate");
+  if (!fn) return;
+  flashGen.active = true; flashGen.progress = {};
+  renderStudyCoverage();
+  try { await fn(root, filter); } // completion arrives via the "flashcards:done" event
+  catch (e) { flashGen.active = false; studyToast(genErr(e)); renderStudyCoverage(); }
+}
+
+async function runFlashGenStale(root) {
+  const fn = bound("FlashcardRegenerateStale");
+  if (!fn) return;
+  flashGen.active = true; flashGen.progress = {};
+  renderStudyCoverage();
+  try {
+    const n = await fn(root);
+    if (!n) { flashGen.active = false; studyToast("nothing stale to regenerate"); renderStudyCoverage(); }
+  } catch (e) { flashGen.active = false; studyToast(genErr(e)); renderStudyCoverage(); }
+}
+
+async function promptFlashGen(root) {
+  const filter = await promptModal({ title: "Generate cards", label: "Path filter — a file or package (e.g. internal/status)", value: "", okText: "Generate" });
+  if (filter && filter.trim()) runFlashGen(root, filter.trim());
+}
+
 function studyProjName(root) {
   const p = projectByRoot(root);
   return p ? p.name : (root ? root.split("/").pop() : "project");
@@ -4250,6 +4299,7 @@ function studyProjName(root) {
 function openStudy(root) {
   teardownTerminal();
   activeName = null;
+  wireFlashGenEvents();
   stageView = { kind: "study", root, view: "coverage" };
   study = { queue: [], idx: 0, revealed: false, drafts: [] };
   renderStudy();
@@ -4278,18 +4328,33 @@ async function renderStudyCoverage() {
   let stats = { passRate: 0, reviews: 0, parts: [] };
   const fn = bound("FlashcardStats");
   if (fn) { try { stats = (await fn(root)) || stats; } catch (e) { console.error("fc stats", e); } }
+  let stale = [];
+  const staleFn = bound("FlashcardStaleParts");
+  if (staleFn) { try { stale = (await staleFn(root)) || []; } catch (e) { console.error("fc stale", e); } }
   if (stageView.kind !== "study" || stageView.root !== root) return;
+  const staleSet = new Set(stale);
   const parts = stats.parts || [];
   const sum = (k) => parts.reduce((n, p) => n + (p[k] || 0), 0);
   const totalDue = sum("due"), totalDraft = sum("draft"), totalCards = sum("total");
   const pct = Math.round((stats.passRate || 0) * 100);
+  const busy = flashGen.active;
+  const genStatus = (id) => {
+    const g = flashGen.progress[id];
+    if (!g) return "";
+    if (g.running) return `<span class="st-genstat run">generating…</span>`;
+    if (g.error) return `<span class="st-genstat err" title="${esc(g.error)}">failed</span>`;
+    return `<span class="st-genstat ok">+${g.stored || 0}${g.rejected ? ` · ${g.rejected} rejected` : ""}</span>`;
+  };
   const rows = parts.map((p) => `
-      <li class="st-part">
+      <li class="st-part${staleSet.has(p.part) ? " stale" : ""}">
         <span class="st-ppath">${esc(p.part)}</span>
         <span class="st-pcounts">
+          ${staleSet.has(p.part) ? `<span class="st-chip st-stalechip">stale</span>` : ""}
           <span class="st-chip">${p.total}</span>
           ${p.due ? `<span class="st-chip st-due">${p.due} due</span>` : ""}
           ${p.draft ? `<span class="st-chip st-draft">${p.draft} draft</span>` : ""}
+          ${genStatus(p.part)}
+          <button class="st-regen" data-part="${esc(p.part)}"${busy ? " disabled" : ""}>regenerate</button>
         </span>
       </li>`).join("");
   stage.replaceChildren();
@@ -4300,15 +4365,24 @@ async function renderStudyCoverage() {
         <div class="st-metric"><span class="st-big">${totalDue}</span><span class="st-lbl">due now</span></div>
         <div class="st-metric"><span class="st-big">${stats.reviews ? pct + "%" : "—"}</span><span class="st-lbl">${stats.reviews ? "recall over " + stats.reviews + " reviews" : "no reviews yet"}</span></div>
       </div>
+      ${busy ? `<div class="st-genbanner run"><span class="st-spin"></span>generating — running the verify gate, this takes a bit…</div>` : ""}
+      ${!busy && stale.length ? `<div class="st-genbanner stale"><span>⚠ ${stale.length} part${stale.length === 1 ? "" : "s"} stale — source changed since these were made</span><button class="st-cta st-cta-primary" id="st-regenstale">Regenerate all</button></div>` : ""}
       <div class="st-actions">
-        <button class="st-cta st-cta-primary" id="st-review"${totalDue ? "" : " disabled"}>Review ${totalDue} due</button>
-        <button class="st-cta" id="st-curate"${totalDraft ? "" : " disabled"}>Curate ${totalDraft} draft${totalDraft === 1 ? "" : "s"}</button>
+        <button class="st-cta st-cta-primary" id="st-review"${totalDue && !busy ? "" : " disabled"}>Review ${totalDue} due</button>
+        <button class="st-cta" id="st-curate"${totalDraft && !busy ? "" : " disabled"}>Curate ${totalDraft} draft${totalDraft === 1 ? "" : "s"}</button>
+        <button class="st-cta" id="st-generate"${busy ? " disabled" : ""}>Generate…</button>
       </div>
-      ${parts.length ? `<ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet — generate them with <code>loom flashcards generate ${esc(root)}</code>.</div>`}
+      ${parts.length ? `<ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet. Click <b>Generate…</b> above (a file or package path), or run <code>loom flashcards generate ${esc(root)}</code>.</div>`}
     </div>`;
   const back = document.getElementById("st-back"); if (back) back.addEventListener("click", () => openProject(root));
-  const rev = document.getElementById("st-review"); if (rev && totalDue) rev.addEventListener("click", () => startReview(root));
-  const cur = document.getElementById("st-curate"); if (cur && totalDraft) cur.addEventListener("click", () => startCurate(root));
+  const rev = document.getElementById("st-review"); if (rev && totalDue && !busy) rev.addEventListener("click", () => startReview(root));
+  const cur = document.getElementById("st-curate"); if (cur && totalDraft && !busy) cur.addEventListener("click", () => startCurate(root));
+  const gen = document.getElementById("st-generate"); if (gen && !busy) gen.addEventListener("click", () => promptFlashGen(root));
+  const rgs = document.getElementById("st-regenstale"); if (rgs) rgs.addEventListener("click", () => runFlashGenStale(root));
+  if (!busy) {
+    stage.querySelectorAll(".st-regen").forEach((b) =>
+      b.addEventListener("click", () => runFlashGen(root, b.getAttribute("data-part"))));
+  }
 }
 
 async function startReview(root) {

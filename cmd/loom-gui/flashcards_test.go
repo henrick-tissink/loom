@@ -153,3 +153,33 @@ func TestFlashcardReadBridge_coverageDraftsQueue(t *testing.T) {
 		t.Fatalf("Queue WasDue marking wrong: %+v", q)
 	}
 }
+
+// Regression (slice 6b): the frontend passes a project ROOT path, but cards are
+// keyed on the basename — the bridge must derive it, or the Study pane is empty.
+func TestFlashProjectKeyResolvesRootToBasename(t *testing.T) {
+	app, st := newFlashApp(t)
+	if _, _, err := st.InsertFlashcard(store.Flashcard{
+		Project: "loom", Part: "a.go", Anchor: "k1", StemHash: "k1", Type: "code",
+		Front: "q", Back: "a", Status: "active", CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cov := app.FlashcardCoverage("/Users/someone/Sauce/loom")
+	if len(cov) != 1 || cov[0].Part != "a.go" {
+		t.Fatalf("root path must resolve to basename 'loom' cards, got %+v", cov)
+	}
+}
+
+func TestFlashcardGenerateGuards(t *testing.T) {
+	app, _ := newFlashApp(t)
+	if err := app.FlashcardGenerate("/x/loom", ""); err == nil {
+		t.Fatal("empty filter must error (refuse whole-project burst)")
+	}
+	if err := app.FlashcardGenerate(t.TempDir(), "nonexistent"); err == nil {
+		t.Fatal("a filter matching no manifest part must error")
+	}
+	nilApp := newApp(nil, tmux.New(), nil, nil, nil, time.Now)
+	if err := nilApp.FlashcardGenerate("/x", "y"); err == nil {
+		t.Fatal("nil store must error")
+	}
+}

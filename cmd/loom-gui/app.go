@@ -91,6 +91,12 @@ type App struct {
 	sumMu    sync.Mutex
 	sumTried map[string]bool
 	sumBusy  bool
+
+	// flashcard generation guard: genBusy keeps at most one (re)generation job
+	// running at a time (each spends claude quota, like summarize). See
+	// flashcards.go startGeneration/runGeneration.
+	genMu   sync.Mutex
+	genBusy bool
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {

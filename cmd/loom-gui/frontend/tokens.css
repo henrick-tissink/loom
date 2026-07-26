@@ -1019,3 +1019,23 @@ button.dg-chip { cursor: pointer; }
 .st-toast { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); background: var(--text); color: var(--bg);
   font-size: 12.5px; padding: 9px 16px; border-radius: 8px; box-shadow: var(--shadow-card); opacity: 1; transition: opacity .4s; z-index: 40; }
 .st-toast.out { opacity: 0; }
+
+/* ===== Flashcards generate/regenerate (slice 6b) ===== */
+.st-part { gap: 8px; }
+.st-part.stale { background: rgba(197,106,74,.05); }
+.st-stalechip { background: rgba(197,106,74,.16) !important; color: #C56A4A !important; font-weight: 600; }
+.st-regen { font: inherit; font-size: 11px; cursor: pointer; padding: 3px 9px; border-radius: 6px;
+  border: 1px solid var(--edge); background: var(--surface); color: var(--text-dim); margin-left: 4px; }
+.st-regen:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
+.st-regen:disabled { opacity: .4; cursor: default; }
+.st-genstat { font-size: 11px; }
+.st-genstat.run { color: var(--accent); }
+.st-genstat.ok { color: #4E9C6A; }
+.st-genstat.err { color: #C64C40; }
+.st-genbanner { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin: 14px 0 4px; padding: 10px 14px; border-radius: var(--radius); font-size: 12.5px; }
+.st-genbanner.stale { background: rgba(197,106,74,.10); color: var(--text); border: 1px solid rgba(197,106,74,.28); }
+.st-genbanner.run { background: rgba(62,154,128,.10); color: var(--text); border: 1px solid rgba(62,154,128,.28); }
+.st-spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--accent-line);
+  border-top-color: var(--accent); display: inline-block; margin-right: 9px; animation: st-spin .8s linear infinite; }
+@keyframes st-spin { to { transform: rotate(360deg); } }

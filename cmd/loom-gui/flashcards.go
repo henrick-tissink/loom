@@ -3,6 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
+
+	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/henricktissink/loom/internal/flashcards"
 	"github.com/henricktissink/loom/internal/store"
@@ -37,19 +41,27 @@ type FlashcardStatsDTO struct {
 	Parts    []CoverageDTO `json:"parts"`
 }
 
+// flashProjectKey is the store key for a project: its ROOT's basename, matching
+// the CLI's projectName(root). The frontend hands the bridge a project ROOT
+// (path); cards are keyed on the basename, so every project-scoped method must
+// derive this — otherwise the Study pane queries the wrong key and shows nothing.
+func flashProjectKey(projectRoot string) string {
+	return filepath.Base(strings.TrimRight(projectRoot, "/"))
+}
+
 // reviewer builds a Reviewer over the app's store with default session config.
 func (a *App) reviewer() *flashcards.Reviewer {
 	return &flashcards.Reviewer{Store: a.st, Cfg: flashcards.DefaultReviewConfig()}
 }
 
-// FlashcardCoverage returns per-part card counts for a project.
-func (a *App) FlashcardCoverage(project string) []CoverageDTO {
+// FlashcardCoverage returns per-part card counts for a project (arg is the root).
+func (a *App) FlashcardCoverage(projectRoot string) []CoverageDTO {
 	out := []CoverageDTO{}
 	defer func() { _ = recover() }()
 	if a.st == nil {
 		return out
 	}
-	cov, err := a.reviewer().Coverage(project, a.now().Unix())
+	cov, err := a.reviewer().Coverage(flashProjectKey(projectRoot), a.now().Unix())
 	if err != nil {
 		return out
 	}
@@ -60,30 +72,30 @@ func (a *App) FlashcardCoverage(project string) []CoverageDTO {
 }
 
 // FlashcardStats returns the measured pass-rate (over due reviews) plus coverage.
-func (a *App) FlashcardStats(project string) FlashcardStatsDTO {
+func (a *App) FlashcardStats(projectRoot string) FlashcardStatsDTO {
 	out := FlashcardStatsDTO{Parts: []CoverageDTO{}}
 	defer func() { _ = recover() }()
 	if a.st == nil {
 		return out
 	}
-	rate, n, err := a.reviewer().PassRate(project, 0)
+	rate, n, err := a.reviewer().PassRate(flashProjectKey(projectRoot), 0)
 	if err != nil {
 		return out
 	}
 	out.PassRate = rate
 	out.Reviews = n
-	out.Parts = a.FlashcardCoverage(project)
+	out.Parts = a.FlashcardCoverage(projectRoot)
 	return out
 }
 
 // FlashcardDrafts returns a project's uncurated cards.
-func (a *App) FlashcardDrafts(project string) []FlashcardDTO {
+func (a *App) FlashcardDrafts(projectRoot string) []FlashcardDTO {
 	out := []FlashcardDTO{}
 	defer func() { _ = recover() }()
 	if a.st == nil {
 		return out
 	}
-	drafts, err := a.st.DraftsForProject(project)
+	drafts, err := a.st.DraftsForProject(flashProjectKey(projectRoot))
 	if err != nil {
 		return out
 	}
@@ -95,12 +107,13 @@ func (a *App) FlashcardDrafts(project string) []FlashcardDTO {
 
 // FlashcardQueue returns the review-session queue (due cards, then capped new
 // cards, interleaved), each marked WasDue from the due set.
-func (a *App) FlashcardQueue(project string) []FlashcardDTO {
+func (a *App) FlashcardQueue(projectRoot string) []FlashcardDTO {
 	out := []FlashcardDTO{}
 	defer func() { _ = recover() }()
 	if a.st == nil {
 		return out
 	}
+	project := flashProjectKey(projectRoot)
 	now := a.now().Unix()
 	dayStart := now - now%86400
 	due, err := a.st.DueReviewCards(project, now, 1000)
@@ -155,11 +168,11 @@ func (a *App) FlashcardActivate(cardID int64) error {
 }
 
 // FlashcardActivateAll activates every draft in a project and returns the count.
-func (a *App) FlashcardActivateAll(project string) (int, error) {
+func (a *App) FlashcardActivateAll(projectRoot string) (int, error) {
 	if a.st == nil {
 		return 0, errFlashNoStore
 	}
-	drafts, err := a.st.DraftsForProject(project)
+	drafts, err := a.st.DraftsForProject(flashProjectKey(projectRoot))
 	if err != nil {
 		return 0, err
 	}
@@ -188,4 +201,139 @@ func (a *App) FlashcardKill(cardID int64) error {
 		return errFlashNoStore
 	}
 	return a.st.DeleteCard(cardID)
+}
+
+// FlashcardStaleParts returns the parts (part IDs) that carry a stale card —
+// what the "regenerate all stale" banner counts and what the coverage view marks.
+func (a *App) FlashcardStaleParts(projectRoot string) []string {
+	out := []string{}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	parts, err := a.st.StalePartsForProject(flashProjectKey(projectRoot))
+	if err != nil {
+		return out
+	}
+	return append(out, parts...)
+}
+
+// ---- generation (slice 6b): async, one job at a time, progress via events ----
+//
+// Generation runs the hardened claude -p pipeline (author + cited-source verify),
+// which is minutes-long — so it runs off the main thread in a goroutine, guarded
+// to one job at a time (the summarize precedent, app.go sumBusy), emitting
+// "flashcards:progress" per part and "flashcards:done" at the end. The frontend
+// listens and refreshes the coverage view. REPLACE semantics: a (re)generated
+// part's existing cards are wiped before re-authoring (user's choice).
+
+// FlashcardGenerate (re)generates, in the background, every manifest part whose
+// ID contains `filter` (an exact part id regenerates just that part; a broader
+// substring covers a subtree). A filter is required — this deliberately refuses
+// to regenerate a whole project in one unattended burst. Returns once queued, or
+// an error if a job is already running / nothing matches.
+func (a *App) FlashcardGenerate(projectRoot, filter string) error {
+	if a.st == nil {
+		return errFlashNoStore
+	}
+	if strings.TrimSpace(filter) == "" {
+		return fmt.Errorf("flashcards: a part filter is required")
+	}
+	parts, err := flashcards.BuildManifest(projectRoot)
+	if err != nil {
+		return err
+	}
+	var todo []flashcards.Part
+	for _, p := range parts {
+		if strings.Contains(p.ID, filter) {
+			todo = append(todo, p)
+		}
+	}
+	if len(todo) == 0 {
+		return fmt.Errorf("flashcards: no parts match %q", filter)
+	}
+	return a.startGeneration(flashProjectKey(projectRoot), todo)
+}
+
+// FlashcardRegenerateStale regenerates every part carrying a stale card, in the
+// background, returning how many parts were queued. Orphan-stale parts (gone from
+// the manifest) can't be regenerated and are skipped — kill those cards instead.
+func (a *App) FlashcardRegenerateStale(projectRoot string) (int, error) {
+	if a.st == nil {
+		return 0, errFlashNoStore
+	}
+	project := flashProjectKey(projectRoot)
+	staleParts, err := a.st.StalePartsForProject(project)
+	if err != nil {
+		return 0, err
+	}
+	if len(staleParts) == 0 {
+		return 0, nil
+	}
+	parts, err := flashcards.BuildManifest(projectRoot)
+	if err != nil {
+		return 0, err
+	}
+	byID := make(map[string]flashcards.Part, len(parts))
+	for _, p := range parts {
+		byID[p.ID] = p
+	}
+	var todo []flashcards.Part
+	for _, id := range staleParts {
+		if p, ok := byID[id]; ok {
+			todo = append(todo, p)
+		}
+	}
+	if len(todo) == 0 {
+		return 0, nil
+	}
+	if err := a.startGeneration(project, todo); err != nil {
+		return 0, err
+	}
+	return len(todo), nil
+}
+
+// startGeneration claims the one-job guard and runs the pipeline over todo in a
+// background goroutine; errors immediately if a job is already running.
+func (a *App) startGeneration(project string, todo []flashcards.Part) error {
+	a.genMu.Lock()
+	if a.genBusy {
+		a.genMu.Unlock()
+		return fmt.Errorf("flashcards: a generation job is already running")
+	}
+	a.genBusy = true
+	a.genMu.Unlock()
+	go a.runGeneration(project, todo)
+	return nil
+}
+
+func (a *App) runGeneration(project string, todo []flashcards.Part) {
+	defer func() {
+		_ = recover()
+		a.genMu.Lock()
+		a.genBusy = false
+		a.genMu.Unlock()
+		a.emitFlash("flashcards:done", map[string]any{"project": project})
+	}()
+	pl := &flashcards.Pipeline{
+		Store: a.st,
+		Gen:   &flashcards.Generator{Binary: "claude", WorkDir: a.loomDir},
+		Ver:   &flashcards.Verifier{Binary: "claude", WorkDir: a.loomDir},
+	}
+	for _, p := range todo {
+		a.emitFlash("flashcards:progress", map[string]any{"project": project, "part": p.ID, "running": true})
+		deleted, stored, rejected, err := pl.RegeneratePart(project, p, a.now().Unix())
+		ev := map[string]any{"project": project, "part": p.ID, "running": false, "deleted": deleted, "stored": stored, "rejected": rejected}
+		if err != nil {
+			ev["error"] = err.Error()
+		}
+		a.emitFlash("flashcards:progress", ev)
+	}
+}
+
+// emitFlash emits a flashcards event to the frontend when the window is up.
+func (a *App) emitFlash(event string, data any) {
+	if a.ctx != nil {
+		wruntime.EventsEmit(a.ctx, event, data)
+	}
 }
