@@ -203,19 +203,22 @@ func (a *App) FlashcardKill(cardID int64) error {
 	return a.st.DeleteCard(cardID)
 }
 
-// FlashcardStaleParts returns the parts (part IDs) that carry a stale card —
-// what the "regenerate all stale" banner counts and what the coverage view marks.
-func (a *App) FlashcardStaleParts(projectRoot string) []string {
+// FlashcardChangedParts returns the parts whose SOURCE has drifted since their
+// cards were made — computed LIVE (non-mutating), so opening Study always shows
+// the current "what changed" without touching card status (a hashing false
+// positive is a harmless banner, never a card silently pulled from review). Feeds
+// the "N changed — Regenerate" banner and the per-row "changed" marks.
+func (a *App) FlashcardChangedParts(projectRoot string) []string {
 	out := []string{}
 	defer func() { _ = recover() }()
 	if a.st == nil {
 		return out
 	}
-	parts, err := a.st.StalePartsForProject(flashProjectKey(projectRoot))
+	changed, err := flashcards.ChangedParts(a.st, flashProjectKey(projectRoot), projectRoot)
 	if err != nil {
 		return out
 	}
-	return append(out, parts...)
+	return append(out, changed...)
 }
 
 // ---- generation (slice 6b): async, one job at a time, progress via events ----
@@ -308,19 +311,20 @@ func (a *App) FlashcardGenerateCancel() {
 	a.genMu.Unlock()
 }
 
-// FlashcardRegenerateStale regenerates every part carrying a stale card, in the
-// background, returning how many parts were queued. Orphan-stale parts (gone from
-// the manifest) can't be regenerated and are skipped — kill those cards instead.
-func (a *App) FlashcardRegenerateStale(projectRoot string) (int, error) {
+// FlashcardRegenerateChanged regenerates every part whose source has drifted
+// (live-detected via ChangedParts), in the background, returning how many parts
+// were queued. Orphan parts (gone from the manifest) can't be regenerated and are
+// skipped — kill those cards instead.
+func (a *App) FlashcardRegenerateChanged(projectRoot string) (int, error) {
 	if a.st == nil {
 		return 0, errFlashNoStore
 	}
 	project := flashProjectKey(projectRoot)
-	staleParts, err := a.st.StalePartsForProject(project)
+	changed, err := flashcards.ChangedParts(a.st, project, projectRoot)
 	if err != nil {
 		return 0, err
 	}
-	if len(staleParts) == 0 {
+	if len(changed) == 0 {
 		return 0, nil
 	}
 	parts, err := flashcards.BuildManifest(projectRoot)
@@ -332,7 +336,7 @@ func (a *App) FlashcardRegenerateStale(projectRoot string) (int, error) {
 		byID[p.ID] = p
 	}
 	var todo []flashcards.Part
-	for _, id := range staleParts {
+	for _, id := range changed {
 		if p, ok := byID[id]; ok {
 			todo = append(todo, p)
 		}

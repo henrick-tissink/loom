@@ -4275,14 +4275,14 @@ async function runFlashGen(root, scope, filter) {
   catch (e) { flashGen.active = false; studyToast(genErr(e)); renderStudyCoverage(); }
 }
 
-async function runFlashGenStale(root) {
-  const fn = bound("FlashcardRegenerateStale");
+async function runFlashGenChanged(root) {
+  const fn = bound("FlashcardRegenerateChanged");
   if (!fn) return;
   flashGen.active = true; flashGen.progress = {};
   renderStudyCoverage();
   try {
     const n = await fn(root);
-    if (!n) { flashGen.active = false; studyToast("nothing stale to regenerate"); renderStudyCoverage(); }
+    if (!n) { flashGen.active = false; studyToast("nothing changed to regenerate"); renderStudyCoverage(); }
   } catch (e) { flashGen.active = false; studyToast(genErr(e)); renderStudyCoverage(); }
 }
 
@@ -4382,11 +4382,11 @@ async function renderStudyCoverage() {
   let stats = { passRate: 0, reviews: 0, parts: [] };
   const fn = bound("FlashcardStats");
   if (fn) { try { stats = (await fn(root)) || stats; } catch (e) { console.error("fc stats", e); } }
-  let stale = [];
-  const staleFn = bound("FlashcardStaleParts");
-  if (staleFn) { try { stale = (await staleFn(root)) || []; } catch (e) { console.error("fc stale", e); } }
+  let changed = [];
+  const changedFn = bound("FlashcardChangedParts");
+  if (changedFn) { try { changed = (await changedFn(root)) || []; } catch (e) { console.error("fc changed", e); } }
   if (stageView.kind !== "study" || stageView.root !== root) return;
-  const staleSet = new Set(stale);
+  const changedSet = new Set(changed);
   const parts = stats.parts || [];
   const sum = (k) => parts.reduce((n, p) => n + (p[k] || 0), 0);
   const totalDue = sum("due"), totalDraft = sum("draft"), totalCards = sum("total");
@@ -4400,10 +4400,10 @@ async function renderStudyCoverage() {
     return `<span class="st-genstat ok">+${g.stored || 0}${g.rejected ? ` · ${g.rejected} rejected` : ""}</span>`;
   };
   const rows = parts.map((p) => `
-      <li class="st-part${staleSet.has(p.part) ? " stale" : ""}">
+      <li class="st-part${changedSet.has(p.part) ? " stale" : ""}">
         <span class="st-ppath">${esc(p.part)}</span>
         <span class="st-pcounts">
-          ${staleSet.has(p.part) ? `<span class="st-chip st-stalechip">stale</span>` : ""}
+          ${changedSet.has(p.part) ? `<span class="st-chip st-stalechip">changed</span>` : ""}
           <span class="st-chip">${p.total}</span>
           ${p.due ? `<span class="st-chip st-due">${p.due} due</span>` : ""}
           ${p.draft ? `<span class="st-chip st-draft">${p.draft} draft</span>` : ""}
@@ -4420,7 +4420,7 @@ async function renderStudyCoverage() {
         <div class="st-metric"><span class="st-big">${stats.reviews ? pct + "%" : "—"}</span><span class="st-lbl">${stats.reviews ? "recall over " + stats.reviews + " reviews" : "no reviews yet"}</span></div>
       </div>
       ${busy ? `<div class="st-genbanner run"><span class="st-spin"></span><span class="st-genmsg">generating — running the verify gate, this takes a bit…</span><button class="st-cta" id="st-genstop">Stop</button></div>` : ""}
-      ${!busy && stale.length ? `<div class="st-genbanner stale"><span>⚠ ${stale.length} part${stale.length === 1 ? "" : "s"} stale — source changed since these were made</span><button class="st-cta st-cta-primary" id="st-regenstale">Regenerate all</button></div>` : ""}
+      ${!busy && changed.length ? `<div class="st-genbanner stale"><span>⚠ ${changed.length} part${changed.length === 1 ? "" : "s"} changed since their cards were made</span><button class="st-cta st-cta-primary" id="st-regenchanged">Regenerate changed</button></div>` : ""}
       <div class="st-actions">
         <button class="st-cta st-cta-primary" id="st-review"${totalDue && !busy ? "" : " disabled"}>Review ${totalDue} due</button>
         <button class="st-cta" id="st-curate"${totalDraft && !busy ? "" : " disabled"}>Curate ${totalDraft} draft${totalDraft === 1 ? "" : "s"}</button>
@@ -4432,7 +4432,7 @@ async function renderStudyCoverage() {
   const rev = document.getElementById("st-review"); if (rev && totalDue && !busy) rev.addEventListener("click", () => startReview(root));
   const cur = document.getElementById("st-curate"); if (cur && totalDraft && !busy) cur.addEventListener("click", () => startCurate(root));
   const gen = document.getElementById("st-generate"); if (gen && !busy) gen.addEventListener("click", () => promptFlashGen(root));
-  const rgs = document.getElementById("st-regenstale"); if (rgs) rgs.addEventListener("click", () => runFlashGenStale(root));
+  const rgs = document.getElementById("st-regenchanged"); if (rgs) rgs.addEventListener("click", () => runFlashGenChanged(root));
   const stop = document.getElementById("st-genstop"); if (stop) stop.addEventListener("click", () => { const cf = bound("FlashcardGenerateCancel"); if (cf) cf(); studyToast("stopping after the current part…"); });
   if (!busy) {
     stage.querySelectorAll(".st-regen").forEach((b) =>

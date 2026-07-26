@@ -63,3 +63,44 @@ func TestCheckStaleFlagsDriftAndOrphans(t *testing.T) {
 		t.Fatalf("drift=%s orphan=%s, want both stale", status[drift], status[orphan])
 	}
 }
+
+func TestChangedPartsDetectsDriftNonMutating(t *testing.T) {
+	st := openStore(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.go"), "package a\nfunc F() int { return 1 }\n")
+	writeFile(t, filepath.Join(root, "b.go"), "package b\nfunc G() int { return 2 }\n")
+	parts, _ := BuildManifest(root)
+	h := map[string]string{}
+	for _, p := range parts {
+		if p.Kind == PartCode {
+			h[p.ID] = StructuralHash(p.SourceRef, p.Source)
+		}
+	}
+	// a.go fresh (stored hash == current), b.go drifted (old hash), gone.go orphan
+	mk := func(part, anchor, srcHash string) {
+		if _, _, err := st.InsertFlashcard(store.Flashcard{
+			Project: "p", Part: part, Anchor: anchor, StemHash: anchor, Type: "code",
+			Front: "q", Back: "a", SourceRef: part, SourceHash: srcHash, Status: "active", CreatedAt: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("a.go", "f1", h["a.go"])
+	mk("b.go", "d1", "OLDHASH")
+	mk("gone.go", "o1", "X")
+
+	got, err := ChangedParts(st, "p", root)
+	if err != nil {
+		t.Fatalf("ChangedParts: %v", err)
+	}
+	if len(got) != 1 || got[0] != "b.go" {
+		t.Fatalf("ChangedParts = %v, want [b.go] (a.go fresh, gone.go orphan-excluded)", got)
+	}
+	// non-mutating: no card's status changed
+	cards, _ := st.FlashcardsForProject("p")
+	for _, c := range cards {
+		if c.Status != "active" {
+			t.Fatalf("ChangedParts mutated a status: %s -> %s", c.Anchor, c.Status)
+		}
+	}
+}
