@@ -19,14 +19,18 @@ const defaultTimeout = 90 * time.Second
 // MCP, no slash commands, no session, no settings, dynamic system-prompt sections
 // excluded. Untrusted content travels on stdin; the child env is scrubbed of
 // CLAUDECODE/CLAUDE_CODE_*. Returns trimmed stdout; errors on non-zero exit,
-// timeout, or empty output.
-func runClaude(ctx context.Context, binary, workDir, prompt, stdin string) (string, error) {
+// timeout, or empty output. Only the model is a caller choice (defaults to
+// haiku) — every hardening flag is fixed.
+func runClaude(ctx context.Context, binary, workDir, model, prompt, stdin string) (string, error) {
 	if binary == "" {
 		binary = "claude"
 	}
+	if model == "" {
+		model = "haiku"
+	}
 	args := []string{
 		"-p", prompt,
-		"--model", "haiku",
+		"--model", model,
 		"--no-session-persistence",
 		"--tools", "",
 		"--strict-mcp-config",

@@ -47,3 +47,15 @@ func TestSelectPartsByScope(t *testing.T) {
 		t.Fatal("empty path filter selects nothing")
 	}
 }
+
+func TestSelectSubsystemsScope(t *testing.T) {
+	parts := []Part{
+		{Kind: PartSubsystem, ID: "internal/status"},
+		{Kind: PartSubsystem, ID: "internal/tmux"},
+		{Kind: PartDoc, ID: "docs/ARCHITECTURE.md#status"},
+	}
+	got := SelectParts(parts, ScopeSubsystems, "", nil)
+	if len(got) != 2 || got[0].ID != "internal/status" || got[1].ID != "internal/tmux" {
+		t.Fatalf("subsystems scope selects only subsystem parts, got %+v", got)
+	}
+}

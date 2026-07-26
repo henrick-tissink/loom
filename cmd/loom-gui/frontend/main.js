@@ -4297,7 +4297,7 @@ async function promptFlashGen(root) {
 // choice is honest ("whole project — 120 parts"). Returns {scope, filter}|null.
 async function flashGenDialog(root) {
   if (document.querySelector(".modal-backdrop")) return null;
-  let sc = { all: 0, docs: 0, uncovered: 0 };
+  let sc = { all: 0, subsystems: 0, docs: 0, uncovered: 0 };
   const cf = bound("FlashcardGenerateScopes");
   if (cf) { try { sc = (await cf(root)) || sc; } catch (e) { console.error("fc scopes", e); } }
   const plural = (n) => (n === 1 ? "" : "s");
@@ -4308,10 +4308,11 @@ async function flashGenDialog(root) {
       <div class="modal" role="dialog" aria-label="Generate cards">
         <h2>Generate cards</h2>
         <div class="fg-opts">
-          <label class="fg-opt"><input type="radio" name="fg-scope" value="docs" checked><span class="fg-txt"><b>Architecture &amp; decisions</b><i>${sc.docs} doc section${plural(sc.docs)} — the “why”</i></span></label>
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="subsystems" checked><span class="fg-txt"><b>Subsystems — high-level</b><i>${sc.subsystems} subsystem${plural(sc.subsystems)} — how the system works &amp; why</i></span></label>
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="docs"><span class="fg-txt"><b>Architecture &amp; decisions</b><i>${sc.docs} doc section${plural(sc.docs)} — the “why”</i></span></label>
           <label class="fg-opt"><input type="radio" name="fg-scope" value="uncovered"><span class="fg-txt"><b>Uncovered parts</b><i>${sc.uncovered} part${plural(sc.uncovered)} with no cards yet</i></span></label>
-          <label class="fg-opt"><input type="radio" name="fg-scope" value="all"><span class="fg-txt"><b>Whole project</b><i>${sc.all} part${plural(sc.all)} — thorough, but slow &amp; covers boilerplate</i></span></label>
-          <label class="fg-opt"><input type="radio" name="fg-scope" value="path"><span class="fg-txt"><b>Target a path…</b><i>a specific file or package</i></span></label>
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="all"><span class="fg-txt"><b>Whole project</b><i>${sc.all} part${plural(sc.all)} — subsystems &amp; docs together</i></span></label>
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="path"><span class="fg-txt"><b>Target a path…</b><i>a specific subsystem or subtree</i></span></label>
         </div>
         <div class="field fg-pathrow" style="display:none">
           <input id="fg-path" class="search-input" type="text" placeholder="e.g. internal/status" autocomplete="off" spellcheck="false" />
