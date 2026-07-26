@@ -44,6 +44,19 @@ func (pl *Pipeline) GenerateForPart(project string, p Part, now int64) (stored, 
 	return stored, rejected, nil
 }
 
+// RegeneratePart replaces a part's cards: it deletes the part's existing cards
+// (and their review history — replace semantics) and then authors a fresh,
+// verified batch. Generating a part that has no cards is the same call with
+// nothing to delete. Returns how many were deleted, stored, and rejected.
+func (pl *Pipeline) RegeneratePart(project string, p Part, now int64) (deleted, stored, rejected int, err error) {
+	deleted, err = pl.Store.DeleteCardsForPart(project, p.ID)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("regenerate %s: clear old cards: %w", p.ID, err)
+	}
+	stored, rejected, err = pl.GenerateForPart(project, p, now)
+	return deleted, stored, rejected, err
+}
+
 // RunCLI dispatches `loom flashcards <generate|curate|review|stats|export|check> <projectRoot> [args]`.
 func RunCLI(args []string, st *store.Store, binary, workDir string, now int64, in io.Reader, out io.Writer) error {
 	if len(args) < 2 {
