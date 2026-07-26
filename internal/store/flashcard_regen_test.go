@@ -40,9 +40,12 @@ func TestStalePartsForProject(t *testing.T) {
 	st := openTestStore(t)
 	seedCard(t, st, "p", "a.go", "a1", "active")
 	s1 := seedCard(t, st, "p", "a.go", "a2", "active")
+	s1b := seedCard(t, st, "p", "a.go", "a3", "active") // second stale in a.go → DISTINCT must collapse
 	s2 := seedCard(t, st, "p", "b.go", "b1", "active")
 	seedCard(t, st, "p", "c.go", "c1", "draft") // draft, not stale
+
 	st.SetCardStatus(s1, "stale", 1)
+	st.SetCardStatus(s1b, "stale", 1)
 	st.SetCardStatus(s2, "stale", 1)
 
 	parts, err := st.StalePartsForProject("p")
@@ -50,6 +53,6 @@ func TestStalePartsForProject(t *testing.T) {
 		t.Fatalf("StalePartsForProject: %v", err)
 	}
 	if len(parts) != 2 || parts[0] != "a.go" || parts[1] != "b.go" {
-		t.Fatalf("stale parts = %v, want [a.go b.go] (distinct, ordered)", parts)
+		t.Fatalf("stale parts = %v, want [a.go b.go] (a.go has 2 stale cards → 1 entry via DISTINCT)", parts)
 	}
 }

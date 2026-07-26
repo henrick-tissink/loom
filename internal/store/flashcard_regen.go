@@ -3,7 +3,8 @@ package store
 // DeleteCardsForPart removes every card of one project part — and its review
 // state and log rows — in a single transaction (replace semantics: a regenerate
 // wipes the part before re-authoring). Children are deleted before the parent,
-// the same order DeleteCard uses. Returns the number of cards deleted.
+// the same order DeleteCard uses. Returns the number of cards deleted; the count
+// is meaningful only when err is nil (the defer zeroes it on any failure).
 func (s *Store) DeleteCardsForPart(project, part string) (deleted int, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -12,9 +13,12 @@ func (s *Store) DeleteCardsForPart(project, part string) (deleted int, err error
 	defer func() {
 		if err != nil {
 			tx.Rollback()
+			deleted = 0
 			return
 		}
-		err = tx.Commit()
+		if err = tx.Commit(); err != nil {
+			deleted = 0
+		}
 	}()
 	sub := "SELECT id FROM flashcards WHERE project=? AND part=?"
 	for _, q := range []string{
@@ -30,8 +34,13 @@ func (s *Store) DeleteCardsForPart(project, part string) (deleted int, err error
 		err = e
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	n, e := res.RowsAffected()
+	if e != nil {
+		err = e
+		return 0, err
+	}
+	deleted = int(n)
+	return deleted, nil
 }
 
 // StalePartsForProject returns the distinct parts that carry at least one stale
