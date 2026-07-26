@@ -1078,6 +1078,21 @@ button.dg-chip { cursor: pointer; }
 .st-htile.due::after { content: ""; position: absolute; top: 2px; right: 2px; width: 5px; height: 5px;
   border-radius: 50%; background: #3E9A80; box-shadow: 0 0 0 1.5px var(--surface); }
 .st-part.st-flash { background: rgba(197,106,74,.10); }
+
+/* ===== Cleanup dialogs (deck + repo) ===== */
+.cm-body { font-size: 13px; color: var(--text-dim); }
+.cln-list { display: flex; flex-direction: column; gap: 7px; margin: 2px 0; }
+.cln-row { display: flex; align-items: baseline; gap: 10px; }
+.cln-row b { font-size: 18px; font-weight: 600; color: var(--text); min-width: 28px; font-variant-numeric: tabular-nums; }
+.cln-row span { font-size: 12.5px; color: var(--text-dim); }
+.cln-check { display: flex; align-items: center; gap: 7px; margin-top: 13px; font-size: 12.5px; color: var(--text); cursor: pointer; }
+.cln-note { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; line-height: 1.5; }
+.cln-files { max-height: 260px; overflow-y: auto; border: 1px solid var(--edge); border-radius: 8px; }
+.cln-file { display: flex; justify-content: space-between; gap: 10px; padding: 6px 11px; border-bottom: 1px solid var(--edge); font-family: var(--font-mono); font-size: 11.5px; }
+.cln-file:last-child { border-bottom: none; }
+.cln-fp { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cln-fs { color: var(--text-faint); flex: none; font-variant-numeric: tabular-nums; }
+.cln-empty { font-size: 13px; color: var(--text-dim); padding: 6px 0; }
 .st-genbanner { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin: 14px 0 4px; padding: 10px 14px; border-radius: var(--radius); font-size: 12.5px; }
 .st-genbanner.stale { background: rgba(197,106,74,.10); color: var(--text); border: 1px solid rgba(197,106,74,.28); }

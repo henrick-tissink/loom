@@ -182,6 +182,37 @@ function armAction(btn, label, fn) {
   });
 }
 
+// fmtBytes renders a byte count as a compact human size.
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + " " + u[i];
+}
+
+// confirmModal shows a modal with Cancel / <okLabel> and resolves to a boolean.
+// body is trusted HTML (callers build it). Reused by the cleanup flows.
+function confirmModal(title, body, okLabel) {
+  return new Promise((resolve) => {
+    if (document.querySelector(".modal-backdrop")) return resolve(false);
+    const bd = document.createElement("div");
+    bd.className = "modal-backdrop";
+    bd.innerHTML =
+      `<div class="modal" role="dialog" aria-label="${esc(title)}"><h2>${esc(title)}</h2>` +
+      `<div class="cm-body">${body}</div>` +
+      `<div class="modal-actions"><button class="btn-ghost" id="cm-no">Cancel</button>` +
+      `<button class="btn-launch" id="cm-yes">${esc(okLabel)}</button></div></div>`;
+    document.body.appendChild(bd);
+    const done = (v) => { document.removeEventListener("keydown", onEsc, true); bd.remove(); resolve(v); };
+    const onEsc = (e) => { if (e.key === "Escape") done(false); };
+    document.addEventListener("keydown", onEsc, true);
+    bd.addEventListener("click", (e) => { if (e.target === bd) done(false); });
+    bd.querySelector("#cm-no").addEventListener("click", () => done(false));
+    bd.querySelector("#cm-yes").addEventListener("click", () => done(true));
+  });
+}
+
 // ---- rail (status-grouped, attention first) ----
 const GROUPS = [
   { key: "Needs you", match: (s) => s === "needs_you" },
@@ -852,6 +883,7 @@ function renderProject() {
         <button class="sh-btn" id="po-solo">${p.solo ? "Leave solo" : "Solo"}</button>
         <button class="sh-btn" id="po-rename">Rename</button>
         <button class="sh-btn" id="po-repoint">Re-point</button>
+        <button class="sh-btn" id="po-clean">Clean repo</button>
       </span>
     </div>
     <div class="po">
@@ -889,6 +921,7 @@ function renderProject() {
     if (el && ungrouped) el.disabled = true;
   }
   on("po-study", () => openStudy(p.root));
+  on("po-clean", () => repoCleanupDialog(p.root));
   on("po-hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !p.hidden)));
   on("po-solo", () => projectAction(() => window.go.main.App.SetProjectSolo(p.root, !p.solo)));
   on("po-rename", async () => {
@@ -4372,7 +4405,7 @@ async function flashGenDialog(root) {
         <h2>Generate cards</h2>
         <div class="fg-opts">
           <label class="fg-opt"><input type="radio" name="fg-scope" value="subsystems" checked><span class="fg-txt"><b>Subsystems — high-level</b><i>${sc.subsystems} subsystem${plural(sc.subsystems)} — how the system works &amp; why</i></span></label>
-          <label class="fg-opt"><input type="radio" name="fg-scope" value="docs"><span class="fg-txt"><b>Architecture &amp; decisions</b><i>${sc.docs} doc section${plural(sc.docs)} — the “why”</i></span></label>
+          <label class="fg-opt"><input type="radio" name="fg-scope" value="docs"><span class="fg-txt"><b>Architecture &amp; decisions</b><i>${sc.docs ? sc.docs + " doc section" + plural(sc.docs) + " — the “why”" : "no docs yet — synthesize ARCHITECTURE.md &amp; cards"}</i></span></label>
           <label class="fg-opt"><input type="radio" name="fg-scope" value="uncovered"><span class="fg-txt"><b>Uncovered parts</b><i>${sc.uncovered} part${plural(sc.uncovered)} with no cards yet</i></span></label>
           <label class="fg-opt"><input type="radio" name="fg-scope" value="all"><span class="fg-txt"><b>Whole project</b><i>${sc.all} part${plural(sc.all)} — subsystems &amp; docs together</i></span></label>
           <label class="fg-opt"><input type="radio" name="fg-scope" value="path"><span class="fg-txt"><b>Target a path…</b><i>a specific subsystem or subtree</i></span></label>
@@ -4404,9 +4437,90 @@ async function flashGenDialog(root) {
       const scope = scopeVal();
       const filter = pathInput.value.trim();
       if (scope === "path" && !filter) { pathInput.focus(); return; }
+      // Architecture & decisions with no docs yet → synthesize the doc first.
+      if (scope === "docs" && !sc.docs) { done(null); runArchSynth(root); return; }
       done({ scope, filter });
     });
   });
+}
+
+// runArchSynth writes docs/ARCHITECTURE.md from a code digest (confirming an
+// overwrite if one exists), then card generation from its sections runs in the
+// background — the normal generating banner takes over.
+async function runArchSynth(root) {
+  const fn = bound("FlashcardSynthesizeArch");
+  if (!fn) return;
+  studyToast("Synthesizing ARCHITECTURE.md from the code…");
+  try {
+    let res = await fn(root, false);
+    if (res && res.exists) {
+      const ok = await confirmModal("Overwrite ARCHITECTURE.md?",
+        "This repo already has an <code>ARCHITECTURE.md</code>. Synthesizing replaces it with a fresh version written from the code.", "Overwrite");
+      if (!ok) return;
+      res = await fn(root, true);
+    }
+    if (res && res.wrote) {
+      studyToast(`Wrote ARCHITECTURE.md — generating ${res.sections} section${res.sections === 1 ? "" : "s"}…`);
+      renderStudyCoverage();
+    }
+  } catch (e) { console.error("arch synth", e); studyToast(genErr(e)); }
+}
+
+// flashCleanupDialog previews a project's disposable cards and clears them.
+async function flashCleanupDialog(root) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const fn = bound("FlashcardDeckInspect");
+  let d = { orphaned: 0, stale: 0, drafts: 0 };
+  if (fn) { try { d = (await fn(root)) || d; } catch (e) { console.error("deck inspect", e); } }
+  const junk = (d.orphaned || 0) + (d.stale || 0);
+  const drafts = d.drafts || 0;
+  const pl = (n) => (n === 1 ? "" : "s");
+  const line = (n, label) => `<div class="cln-row"><b>${n}</b><span>${label}</span></div>`;
+  const body = (junk || drafts)
+    ? `<div class="cln-list">${line(d.orphaned || 0, "orphaned — the part no longer exists")}${line(d.stale || 0, "stale — source drifted since the cards were made")}${line(drafts, "drafts — never curated")}</div>` +
+      (junk > 0 && drafts > 0 ? `<label class="cln-check"><input type="checkbox" id="cln-drafts"> Also drop the ${drafts} never-curated draft${pl(drafts)}</label>` : "")
+    : `<div class="cln-empty">Nothing to clean — the deck is tidy.</div>`;
+  const action = junk > 0 ? `Clean ${junk} card${pl(junk)}` : (drafts > 0 ? `Drop ${drafts} draft${pl(drafts)}` : "");
+  const bd = document.createElement("div");
+  bd.className = "modal-backdrop";
+  bd.innerHTML =
+    `<div class="modal" role="dialog" aria-label="Clean up deck"><h2>Clean up deck</h2><div class="cm-body">${body}</div>` +
+    `<div class="modal-actions"><button class="btn-ghost" id="cln-cancel">${action ? "Cancel" : "Close"}</button>` +
+    (action ? `<button class="btn-launch" id="cln-go">${action}</button>` : "") + `</div></div>`;
+  document.body.appendChild(bd);
+  const done = () => { document.removeEventListener("keydown", onEsc, true); bd.remove(); };
+  const onEsc = (e) => { if (e.key === "Escape") done(); };
+  document.addEventListener("keydown", onEsc, true);
+  bd.addEventListener("click", (e) => { if (e.target === bd) done(); });
+  bd.querySelector("#cln-cancel").addEventListener("click", done);
+  const go = bd.querySelector("#cln-go");
+  if (go) go.addEventListener("click", async () => {
+    const cb = bd.querySelector("#cln-drafts");
+    const drop = junk > 0 ? !!(cb && cb.checked) : true;
+    const cfn = bound("FlashcardDeckClean");
+    try { const n = cfn ? await cfn(root, drop) : 0; studyToast(`Cleaned ${n} card${pl(n)}`); }
+    catch (e) { console.error("deck clean", e); studyToast("cleanup failed"); }
+    done(); renderStudyCoverage();
+  });
+}
+
+// repoCleanupDialog previews git-ignored build junk in a project's repos and
+// deletes it on confirm.
+async function repoCleanupDialog(root) {
+  const fn = bound("RepoCleanupPreview");
+  let d = { entries: [], total: 0 };
+  if (fn) { try { d = (await fn(root)) || d; } catch (e) { console.error("repo scan", e); } }
+  const entries = d.entries || [];
+  if (!entries.length) { await confirmModal("Clean repo", `<div class="cln-empty">Nothing to clean — no build junk found.</div>`, "OK"); return; }
+  const rows = entries.map((e) => `<div class="cln-file"><span class="cln-fp">${esc(e.rel)}${e.isDir ? "/" : ""}</span><span class="cln-fs">${fmtBytes(e.size)}</span></div>`).join("");
+  const body = `<div class="cln-note">Only git-ignored build junk — tracked files and configs like <code>.env</code> are never touched.</div><div class="cln-files">${rows}</div>`;
+  const ok = await confirmModal("Clean repo", body, `Delete ${entries.length} · ${fmtBytes(d.total)}`);
+  if (!ok) return;
+  const rfn = bound("RepoCleanupRun");
+  try {
+    const freed = rfn ? await rfn(root, entries.map((e) => e.abs)) : 0;
+    await confirmModal("Cleaned", `<div class="cln-empty">Freed ${fmtBytes(freed)}.</div>`, "Done");
+  } catch (e) { console.error("repo clean", e); await confirmModal("Cleanup failed", `<div class="cln-empty">Could not remove some paths.</div>`, "OK"); }
 }
 
 function studyProjName(root) {
@@ -4500,6 +4614,7 @@ async function renderStudyCoverage() {
         <button class="st-cta st-cta-primary" id="st-review"${reviewable && !busy ? "" : " disabled"}>Review ${reviewable}</button>
         <button class="st-cta" id="st-curate"${totalDraft && !busy ? "" : " disabled"}>Curate ${totalDraft} draft${totalDraft === 1 ? "" : "s"}</button>
         <button class="st-cta" id="st-generate"${busy ? " disabled" : ""}>Generate…</button>
+        <button class="st-cta" id="st-cleanup"${busy ? " disabled" : ""}>Clean up</button>
       </div>
       ${parts.length ? `<div class="st-heat">${heatTiles}</div><ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet. Click <b>Generate…</b> above (a file or package path), or run <code>loom flashcards generate ${esc(root)}</code>.</div>`}
     </div>`;
@@ -4507,6 +4622,7 @@ async function renderStudyCoverage() {
   const rev = document.getElementById("st-review"); if (rev && reviewable && !busy) rev.addEventListener("click", () => startReview(root));
   const cur = document.getElementById("st-curate"); if (cur && totalDraft && !busy) cur.addEventListener("click", () => startCurate(root));
   const gen = document.getElementById("st-generate"); if (gen && !busy) gen.addEventListener("click", () => promptFlashGen(root));
+  const clean = document.getElementById("st-cleanup"); if (clean && !busy) clean.addEventListener("click", () => flashCleanupDialog(root));
   const rgs = document.getElementById("st-regenchanged"); if (rgs) rgs.addEventListener("click", () => runFlashGenChanged(root));
   const stop = document.getElementById("st-genstop"); if (stop) stop.addEventListener("click", () => { const cf = bound("FlashcardGenerateCancel"); if (cf) cf(); studyToast("stopping after the current part…"); });
   if (!busy) {

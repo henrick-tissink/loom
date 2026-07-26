@@ -416,3 +416,93 @@ func (a *App) emitFlash(event string, data any) {
 		wruntime.EventsEmit(a.ctx, event, data)
 	}
 }
+
+// ---- deck cleanup (Batch 3) ----
+
+// FlashcardDeckInspect previews the disposable cards in a project's deck:
+// orphaned (part gone), stale (source drifted), and never-curated drafts.
+func (a *App) FlashcardDeckInspect(projectRoot string) flashcards.DeckCleanup {
+	out := flashcards.DeckCleanup{OrphanedParts: []string{}, StaleParts: []string{}}
+	defer func() { _ = recover() }()
+	if a.st == nil {
+		return out
+	}
+	insp, err := flashcards.InspectDeck(a.st, flashProjectKey(projectRoot), projectRoot)
+	if err != nil {
+		return out
+	}
+	if insp.OrphanedParts == nil {
+		insp.OrphanedParts = []string{}
+	}
+	if insp.StaleParts == nil {
+		insp.StaleParts = []string{}
+	}
+	return insp
+}
+
+// FlashcardDeckClean removes orphaned + stale cards (always) and, if dropDrafts,
+// the never-curated drafts. Returns cards deleted.
+func (a *App) FlashcardDeckClean(projectRoot string, dropDrafts bool) (int, error) {
+	if a.st == nil {
+		return 0, errFlashNoStore
+	}
+	return flashcards.CleanDeck(a.st, flashProjectKey(projectRoot), projectRoot, dropDrafts)
+}
+
+// ---- architecture from scratch (Batch 3) ----
+
+// ArchSynthDTO reports the outcome of an architecture synthesis request.
+type ArchSynthDTO struct {
+	Exists   bool   `json:"exists"` // ARCHITECTURE.md already there; caller must confirm overwrite
+	Wrote    bool   `json:"wrote"`
+	Path     string `json:"path"`
+	Sections int    `json:"sections"` // doc sections whose card generation was kicked off
+}
+
+// FlashcardSynthesizeArch writes docs/ARCHITECTURE.md from a whole-repo code
+// digest (unless it exists and overwrite is false — then it reports Exists so the
+// UI can confirm), then kicks off card generation from the doc's sections in the
+// background (the normal generation progress events follow).
+func (a *App) FlashcardSynthesizeArch(projectRoot string, overwrite bool) (ArchSynthDTO, error) {
+	var dto ArchSynthDTO
+	if a.st == nil {
+		return dto, errFlashNoStore
+	}
+	gen := &flashcards.Generator{Binary: "claude", WorkDir: a.loomDir}
+	path, wrote, err := flashcards.SynthesizeArchitecture(gen, projectRoot, overwrite)
+	if err != nil {
+		return dto, err
+	}
+	dto.Path = path
+	if !wrote {
+		dto.Exists = true
+		return dto, nil
+	}
+	dto.Wrote = true
+	parts, err := flashcards.BuildManifest(projectRoot)
+	if err != nil {
+		return dto, err
+	}
+	rel := flashDocRel(projectRoot, path)
+	var todo []flashcards.Part
+	for _, p := range parts {
+		if p.Kind == flashcards.PartDoc && strings.HasPrefix(p.ID, rel+"#") {
+			todo = append(todo, p)
+		}
+	}
+	dto.Sections = len(todo)
+	if len(todo) > 0 {
+		if err := a.startGeneration(flashProjectKey(projectRoot), todo); err != nil {
+			return dto, err
+		}
+	}
+	return dto, nil
+}
+
+func flashDocRel(root, abs string) string {
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "docs/ARCHITECTURE.md"
+	}
+	return filepath.ToSlash(rel)
+}
