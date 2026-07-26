@@ -1036,6 +1036,42 @@ button.dg-chip { cursor: pointer; }
 .st-genstat.run { color: var(--accent); }
 .st-genstat.ok { color: #4E9C6A; }
 .st-genstat.err { color: #C64C40; }
+
+/* ===== Study tweaks: recap, inline edit, coverage heatmap ===== */
+
+/* end-of-session recap */
+.st-recap { width: 100%; max-width: 400px; margin: 6px 0 4px; display: flex; flex-direction: column; gap: 14px; }
+.st-recap-row { display: flex; justify-content: center; gap: 30px; }
+.st-recap-stat { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.st-recap-stat b { font-size: 23px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.st-recap-stat span { font-size: 11px; color: var(--text-dim); }
+.st-recap-bar { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--edge); }
+.st-recap-seg { display: block; }
+.st-recap-seg.g1 { background: #C64C40; } .st-recap-seg.g2 { background: #B8863C; }
+.st-recap-seg.g3 { background: #4E9C6A; } .st-recap-seg.g4 { background: #5B7FB8; }
+
+/* inline draft edit */
+.st-editing .st-dtext { display: flex; flex-direction: column; gap: 6px; }
+.st-efront, .st-eback { width: 100%; font: inherit; font-size: 13px; color: var(--text); background: var(--surface);
+  border: 1px solid var(--edge); border-radius: 7px; padding: 7px 9px; resize: vertical; }
+.st-eback { font-size: 12.5px; color: var(--text-dim); }
+.st-efront:focus, .st-eback:focus { outline: none; border-color: var(--accent-line); }
+.st-save:hover { border-color: #4E9C6A; color: #4E9C6A; }
+.st-cancel:hover { border-color: var(--text-dim); color: var(--text); }
+
+/* coverage heatmap */
+.st-heat { display: flex; flex-wrap: wrap; gap: 5px; margin: 16px 0 4px; }
+.st-htile { width: 22px; height: 22px; border-radius: 5px; border: 1px solid transparent; padding: 0;
+  cursor: pointer; position: relative; background: rgba(197,106,74,.16); transition: transform .1s; }
+.st-htile:hover { transform: scale(1.14); }
+.st-htile[data-l="0"] { background: transparent; border-color: var(--edge); }
+.st-htile[data-l="1"] { background: rgba(197,106,74,.24); }
+.st-htile[data-l="2"] { background: rgba(197,106,74,.48); }
+.st-htile[data-l="3"] { background: rgba(197,106,74,.80); }
+.st-htile.changed { border-color: var(--accent); border-style: dashed; }
+.st-htile.due::after { content: ""; position: absolute; top: 2px; right: 2px; width: 5px; height: 5px;
+  border-radius: 50%; background: #3E9A80; box-shadow: 0 0 0 1.5px var(--surface); }
+.st-part.st-flash { background: rgba(197,106,74,.10); }
 .st-genbanner { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin: 14px 0 4px; padding: 10px 14px; border-radius: var(--radius); font-size: 12.5px; }
 .st-genbanner.stale { background: rgba(197,106,74,.10); color: var(--text); border: 1px solid rgba(197,106,74,.28); }

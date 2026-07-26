@@ -4240,7 +4240,7 @@ function openSearch() {
 // GUI App (slice 3a). poll() only refreshes a kind==="project" stage, so this
 // surface is never clobbered mid-review.
 
-let study = { queue: [], idx: 0, revealed: false, drafts: [] };
+let study = { queue: [], idx: 0, revealed: false, drafts: [], graded: [], editing: null };
 
 // Generation job state (slice 6b). A (re)generate runs in the Go bridge as a
 // background job emitting "flashcards:progress"/"flashcards:done"; this mirrors
@@ -4402,7 +4402,7 @@ async function renderStudyCoverage() {
     return `<span class="st-genstat ok">+${g.stored || 0}${g.rejected ? ` · ${g.rejected} rejected` : ""}</span>`;
   };
   const rows = parts.map((p) => `
-      <li class="st-part${changedSet.has(p.part) ? " stale" : ""}">
+      <li class="st-part${changedSet.has(p.part) ? " stale" : ""}" data-part="${esc(p.part)}">
         <span class="st-ppath">${esc(p.part)}</span>
         <span class="st-pcounts">
           ${changedSet.has(p.part) ? `<span class="st-chip st-stalechip">changed</span>` : ""}
@@ -4413,6 +4413,16 @@ async function renderStudyCoverage() {
           <button class="st-regen" data-part="${esc(p.part)}"${busy ? " disabled" : ""}>regenerate</button>
         </span>
       </li>`).join("");
+  // Heatmap overview: one tile per subsystem, shaded by how much of it is
+  // activated (draft-heavy reads faint), dashed if its source drifted, green
+  // corner if anything's due. A fast read of 20+ packages before the list.
+  const heatTiles = parts.map((p) => {
+    const ratio = p.total ? p.active / p.total : 0;
+    const lvl = p.total === 0 ? 0 : ratio === 0 ? 0 : ratio < 0.34 ? 1 : ratio < 0.67 ? 2 : 3;
+    const cls = ["st-htile", changedSet.has(p.part) ? "changed" : "", p.due ? "due" : ""].filter(Boolean).join(" ");
+    const t = `${p.part} · ${p.total} card${p.total === 1 ? "" : "s"}${p.draft ? ` · ${p.draft} draft` : ""}${p.due ? ` · ${p.due} due` : ""}`;
+    return `<button class="${cls}" data-l="${lvl}" data-part="${esc(p.part)}" title="${esc(t)}"></button>`;
+  }).join("");
   stage.replaceChildren();
   stage.innerHTML = studyHeader("Study", studyProjName(root)) + `
     <div class="study">
@@ -4428,7 +4438,7 @@ async function renderStudyCoverage() {
         <button class="st-cta" id="st-curate"${totalDraft && !busy ? "" : " disabled"}>Curate ${totalDraft} draft${totalDraft === 1 ? "" : "s"}</button>
         <button class="st-cta" id="st-generate"${busy ? " disabled" : ""}>Generate…</button>
       </div>
-      ${parts.length ? `<ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet. Click <b>Generate…</b> above (a file or package path), or run <code>loom flashcards generate ${esc(root)}</code>.</div>`}
+      ${parts.length ? `<div class="st-heat">${heatTiles}</div><ul class="st-parts">${rows}</ul>` : `<div class="st-empty">No cards yet. Click <b>Generate…</b> above (a file or package path), or run <code>loom flashcards generate ${esc(root)}</code>.</div>`}
     </div>`;
   const back = document.getElementById("st-back"); if (back) back.addEventListener("click", () => openProject(root));
   const rev = document.getElementById("st-review"); if (rev && reviewable && !busy) rev.addEventListener("click", () => startReview(root));
@@ -4440,6 +4450,12 @@ async function renderStudyCoverage() {
     stage.querySelectorAll(".st-regen").forEach((b) =>
       b.addEventListener("click", () => runFlashGen(root, "path", b.getAttribute("data-part"))));
   }
+  // a heatmap tile jumps to its row in the list below
+  stage.querySelectorAll(".st-htile").forEach((t) =>
+    t.addEventListener("click", () => {
+      const row = stage.querySelector(`.st-part[data-part="${CSS.escape(t.getAttribute("data-part"))}"]`);
+      if (row) { row.scrollIntoView({ behavior: "smooth", block: "center" }); row.classList.add("st-flash"); setTimeout(() => row.classList.remove("st-flash"), 1100); }
+    }));
 }
 
 async function startReview(root) {
@@ -4447,7 +4463,7 @@ async function startReview(root) {
   const fn = bound("FlashcardQueue");
   if (fn) { try { q = (await fn(root)) || []; } catch (e) { console.error("fc queue", e); } }
   if (stageView.kind !== "study" || stageView.root !== root) return;
-  study.queue = q; study.idx = 0; study.revealed = false;
+  study.queue = q; study.idx = 0; study.revealed = false; study.graded = [];
   stageView.view = "review";
   renderStudyReview();
 }
@@ -4459,10 +4475,12 @@ function renderStudyReview() {
   const q = study.queue;
   stage.replaceChildren();
   if (study.idx >= q.length) {
+    const done = study.graded.length;
     stage.innerHTML = studyHeader("Study", studyProjName(root)) + `
       <div class="study study-done">
         <div class="st-done-mark">✦</div>
-        <div class="st-done-msg">${q.length ? "All caught up." : "Nothing due right now."}</div>
+        <div class="st-done-msg">${done ? "Session complete." : (q.length ? "All caught up." : "Nothing due right now.")}</div>
+        ${done ? renderRecap(study.graded) : ""}
         <button class="st-cta" id="st-done-back">Back to coverage</button>
       </div>`;
     document.getElementById("st-back").addEventListener("click", () => openProject(root));
@@ -4496,6 +4514,24 @@ function renderStudyReview() {
   }
 }
 
+// renderRecap summarizes a just-finished review session: totals, a recalled-vs-
+// lapsed split, and a proportional bar coloured by grade (reusing the g1-g4
+// palette). Replays of a missed card count as separate reviews, matching how the
+// grades were actually recorded.
+function renderRecap(graded) {
+  const n = graded.length;
+  const again = graded.filter((x) => x.grade === 1).length;
+  const by = [0, 0, 0, 0];
+  graded.forEach((x) => { if (x.grade >= 1 && x.grade <= 4) by[x.grade - 1]++; });
+  const parts = new Set(graded.map((x) => x.part)).size;
+  const seg = by.map((c, i) => c ? `<span class="st-recap-seg g${i + 1}" style="flex:${c}" title="${["Again", "Hard", "Good", "Easy"][i]}: ${c}"></span>` : "").join("");
+  const stat = (v, l) => `<div class="st-recap-stat"><b>${v}</b><span>${l}</span></div>`;
+  return `<div class="st-recap">
+      <div class="st-recap-row">${stat(n, "reviewed")}${stat(n - again, "recalled")}${stat(again, "lapsed")}${stat(parts, "subsystem" + (parts === 1 ? "" : "s"))}</div>
+      <div class="st-recap-bar">${seg}</div>
+    </div>`;
+}
+
 function revealCard() {
   if (stageView.kind !== "study" || stageView.view !== "review") return;
   if (study.revealed || study.idx >= study.queue.length) return;
@@ -4507,12 +4543,21 @@ async function gradeCard(grade) {
   if (stageView.kind !== "study" || stageView.view !== "review" || !study.revealed) return;
   const card = study.queue[study.idx];
   if (!card) return;
+  let suspended = false;
   const fn = bound("FlashcardGrade");
   if (fn) {
     try {
-      const susp = await fn(card.id, grade, !!card.wasDue);
-      if (susp) studyToast(`"${stTruncate(card.front, 40)}" suspended — repeated lapses`);
+      suspended = await fn(card.id, grade, !!card.wasDue);
+      if (suspended) studyToast(`"${stTruncate(card.front, 40)}" suspended — repeated lapses`);
     } catch (e) { console.error("fc grade", e); }
+  }
+  study.graded.push({ grade, part: card.part }); // for the end-of-session recap
+  // Same-session relearning: a missed card (Again) resurfaces a few cards later
+  // this sitting — the moment re-testing actually cements recall. Not if it was
+  // just suspended as a leech.
+  if (grade === 1 && !suspended) {
+    const at = Math.min(study.idx + 4, study.queue.length);
+    study.queue.splice(at, 0, card);
   }
   study.idx++; study.revealed = false;
   renderStudyReview();
@@ -4524,6 +4569,7 @@ async function startCurate(root) {
   if (fn) { try { drafts = (await fn(root)) || []; } catch (e) { console.error("fc drafts", e); } }
   if (stageView.kind !== "study" || stageView.root !== root) return;
   study.drafts = drafts;
+  study.editing = null;
   stageView.view = "curate";
   renderStudyCurate();
 }
@@ -4533,11 +4579,22 @@ function renderStudyCurate() {
   if (!stage) return;
   const root = stageView.root;
   const drafts = study.drafts || [];
-  const rows = drafts.map((c) => `
-      <li class="st-draft" data-id="${c.id}">
+  const rows = drafts.map((c) => {
+    if (c.id === study.editing) {
+      return `<li class="st-draft st-editing" data-id="${c.id}">
+        <div class="st-dtext">
+          <textarea class="st-efront" rows="2">${esc(c.front)}</textarea>
+          <textarea class="st-eback" rows="2">${esc(c.back)}</textarea>
+          <div class="st-dmeta">${esc(c.part)} · ${esc(c.type)}</div>
+        </div>
+        <div class="st-dacts"><button class="st-dbtn st-save">save</button><button class="st-dbtn st-cancel">cancel</button></div>
+      </li>`;
+    }
+    return `<li class="st-draft" data-id="${c.id}">
         <div class="st-dtext"><div class="st-dfront">${esc(c.front)}</div><div class="st-dback">${esc(c.back)}</div><div class="st-dmeta">${esc(c.part)} · ${esc(c.type)}</div></div>
-        <div class="st-dacts"><button class="st-dbtn st-keep">keep</button><button class="st-dbtn st-kill">kill</button></div>
-      </li>`).join("");
+        <div class="st-dacts"><button class="st-dbtn st-edit">edit</button><button class="st-dbtn st-keep">keep</button><button class="st-dbtn st-kill">kill</button></div>
+      </li>`;
+  }).join("");
   stage.replaceChildren();
   stage.innerHTML = studyHeader("Curate", studyProjName(root)) + `
     <div class="study study-curate">
@@ -4556,6 +4613,20 @@ function renderStudyCurate() {
   });
   stage.querySelectorAll(".st-draft").forEach((li) => {
     const id = parseInt(li.getAttribute("data-id"), 10);
+    if (id === study.editing) {
+      const front = li.querySelector(".st-efront"), back = li.querySelector(".st-eback");
+      front.focus();
+      li.querySelector(".st-save").addEventListener("click", async () => {
+        const f = front.value.trim(), b = back.value.trim();
+        if (!f || !b) { (f ? back : front).focus(); return; }
+        const efn = bound("FlashcardEdit");
+        if (efn) { try { await efn(id, f, b); } catch (e) { console.error("fc edit", e); studyToast("edit failed"); } }
+        study.editing = null; startCurate(root);
+      });
+      li.querySelector(".st-cancel").addEventListener("click", () => { study.editing = null; renderStudyCurate(); });
+      return;
+    }
+    li.querySelector(".st-edit").addEventListener("click", () => { study.editing = id; renderStudyCurate(); });
     li.querySelector(".st-keep").addEventListener("click", async () => {
       const kfn = bound("FlashcardActivate"); if (kfn) { try { await kfn(id); } catch (e) { console.error(e); } }
       startCurate(root);
