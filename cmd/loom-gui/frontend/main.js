@@ -3112,8 +3112,9 @@ function renderDocuments() {
 
   const head = document.createElement("div");
   head.className = "po-bhead";
-  head.innerHTML = `<h3>Architecture &amp; decisions</h3><button class="sh-btn" id="doc-refresh">Refresh</button>`;
+  head.innerHTML = `<h3>Architecture &amp; decisions</h3><span class="po-bhead-acts"><button class="sh-btn" id="doc-generate">Generate</button><button class="sh-btn" id="doc-refresh">Refresh</button></span>`;
   host.appendChild(head);
+  head.querySelector("#doc-generate").addEventListener("click", (e) => genArchitectureDoc(stageView.root, e.currentTarget));
   head.querySelector("#doc-refresh").addEventListener("click", () => {
     orch.docs = null;
     // Zero the rev too: an explicit Refresh must re-read even when the probe
@@ -3137,7 +3138,7 @@ function renderDocuments() {
   if (!docs.length) {
     const e = document.createElement("div");
     e.className = "po-empty";
-    e.textContent = "No architecture outline or decision records found under docs/.";
+    e.textContent = "No architecture outline or decision records found under docs/. Click Generate to synthesize an ARCHITECTURE.md from the code.";
     host.appendChild(e);
     return;
   }
@@ -4512,6 +4513,29 @@ async function runArchSynth(root) {
       renderStudyCoverage();
     }
   } catch (e) { console.error("arch synth", e); studyToast(genErr(e)); }
+}
+
+// genArchitectureDoc is the project-page entry point (next to the docs Refresh):
+// synthesize docs/ARCHITECTURE.md from the code and generate cards from it. The
+// written doc appears in the Architecture & decisions panel; cards generate in
+// the background (watch them in Study).
+async function genArchitectureDoc(root, btn) {
+  const fn = bound("FlashcardSynthesizeArch");
+  if (!fn) return;
+  const ok = await confirmModal("Generate ARCHITECTURE.md?",
+    "loom reads this project's code, writes <code>docs/ARCHITECTURE.md</code> (replacing any existing one), and generates study cards from it.", "Generate");
+  if (!ok) return;
+  if (btn) { btn.disabled = true; btn.textContent = "Generating…"; }
+  try {
+    await fn(root, true); // overwrite already confirmed above
+    orch.docs = null; orch.docsRev = 0; // the fresh doc shows on the next read
+    renderDocuments();
+    refreshDocuments().catch(() => {});
+  } catch (e) {
+    console.error("gen arch", e);
+    if (btn) { btn.disabled = false; btn.textContent = "Generate"; }
+    await confirmModal("Generation failed", `<div class="cln-empty">${esc(String((e && e.message) || e))}</div>`, "OK");
+  }
 }
 
 // flashCleanupDialog previews a project's disposable cards and clears them.
