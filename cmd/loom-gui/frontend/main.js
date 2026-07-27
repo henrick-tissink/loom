@@ -1057,6 +1057,7 @@ async function renderOrchestratorBlock() {
       <span class="po-orch-state">${esc(state)}</span>
       <span class="po-acts">
         ${o && o.live && o.sessionName ? `<button class="sh-btn" id="po-attach-orch">Attach</button>` : `<button class="sh-btn" id="po-spawn-orch">Spawn</button>`}
+        <button class="sh-btn" id="po-startrun">Start run…</button>
         <button class="sh-btn" id="po-reassemble">Reassemble brief</button>
         <button class="sh-btn" id="po-notes">Move notes…</button>
       </span>
@@ -1084,11 +1085,69 @@ async function renderOrchestratorBlock() {
       if (name) selectSession(name);
     });
   });
+  on("po-startrun", () => startRunDialog(root));
   on("po-reassemble", () => projectAction(() => window.go.main.App.ReassembleBrief(root)));
   on("po-notes", async () => {
     const dir = await promptModal({ title: "Move notes", label: "Notes directory", value: (o && o.notesDir) || "", dir: true, okText: "Move" });
     if (dir) projectAction(() => window.go.main.App.SetProjectNotesDir(root, dir));
   });
+}
+
+// startRunDialog closes the gap between "the orchestrator wrote a manifest" and
+// "a run exists". It lists the project's manifests (ValidateManifests), and
+// starting one (StartDelegationRun) creates the delegation_runs row that the
+// graph, run strip, and Approve-to-spawn flow all key off. Without this the
+// whole delegation half is unreachable from the GUI.
+async function startRunDialog(root) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const vfn = bound("ValidateManifests");
+  let rep = { manifests: [], errors: [], dir: "" };
+  if (vfn) { try { rep = (await vfn(root)) || rep; } catch (e) { console.error("validate manifests", e); } }
+  const manifests = rep.manifests || [], errors = rep.errors || [];
+  const rows = manifests.map((m) => `
+      <div class="sr-manifest">
+        <div class="sr-mtext">
+          <div class="sr-mname">${esc(m.name)}</div>
+          <div class="sr-mmeta">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"}${(m.repos || []).length ? " · " + (m.repos || []).map(esc).join(", ") : ""}</div>
+          ${(m.warnings || []).length ? `<div class="sr-mwarn">${(m.warnings || []).map(esc).join("<br>")}</div>` : ""}
+        </div>
+        <button class="btn-launch sr-start" data-name="${esc(m.name)}">Start</button>
+      </div>`).join("");
+  const errRows = errors.map((e) => `<div class="po-warn">${esc(e.path)} — ${esc(e.error)}</div>`).join("");
+  const body = manifests.length
+    ? `<div class="sr-list">${rows}</div>${errRows}`
+    : `${errRows}<div class="cln-empty">No manifests found${rep.dir ? ` under <code>${esc(rep.dir)}</code>` : ""}. The orchestrator writes a plan manifest here once it has decomposed the work — spawn one and give it its intent, then check back.</div>`;
+  const bd = document.createElement("div");
+  bd.className = "modal-backdrop";
+  bd.innerHTML = `<div class="modal" role="dialog" aria-label="Start a delegation run"><h2>Start a delegation run</h2><div class="cm-body">${body}</div><div class="modal-actions"><button class="btn-ghost" id="sr-cancel">Close</button></div></div>`;
+  document.body.appendChild(bd);
+  const done = () => { document.removeEventListener("keydown", onEsc, true); bd.remove(); };
+  const onEsc = (e) => { if (e.key === "Escape") done(); };
+  document.addEventListener("keydown", onEsc, true);
+  bd.addEventListener("click", (e) => { if (e.target === bd) done(); });
+  bd.querySelector("#sr-cancel").addEventListener("click", done);
+  bd.querySelectorAll(".sr-start").forEach((b) => b.addEventListener("click", async () => {
+    const name = b.getAttribute("data-name");
+    b.disabled = true; b.textContent = "Starting…";
+    const sfn = bound("StartDelegationRun");
+    try {
+      const res = sfn ? await sfn(root, name) : null;
+      if (res && res.error) { b.disabled = false; b.textContent = "Start"; await confirmModal("Could not start run", `<div class="cln-empty">${esc(res.error)}</div>`, "OK"); return; }
+      done();
+      if (res && res.hidden) return;
+      // Select the brand-new run and paint the graph — the rest of the flow
+      // (Approve & spawn, checks, merge) is already wired off orch.run.
+      if (res && res.runId) { orch.runID = res.runId; orch.rev = 0; }
+      if (stageView.kind === "project" && stageView.root === root) {
+        await refreshOrchestration();
+        renderOrchestration();
+      }
+    } catch (e) {
+      console.error("start run", e);
+      b.disabled = false; b.textContent = "Start";
+      await confirmModal("Could not start run", `<div class="cln-empty">${esc(String(e))}</div>`, "OK");
+    }
+  }));
 }
 
 // ---- orchestration view (slice 4: 4a documents · 4b graph · 4c analysis) ----
