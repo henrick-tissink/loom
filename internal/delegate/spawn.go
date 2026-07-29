@@ -604,6 +604,9 @@ func Brief(run store.DelegationRun, m Manifest, t Task, c Created, addDirs []str
 	b.WriteString("## 3. The task\n\n")
 	b.WriteString(strings.TrimSpace(t.Brief))
 	b.WriteString("\n\n")
+	b.WriteString("Work this slice with subagent-driven development: decompose it into small tasks, " +
+		"dispatch a fresh implementer subagent per task and a reviewer subagent to check each, and self-review before you commit. " +
+		"Build strictly against the contracts named above — consume a sibling's committed, checked artifact, never its in-progress work.\n\n")
 
 	b.WriteString("## 4. Artifacts to publish\n\n")
 	if len(t.Produces) == 0 {

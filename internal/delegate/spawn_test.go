@@ -327,6 +327,17 @@ func TestSpawnBriefCarriesAuthorizationVerbatimPlusLoomsInvariants(t *testing.T)
 	}
 }
 
+// The child owns its slice and works it the disciplined way: the brief must
+// instruct subagent-driven development.
+func TestChildBriefInstructsSDD(t *testing.T) {
+	f := newFixture(t, StateApproved)
+	c := Created{Dir: "/wt/schema", MetaDir: "/wt/schema.meta", Branch: "b", Base: "abc"}
+	b := Brief(f.run, f.m, f.task, c, AddDirs(c))
+	if !strings.Contains(strings.ToLower(b), "subagent-driven development") {
+		t.Fatal("child brief must instruct subagent-driven development")
+	}
+}
+
 // Two spawns of the same task must produce the same bytes — the brief is
 // assembled from maps (sibling paths, repos), and a map-ordered brief would make
 // every re-spawn a different document and every diff of it noise.
