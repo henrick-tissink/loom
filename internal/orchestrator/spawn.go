@@ -128,6 +128,10 @@ func (s *Service) Spawn(root, intent string, w, h int) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	// Best-effort, like SetTags below: the schema reference lets the orchestrator
+	// author a loadable manifest, but a write failure into the notes dir must not
+	// fail the launch — the brief references it by name and the agent can proceed.
+	_, _ = WriteManifestSchemaDoc(notesDir)
 
 	now := s.now()
 	claimed, existing, err := s.st.ClaimOrchestrator(p.Root, now.Unix())
