@@ -116,16 +116,38 @@ func TestAuthorizationScopeFirstLastAndIntact(t *testing.T) {
 		}
 	}
 	for _, claim := range []string{
-		"The only directory you may write to is /notes",
-		"and within it only loom-map.md, loom-decisions.md, loom-open.md",
+		"You may write to two places only:",
+		"only loom-map.md, loom-decisions.md, loom-open.md",
+		"the delegation manifests you author",
 		"These repos are readable:",
 		"may not commit, push, rebase",
 		"may not start, resume, or kill other sessions",
-		"Delegation does not exist yet",
 		"say so and stop. Do not route around it.",
 	} {
 		if strings.Count(text, claim) != 2 {
 			t.Fatalf("claim %q appears %d times, want 2", claim, strings.Count(text, claim))
+		}
+	}
+}
+
+// TestBriefInstructsManifestAuthoring pins the authorship pivot: the brief
+// widens write scope by exactly the manifests dir, keeps the human-gated
+// no-spawn invariant, drops the "delegation does not exist" clause, and tells
+// the orchestrator to author a manifest (or stay a single session).
+func TestBriefInstructsManifestAuthoring(t *testing.T) {
+	b := Assemble(baseInput()).Text
+	if !strings.Contains(b, "/w/Innostream/.loom/manifests") {
+		t.Fatal("brief must name the writable manifests dir")
+	}
+	if !strings.Contains(b, "may not start, resume, or kill other sessions") {
+		t.Fatal("the human-gated no-spawn invariant must be retained")
+	}
+	if strings.Contains(b, "Delegation does not exist yet") {
+		t.Fatal("the delegation-disabled clause must be removed")
+	}
+	for _, want := range []string{ManifestSchemaFile, "single session"} {
+		if !strings.Contains(b, want) {
+			t.Fatalf("What-to-do must mention %q", want)
 		}
 	}
 }

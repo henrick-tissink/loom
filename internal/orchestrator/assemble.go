@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -175,16 +176,22 @@ func scopeSection(in Input) string {
 	if notes == "" {
 		notes = "(not yet materialized)"
 	}
-	fmt.Fprintf(&b, "- The only directory you may write to is %s, and within it only %s.\n",
-		notes, strings.Join(NoteFiles, ", "))
+	fmt.Fprintf(&b, "- You may write to two places only: %s (only %s), and %s (the delegation manifests you author).\n",
+		notes, strings.Join(NoteFiles, ", "), manifestsDir(in))
 	fmt.Fprintf(&b, "- These repos are readable: %s. Nothing outside them is in scope.\n",
 		joinPaths(in))
 	b.WriteString("- You may not commit, push, rebase, or run destructive commands in any repo.\n")
-	b.WriteString("- You may not start, resume, or kill other sessions. Delegation does not exist yet — " +
-		"if the work needs to be split, write the split into loom-open.md and stop.\n")
+	b.WriteString("- You may not start, resume, or kill other sessions. You DECOMPOSE and DISPATCH by writing a manifest; " +
+		"a human approves and Loom launches every child.\n")
 	b.WriteString("- If you believe you need something outside this scope, say so and stop. " +
 		"Do not route around it.\n")
 	return b.String()
+}
+
+// manifestsDir is the one repo path the orchestrator may write to besides its
+// notes: where the delegation manifests it authors are loaded from.
+func manifestsDir(in Input) string {
+	return filepath.Join(in.Root, ".loom", "manifests")
 }
 
 func joinPaths(in Input) string {
@@ -332,7 +339,12 @@ func whatSection(in Input) string {
 	b.WriteString("Standing instruction (applies every session):\n")
 	b.WriteString("- Keep " + strings.Join(NoteFiles, ", ") + " current.\n")
 	b.WriteString("- Reconcile anything listed under Drift before starting new analysis.\n")
-	b.WriteString("- Record every decision in loom-decisions.md as it is made, not at the end.\n")
+	b.WriteString("- Record every decision in loom-decisions.md as it is made, not at the end.\n\n")
+	b.WriteString("To dispatch work:\n")
+	b.WriteString("- When an intent decomposes into clean, separable slices — especially ones in different repos that can run in parallel — write a delegation manifest at " +
+		manifestsDir(in) + "/<name>.json. Read " + ManifestSchemaFile + " (in your notes dir) for the exact format.\n")
+	b.WriteString("- For each dependency between slices, write the contract as a plain sentence in both briefs and an interface artifact, with a check on the producing seam.\n")
+	b.WriteString("- If the work does NOT decompose into clean, separable slices, do not invent splits: note that this is a single session job and stop.\n")
 	return b.String()
 }
 
