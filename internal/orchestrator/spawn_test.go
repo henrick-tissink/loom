@@ -67,10 +67,10 @@ func TestLaunchShape(t *testing.T) {
 	if r.Model != "opus" {
 		t.Fatalf("model = %q, want opus", r.Model)
 	}
-	if !argvHasPair(argv, "--permission-mode", "default") {
-		t.Fatalf("argv lacks --permission-mode default: %v", argv)
+	if !argvHasPair(argv, "--permission-mode", "auto") {
+		t.Fatalf("argv lacks --permission-mode auto: %v", argv)
 	}
-	if argvHas(argv, "--permission-mode", "acceptEdits") || argvHas(argv, "--permission-mode", "plan") {
+	if argvHas(argv, "--permission-mode", "default") || argvHas(argv, "--permission-mode", "plan") {
 		t.Fatalf("argv carries a rejected permission mode: %v", argv)
 	}
 

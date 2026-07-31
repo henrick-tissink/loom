@@ -170,10 +170,15 @@ func (s *Service) Spawn(root, intent string, w, h int) (Result, error) {
 		// with no prompt at all ("Allowed by auto mode classifier"). An
 		// orchestrator launched that way has silent write access to every
 		// member repo, which is instruction-level ownership reintroduced by
-		// omission. acceptEdits is rejected for the same reason; plan is
-		// rejected because it cannot write the notes and leaving it is a
-		// keystroke Loom must not make on the user's behalf.
-		Mode: "default",
+		// omission — that was the original caution. Reversed deliberately: the
+		// orchestrator runs in AUTO mode. It PLANS, it does not code, and
+		// prompting every note/manifest write makes a planning session unusable.
+		// The two safeguards are unchanged: the human still gates EVERY child
+		// spawn (ApproveTask), and the brief's never-truncated Authorization scope
+		// (notes + <root>/.loom/manifests only; repos readable; no commit/push/
+		// rebase) is the guardrail. Trade-off, stated plainly: a stray repo write
+		// would not prompt under auto.
+		Mode: "auto",
 		Seed: Seed(paths.Brief, intent),
 	}, w, h, now)
 	if err != nil {
