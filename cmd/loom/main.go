@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/henricktissink/loom/internal/config"
+	"github.com/henricktissink/loom/internal/delegate"
 	"github.com/henricktissink/loom/internal/flashcards"
 	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/projects"
@@ -25,6 +26,13 @@ import (
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "flashcards" {
 		if err := runFlashcards(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "loom:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "manifest" {
+		if err := runManifest(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "loom:", err)
 			os.Exit(1)
 		}
@@ -49,6 +57,54 @@ func runFlashcards(args []string) error {
 	}
 	defer st.Close()
 	return flashcards.RunCLI(args, st, "claude", cfg.LoomDir, time.Now().Unix(), os.Stdin, os.Stdout)
+}
+
+// runManifest implements `loom manifest validate <projectRoot>`: it loads every
+// delegation manifest under <projectRoot>/.loom/manifests through the SAME loader
+// the GUI's Start-run uses, and reports which load and which do not (with the
+// exact reason). The orchestrator runs this to validate the manifest it just
+// authored and self-correct before handing it off — so it never punts an
+// "is this valid?" question to the human.
+func runManifest(args []string) error {
+	if len(args) < 2 || args[0] != "validate" {
+		return fmt.Errorf("usage: loom manifest validate <projectRoot>")
+	}
+	root := args[1]
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	targets, err := projects.New(st).LaunchTargets()
+	if err != nil {
+		return fmt.Errorf("load projects: %w", err)
+	}
+	dir := delegate.ManifestDir(root)
+	ms, errs := delegate.LoadAll(dir, delegate.NewResolver(targets))
+	for _, m := range ms {
+		fmt.Printf("ok   %s — %d task(s)\n", m.Name, len(m.Tasks))
+		for _, w := range m.Warnings {
+			if w.Task != "" {
+				fmt.Printf("     warning [%s]: %s\n", w.Task, w.Text)
+			} else {
+				fmt.Printf("     warning: %s\n", w.Text)
+			}
+		}
+	}
+	for _, e := range errs {
+		fmt.Printf("FAIL %s — %s\n", filepath.Base(e.Path), e.Err)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%d manifest(s) did not load in %s", len(errs), dir)
+	}
+	if len(ms) == 0 {
+		fmt.Printf("no manifests found in %s\n", dir)
+	}
+	return nil
 }
 
 func run() error {

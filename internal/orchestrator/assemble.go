@@ -344,6 +344,7 @@ func whatSection(in Input) string {
 	b.WriteString("- When an intent decomposes into clean, separable slices — especially ones in different repos that can run in parallel — write a delegation manifest at " +
 		manifestsDir(in) + "/<name>.json. Read " + ManifestSchemaFile + " (in your notes dir) for the exact format.\n")
 	b.WriteString("- For each dependency between slices, write the contract as a plain sentence in both briefs and an interface artifact, with a check on the producing seam.\n")
+	b.WriteString("- After writing it, run `loom manifest validate " + in.Root + "` and fix any error it reports before you finish. Hand off only a manifest that validates clean — check it yourself, do not ask the human whether a label or the manifest is valid. Be decisive: make reasonable calls, note each briefly, and stop.\n")
 	b.WriteString("- If the work does NOT decompose into clean, separable slices, do not invent splits: note that this is a single session job and stop.\n")
 	return b.String()
 }

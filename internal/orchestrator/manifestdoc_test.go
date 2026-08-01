@@ -42,7 +42,7 @@ func TestManifestSchemaDocExampleLoads(t *testing.T) {
 	repoAPI, repoWeb := t.TempDir(), t.TempDir()
 	res := fakeResolver{scope: delegate.Scope{
 		Root: dir, Name: "atlas",
-		Repos: map[string]string{"api": repoAPI, "web": repoWeb},
+		Repos: map[string]string{"atlas/api": repoAPI, "atlas/web": repoWeb},
 	}}
 	ms, errs := delegate.LoadAll(dir, res)
 	if len(errs) != 0 {

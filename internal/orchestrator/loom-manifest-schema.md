@@ -23,7 +23,9 @@ between slices can be written down as contracts *before* any code is written.
 - `tasks[]`: each is one slice, owning exactly ONE repo:
   - `id`: lowercase-kebab, matching `^[a-z0-9-]{1,64}$`, unique — it becomes a
     git branch and directory name.
-  - `repo`: a repo **label** your project owns.
+  - `repo`: a repo **label** your project owns — copy it EXACTLY as your brief's
+    **Project** section lists it. For a multi-repo project a label usually looks
+    like `project/repo`; do not shorten it to just `repo`.
   - `brief`: what this slice must do, in prose.
   - `authorization`: **required, non-empty** — exactly what this slice may and
     may not touch. Loom appends its own invariants; you write the task-specific
@@ -47,7 +49,24 @@ PDF"*), have A `produces` an `"interface"` artifact for it, and have B `needs`
 that artifact. B then builds against the written contract in parallel — it
 consumes A's finished, checked output, never A's live work.
 
+## Validate before you finish — check your own work
+
+After you write the manifest, run this in your shell:
+
+```
+loom manifest validate <projectRoot>
+```
+
+It loads every manifest under `<projectRoot>/.loom/manifests/` through the exact
+loader Loom's "Start run" uses, and prints each as `ok` or `FAIL` with the precise
+reason. **Fix any `FAIL` and re-run until it is clean.** Hand off only a manifest
+that validates — never ask the human whether it is valid or whether a label is
+right; check it yourself. Be decisive: make reasonable calls, note each in one
+line, and move on — do not write essays or defer choices you can make.
+
 ## Worked example (this loads exactly as written)
+
+Note the labels are the full `project/repo` form, as a real project lists them.
 
 ```json
 {
@@ -55,12 +74,12 @@ consumes A's finished, checked output, never A's live work.
   "name": "example",
   "project": "atlas",
   "defaults": { "model": "sonnet" },
-  "repos": { "api": {}, "web": {} },
+  "repos": { "atlas/api": {}, "atlas/web": {} },
   "tasks": [
     {
       "id": "pdf-endpoint",
       "title": "Add the PDF export endpoint",
-      "repo": "api",
+      "repo": "atlas/api",
       "paths": ["internal/export/"],
       "brief": "Implement POST /export {docId} returning application/pdf.",
       "authorization": "May edit internal/export/* in the api repo; may not touch other packages or the web repo.",
@@ -77,7 +96,7 @@ consumes A's finished, checked output, never A's live work.
     {
       "id": "export-button",
       "title": "Add the export button in the web app",
-      "repo": "web",
+      "repo": "atlas/web",
       "paths": ["src/export/"],
       "brief": "Add an Export-to-PDF button that calls POST /export {docId} and downloads the result.",
       "authorization": "May edit src/export/* in the web repo; may not touch the api repo.",
