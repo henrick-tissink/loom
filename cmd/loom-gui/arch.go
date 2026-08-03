@@ -125,6 +125,15 @@ type RunHeadDTO struct {
 	UpdatedAt      int64              `json:"updatedAt"`
 	RedKind        string             `json:"redKind"`
 	BaselineFaults []BaselineFaultDTO `json:"baselineFaults"`
+
+	// Mode/RunState/Escalation carry autonomy (spec §11) onto the run strip the
+	// user already watches, so an autonomous run shows its control state and Kill
+	// where a supervised run shows nothing extra. Same fields as DelegationRunDTO,
+	// on the payload for the same reason RedKind is: the strip must not round-trip
+	// to learn whether the run it is drawing is driving itself.
+	Mode       string `json:"mode"`
+	RunState   string `json:"runState"`
+	Escalation string `json:"escalation"`
 }
 
 // GraphNodeDTO is one node's LAYOUT-STABLE half: identity and the fields that
@@ -386,7 +395,8 @@ func (a *App) OrchestrationSnapshot(root string, runID int64, sinceRev uint64) (
 		return out
 	}
 	out.Run = &RunHeadDTO{ID: run.ID, Name: run.Name, Slug: run.Slug,
-		Status: run.Status, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt}
+		Status: run.Status, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
+		Mode: run.Mode, RunState: run.State, Escalation: a.escalationReason(run.ID)}
 	out.Run.RedKind, out.Run.BaselineFaults = runRedKind(run)
 
 	// Decoded here rather than through orchestration.go's decodeSnapshot

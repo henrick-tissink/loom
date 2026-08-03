@@ -1871,6 +1871,20 @@ function elapsedSince(ts) {
   return Math.round(s / 86400) + "d";
 }
 
+// autonomyBadge renders an autonomous run's control state (spec §11) beside the
+// data status. A supervised run gets nothing — no autonomy controls where there
+// is no autonomy. An active auto run (running/paused/escalated) also gets a Kill
+// that stops the loop; a stopped one (aborted/done) shows only its final state.
+const AUTO_LIVE = new Set(["running", "paused", "escalated"]);
+function autonomyBadge(r) {
+  if (!r || r.mode !== "auto") return "";
+  const st = r.runState || "running";
+  const cls = st === "escalated" ? " dg-chip-warn" : st === "aborted" ? " dg-chip-mute" : "";
+  const reason = st === "escalated" && r.escalation ? ` — ${esc(r.escalation)}` : "";
+  const kill = AUTO_LIVE.has(st) ? `<button class="dg-chip dg-chip-warn" id="dg-kill" title="Stop the auto-runner before its next spawn, check, or merge">Kill</button>` : "";
+  return `<span class="po-tag${cls}" title="This run is driving itself (autonomy §11)">auto · ${esc(st)}${reason}</span>${kill}`;
+}
+
 function renderRunStrip(host) {
   if (!orch.run) { host.replaceChildren(); orch.stripSig = ""; return; }
   const s = orch.strip || {};
@@ -1922,6 +1936,7 @@ function renderRunStrip(host) {
         <h3>Run</h3>
         <span class="dg-runname">${esc(r.name || r.slug || ("run " + r.id))}</span>
         <span class="po-tag">${esc(r.status)}</span>
+        ${autonomyBadge(r)}
         ${r.createdAt ? `<span class="dg-elapsed">${esc(elapsedSince(r.createdAt))} old</span>` : ""}
         ${switcher}
       </div>
@@ -1932,6 +1947,24 @@ function renderRunStrip(host) {
   if (html === orch.stripSig) return;
   orch.stripSig = html;
   host.innerHTML = html;
+
+  const kill = document.getElementById("dg-kill");
+  if (kill) kill.addEventListener("click", async () => {
+    kill.disabled = true; kill.textContent = "Killing…";
+    const afn = bound("AbortRun");
+    try {
+      if (afn) await afn(r.id);
+      // Force a full re-read: run_state moved, and the strip signature must be
+      // recomputed against the new state.
+      orch.stripSig = "";
+      await refreshOrchestration();
+      renderOrchestration();
+    } catch (e) {
+      console.error("abort run", e);
+      kill.disabled = false; kill.textContent = "Kill";
+      await confirmModal("Could not stop run", `<div class="cln-empty">${esc(String(e))}</div>`, "OK");
+    }
+  });
 
   const sel = document.getElementById("dg-runsel");
   if (sel) sel.addEventListener("change", () => {

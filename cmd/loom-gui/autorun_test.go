@@ -33,6 +33,34 @@ func TestChildDone(t *testing.T) {
 	}
 }
 
+// TestDelegationRunDTOCarriesAutonomy: an autonomous run surfaces mode and
+// run_state through the control-room DTO, so the frontend can render its state
+// and offer a Kill.
+func TestDelegationRunDTOCarriesAutonomy(t *testing.T) {
+	a := newTestApp(t)
+	root, _ := seedProjectWithManifest(t, a, "atlas", twoTaskManifest)
+	id, err := a.StartAutonomousRun(root, "atlas")
+	if err != nil {
+		t.Fatalf("StartAutonomousRun: %v", err)
+	}
+	// Stop the loop so the read is deterministic; abort lands run_state=aborted.
+	if err := a.AbortRun(id); err != nil {
+		t.Fatalf("AbortRun: %v", err)
+	}
+
+	dto := a.ProjectDelegation(root)
+	if dto.Hidden || len(dto.Runs) == 0 {
+		t.Fatalf("no runs surfaced: %+v", dto)
+	}
+	run := dto.Runs[0]
+	if run.Mode != string(delegate.RunModeAuto) {
+		t.Fatalf("mode = %q, want auto", run.Mode)
+	}
+	if run.RunState != string(delegate.RunStateAborted) {
+		t.Fatalf("runState = %q, want aborted", run.RunState)
+	}
+}
+
 // TestAutoStateMapsDeadlockToEscalated: a run whose DATA status went
 // `deadlocked` (a baseline fault or §12.1 deadlock) stops the loop as an
 // escalation, and both axes end up agreeing.

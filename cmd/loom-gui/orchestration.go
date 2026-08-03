@@ -398,6 +398,17 @@ type DelegationRunDTO struct {
 	Status    string `json:"status"`
 	CreatedAt int64  `json:"createdAt"`
 	UpdatedAt int64  `json:"updatedAt"`
+
+	// Mode and RunState are autonomy's two axes (spec §11). Mode is
+	// supervised|auto; RunState is the auto-runner's control state
+	// (running|paused|escalated|aborted|done). A supervised run reads auto=false
+	// and the frontend renders no autonomy controls for it. Escalation is the
+	// reason the loop stopped for a human — non-empty only for an escalated run,
+	// and in-memory (Slice 1), so a run escalated before a restart shows the
+	// state without the sentence.
+	Mode       string `json:"mode"`
+	RunState   string `json:"runState"`
+	Escalation string `json:"escalation"`
 	// ManifestError is a snapshot that will not decode. The tasks still list —
 	// their state lives in the task rows, not in the snapshot — but their
 	// titles, needs and check argv do not, and saying so is the difference
@@ -609,7 +620,11 @@ func (a *App) delegationRunDTO(r store.DelegationRun) DelegationRunDTO {
 	dto := DelegationRunDTO{
 		ID: r.ID, Slug: r.Slug, Name: r.Name, Status: r.Status,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
-		Tasks: []DelegationTaskDTO{},
+		Mode: r.Mode, RunState: r.State,
+		// The reason is read from the live loop, not the row (Slice 1): only a
+		// currently-escalated run with its goroutine still resident has it.
+		Escalation: a.escalationReason(r.ID),
+		Tasks:      []DelegationTaskDTO{},
 	}
 	dto.RedKind, dto.BaselineFaults = runRedKind(r)
 	m, mErr := decodeSnapshot(r)
