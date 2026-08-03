@@ -1,7 +1,7 @@
 # Orchestrated Delegation — Design
 
 **Date:** 2026-07-27
-**Status:** Revision 2 — hardened after a four-agent adversarial review (premise, codebase, correctness, UX). Every CRITICAL/MAJOR finding is folded or explicitly answered below.
+**Status:** Revision 3 — adds the autonomy model (§11): after the human confirms the plan in the orchestrator's console, loom executes the validated manifest end-to-end (spawn → check → unblock → integrate → **merge**) with no per-step approval, bounded and abortable. Revision 2 hardened the design after a four-agent adversarial review (premise, codebase, correctness, UX); those findings remain folded below.
 **Arc:** Completes and re-surfaces loom's orchestration arc (specs of 2026-07-22): the slice that turns the orchestrator from a *planner that stops* into a *planner that dispatches* — but only for the case where the evidence supports it, and only after we prove it wins.
 
 **Goal:** From a plain-language intent, an orchestrator session decomposes genuinely-multi-repo work, writes the seams and their conformance tests, and — on human approval — spawns child sessions that each do their slice with subagent-driven development. A single session you launch yourself stays first-class and untouched.
@@ -101,3 +101,25 @@ Kept as-is on the evidence: human-gated spawns; no child-to-child or live child�
 - **No autonomous spawning; no child-to-child or live messaging; no transcript review; no container isolation.**
 - **Honest residual risk (not eliminated, mitigated):** a consumer-driven seam test is still LLM-authored — it removes the producer's self-grading incentive and adds an independent conformance gate, but the ultimate backstop remains the **human integration review at the seam.** Silent wrong integration is reduced, not proven impossible.
 - **The premise is a bet under test, not a settled fact.** Phase A exists to measure it; a negative result kills Phase B, and that is a success of the process, not a failure.
+
+## 11. Autonomy — confirm-in-console, then hands-off (Revision 3, DECISION)
+
+The default supervised flow (human approves every wave; §4) stays available. Autonomy is a per-run mode chosen at start.
+
+**The model — two phases, one gate, and the gate lives in the console:**
+
+1. **Align (human + orchestrator, in the console).** The human converses with the orchestrator until they agree on the plan (the validated manifest). *That conversation is the review* — there is no separate GUI plan-review gate for an autonomous run.
+2. **Go (in the console).** The human speaks an explicit **arm-phrase** (e.g. *"approved — run it"*); the orchestrator invokes loom (a CLI call, `loom run start --auto <manifest>` or equivalent) to start the autonomous run. **The orchestrator agent still never launches a session itself** — it invokes the harness, which does. The trigger is delivered through the console, but the spawner is loom.
+3. **Run (loom, autonomous).** Loom's **auto-runner** drives the confirmed manifest end-to-end: spawn ready slices (up to the CAS concurrency cap) → run each check on committed work → unblock and spawn the next wave → integrate → **merge** — with no per-step human action.
+
+**The trigger is in the agent's hands, so it is bound hard (BINDING):**
+- It can **only** start a run for a manifest that already exists and has **validated** (`loom manifest validate` clean). It cannot invent work — only execute the confirmed plan.
+- The concurrency cap and the token/cost **budget** bind every spawn exactly as under supervised approval; the trigger fires the plan, it does not unlock unbounded spawning.
+- Every spawn, check, and merge is **visible** in the control room and the run is **abortable** — the human can pause or kill the whole run from loom at any moment. The console starts it; loom stays the kill switch.
+
+**Full-auto-merge (DECISION).** loom merges a slice without a human gate — but only when every existing integration gate is green: the slice check passes, the integration worktree's per-repo check passes, the cross-repo checks pass, and git merges cleanly. A **conflict, a failing check, or a scope divergence does not merge** — it escalates and pauses. Every merge is an ordinary git commit (visible, `git revert`-able). This **supersedes §5's human merge gate for autonomous runs only**; supervised runs keep it.
+- **Residual risk, stated plainly:** full-auto is the one place a green-but-semantically-wrong result lands with no human eyes. The guard is §3's **consumer-driven seam checks** — they are therefore the **top hardening item** for autonomy, not an optional later nicety. Until they exist, full-auto merges on the per-task + integration checks the manifest author wrote, backstopped only by revert.
+
+**Escalation.** The auto-runner pauses and notifies on: a check failing past a retry ceiling, a deadlock, a park of kind needs-decision/needs-scope, a scope divergence, or the budget cap. **First cut escalates straight to the human;** routing through the orchestrator first (let it re-plan, then pull the human in) is a later refinement.
+
+**New machinery (vs. what exists):** the **auto-runner** (a background loop per autonomous run that drives spawn → check → tick → integrate → merge, honoring cap + budget + abort), the **console trigger** (`loom run start --auto`, guarded to validated-manifest-only), and the **abort/pause** control. It wires together pieces that already exist (spawn, checks, tick, integration, park/resume) rather than inventing them.
