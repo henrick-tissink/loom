@@ -3,7 +3,25 @@ package delegate
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
+
+// WorktreeHeadTime returns the committer time (unix seconds) of a worktree's
+// HEAD commit, or 0 when the worktree has no commit yet (an unborn HEAD, or a
+// directory git cannot read). It is the auto-runner's "has the child committed"
+// signal — a TaskView's CommittedAt — and 0 is the honest answer for "nothing
+// committed", which the check-on-done rule reads as "no new work to check".
+func WorktreeHeadTime(dir string) int64 {
+	out, err := gitOut(dir, "log", "-1", "--format=%ct")
+	if err != nil {
+		return 0
+	}
+	var t int64
+	if _, err := fmt.Sscan(strings.TrimSpace(out), &t); err != nil {
+		return 0
+	}
+	return t
+}
 
 // This is the brain of the auto-runner (spec §11): given a read of every task in
 // an autonomous run plus the concurrency cap, decide what to do THIS tick. It is
@@ -85,7 +103,9 @@ const MaxCheckRetries = 3
 // is stated here and this function stays self-contained.
 func countsAgainstCap(s TaskState) bool {
 	switch s {
-	case StateApproved, StateSpawning, StateRunning, StateBlocked, StateChecking, StateIntegrating, StateMergeable:
+	case StateApproved, StateSpawning, StateRunning, StateBlocked, StateChecking, StateFailed, StateIntegrating, StateMergeable:
+		// StateFailed counts: a failed task is mid-retry and still holds its
+		// worktree/child, so it occupies a slot until it verifies or escalates.
 		return true
 	}
 	return false
@@ -123,6 +143,18 @@ func NextActions(tasks []TaskView, cap int) []AutoAction {
 		}
 	}
 
+	// A task left `mergeable` means full-auto-merge was ATTEMPTED and refused —
+	// a scope divergence, out-of-worktree drift, or a merge conflict. Spec §11
+	// is explicit that none of those merge automatically; they escalate. (The
+	// auto-runner's integrate executor merges immediately on a green
+	// integration, so a mergeable task surviving to the next tick is a refusal,
+	// never a merge that simply has not been tried.)
+	for _, t := range sorted {
+		if t.State == StateMergeable {
+			return []AutoAction{Escalate{Reason: "auto-merge refused (divergence/drift/conflict): " + t.ID}}
+		}
+	}
+
 	var acts []AutoAction
 
 	// Integrate every verified task (full-auto-merge happens in the executor,
@@ -133,10 +165,17 @@ func NextActions(tasks []TaskView, cap int) []AutoAction {
 		}
 	}
 
-	// Check a running task whose child has finished working and has committed
-	// since its last check.
+	// Check a task, two ways: the FIRST check when a running task's child has
+	// finished working and committed since its last check; and a RETRY of a
+	// failed task that has not yet hit the ceiling (the escalation above already
+	// caught the ones that have). The retry does not require a new commit — a
+	// nudged child may fix in place, and re-running the check is also how a flake
+	// clears.
 	for _, t := range sorted {
-		if t.State == StateRunning && t.ChildIdle && t.CommittedAt > t.CheckedAt {
+		switch {
+		case t.State == StateRunning && t.ChildIdle && t.CommittedAt > t.CheckedAt:
+			acts = append(acts, CheckTask{ID: t.ID})
+		case t.State == StateFailed && t.Lapses < MaxCheckRetries:
 			acts = append(acts, CheckTask{ID: t.ID})
 		}
 	}
@@ -156,6 +195,17 @@ func NextActions(tasks []TaskView, cap int) []AutoAction {
 		if t.State == StateReady {
 			acts = append(acts, SpawnTask{ID: t.ID})
 			remaining--
+		}
+	}
+
+	// An `approved` task had its spawn CLAIMED but not completed — a prior tick's
+	// partial spawn, or a race with a concurrent human approve. It already holds
+	// its slot (countsAgainstCap includes approved), so retry its spawn
+	// unconditionally; leaving it approved would strand the run with a slot
+	// consumed and no child.
+	for _, t := range sorted {
+		if t.State == StateApproved {
+			acts = append(acts, SpawnTask{ID: t.ID})
 		}
 	}
 

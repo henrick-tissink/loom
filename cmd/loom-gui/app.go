@@ -99,6 +99,12 @@ type App struct {
 	genMu     sync.Mutex
 	genBusy   bool
 	genCancel bool
+
+	// autoRunners holds one live auto-runner per autonomous delegation run
+	// (autonomy spec §11). Guarded because StartAutonomousRun (a bound method),
+	// AbortRun and the recovery sweep all touch it. See autorun.go.
+	autoMu      sync.Mutex
+	autoRunners map[int64]*autoRunHandle
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {
