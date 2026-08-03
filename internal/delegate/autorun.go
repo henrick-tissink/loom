@@ -11,6 +11,34 @@ import (
 // tmux, a store, or a clock — the loop around it (autorun_loop, a later task)
 // only executes what this returns.
 
+// RunMode is delegation_runs.mode: whether a run is human-gated or autonomous.
+// It is a distinct axis from the run's data status (planning|running|…) and
+// from its RunState below — mode says WHO drives the run, RunState says what
+// the auto-runner is doing right now.
+type RunMode string
+
+const (
+	// RunModeSupervised is the default: every spawn is a human ApproveTask.
+	RunModeSupervised RunMode = "supervised"
+	// RunModeAuto hands the run to the auto-runner (spec §11). The agent still
+	// never spawns; the auto-runner is loom code and only executes the already
+	// validated manifest.
+	RunModeAuto RunMode = "auto"
+)
+
+// RunState is delegation_runs.run_state: the auto-runner's control state for an
+// autonomous run. Supervised runs sit at RunStateRunning and never leave it —
+// this axis only moves under the auto-runner.
+type RunState string
+
+const (
+	RunStateRunning   RunState = "running"   // the loop is driving the run
+	RunStatePaused    RunState = "paused"    // temporarily halted, resumable
+	RunStateEscalated RunState = "escalated" // stopped, waiting on a human decision
+	RunStateAborted   RunState = "aborted"   // stopped for good by an abort
+	RunStateDone      RunState = "done"      // every task terminal
+)
+
 // AutoAction is one thing the auto-runner does this tick.
 type AutoAction interface{ isAutoAction() }
 

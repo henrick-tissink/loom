@@ -897,8 +897,8 @@ func TestUserVersionIsPinned(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 22 {
-		t.Fatalf("user_version = %d, want 22", v)
+	if v != 24 {
+		t.Fatalf("user_version = %d, want 24", v)
 	}
 	for _, obj := range []string{"orchestrators", "delegation_runs", "delegation_tasks",
 		"delegation_artifacts", "delegation_amendments"} {
@@ -1086,10 +1086,11 @@ func TestMigrationHeadIsPinned(t *testing.T) {
 	// TestMigrationV10ToV18FromStaleUserVersion exercises against a real file.
 	// v19/v20 (2026-07-25-flashcards-slice1 plan) added the flashcards and
 	// flashcard_reviews tables; v21/v22 (2026-07-25-flashcards-slice2 plan)
-	// added flashcard_reviews.introduced_at and flashcard_review_log —
-	// confirmed safe to replay from every stale version by
-	// TestMigrationsReplayFromEveryStaleVersion.
-	const wantHead = 22
+	// added flashcard_reviews.introduced_at and flashcard_review_log; v23/v24
+	// (2026-08-03-autonomy-auto-runner plan) added delegation_runs.mode and
+	// .run_state — both standalone ADD COLUMNs, confirmed safe to replay from
+	// every stale version by TestMigrationsReplayFromEveryStaleVersion.
+	const wantHead = 24
 
 	s := open(t)
 	var v int

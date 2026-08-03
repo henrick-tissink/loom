@@ -50,8 +50,17 @@ type DelegationRun struct {
 	BaseSHAs     string
 	Integration  string
 	Status       string // planning|running|deadlocked|done|abandoned
-	CreatedAt    int64
-	UpdatedAt    int64
+	// Mode is supervised|auto (migration v23): whether the run is human-gated or
+	// driven by the auto-runner (autonomy spec §11). A separate axis from Status
+	// — a run can be `running` (data) and either supervised or auto.
+	Mode string
+	// State is the auto-runner's control state (migration v24):
+	// running|paused|escalated|aborted|done. Supervised runs never leave
+	// 'running'; only the auto-runner moves this. Distinct from Status so an
+	// abort stops the loop without rewriting the run's data status.
+	State     string
+	CreatedAt int64
+	UpdatedAt int64
 }
 
 // DelegationTask is one row of `delegation_tasks` (migration v12): one unit of
@@ -154,7 +163,7 @@ type DelegationArtifact struct {
 }
 
 const (
-	drunCols  = "id, slug, name, project_root, manifest_json, base_shas, integration, status, created_at, updated_at"
+	drunCols  = "id, slug, name, project_root, manifest_json, base_shas, integration, status, mode, run_state, created_at, updated_at"
 	dtaskCols = "run_id, task_id, state, session_name, repo_label, worktree, branch, base_sha, " +
 		"base_producers, check_status, check_exit, check_out, check_at, branch_head, " +
 		"block_json, pending_seed, divergence, spawn_snapshot, needs_snapshot, " +
@@ -177,7 +186,12 @@ const (
 func (s *Store) InsertDelegationRun(name, projectRoot, manifestJSON, baseSHAs string, now int64) (DelegationRun, error) {
 	r := DelegationRun{
 		Name: name, ProjectRoot: projectRoot, ManifestJSON: manifestJSON,
-		BaseSHAs: baseSHAs, Status: "planning", CreatedAt: now, UpdatedAt: now,
+		BaseSHAs: baseSHAs, Status: "planning",
+		// The columns carry these DEFAULTs (migrations v23/v24); the INSERT below
+		// omits them, so reflect the defaults here rather than leave the returned
+		// DTO's Mode/State empty and disagreeing with the row.
+		Mode: "supervised", State: "running",
+		CreatedAt: now, UpdatedAt: now,
 	}
 	err := s.tx(func(tx *sql.Tx) error {
 		res, err := tx.Exec(`INSERT INTO delegation_runs
@@ -283,6 +297,40 @@ func (s *Store) SetDelegationRunIntegrationCAS(id int64, expected, next string, 
 	return s.casExec(
 		"UPDATE delegation_runs SET integration=?, updated_at=? WHERE id=? AND integration=?",
 		next, now, id, expected)
+}
+
+// SetDelegationRunMode sets a run's mode (supervised|auto). Ungated: mode is
+// written once, at the moment a run is handed to the auto-runner, by the single
+// caller that just created it (autonomy spec §11). A CAS would guard against a
+// second writer that does not exist — nothing ever flips a live run's mode back.
+func (s *Store) SetDelegationRunMode(id int64, mode string, now int64) error {
+	return s.execTask(
+		"UPDATE delegation_runs SET mode=?, updated_at=? WHERE id=?", mode, now, id)
+}
+
+// AdvanceDelegationRunStateCAS moves the auto-runner's control state iff the run
+// still holds `expected`. This is the loop's own transition — running→paused,
+// running→escalated, running→done — and claimed=false means another writer (or
+// a second Loom instance) moved it first; the row is untouched. The auto-runner
+// must not perform the side effect it was about to (spawn/check/merge) when it
+// loses the claim, exactly as every task transition in this file requires.
+func (s *Store) AdvanceDelegationRunStateCAS(id int64, expected, next string, now int64) (claimed bool, err error) {
+	return s.casExec(
+		"UPDATE delegation_runs SET run_state=?, updated_at=? WHERE id=? AND run_state=?",
+		next, now, id, expected)
+}
+
+// AbortDelegationRunStateCAS moves the run's control state to 'aborted' from any
+// non-terminal control state. Like AbandonDelegationRunCAS it names no expected
+// state, because abort is the one control transition a human issues against a
+// run whatever the loop is doing; what it still refuses is re-aborting or
+// overriding a finished run, so claimed=false distinguishes "already stopped"
+// from "just aborted". It does NOT touch `status` — an abort stops the loop, it
+// does not retroactively rewrite what the run had accomplished.
+func (s *Store) AbortDelegationRunStateCAS(id int64, now int64) (claimed bool, err error) {
+	return s.casExec(
+		"UPDATE delegation_runs SET run_state='aborted', updated_at=? WHERE id=? AND run_state NOT IN ('aborted','done')",
+		now, id)
 }
 
 // AbandonDelegationRunCAS retires a run from any non-terminal status. Unlike
@@ -951,7 +999,7 @@ func (s *Store) queryDelegationRuns(q string, args ...any) ([]DelegationRun, err
 func scanDelegationRun(row rowScanner) (DelegationRun, bool, error) {
 	var r DelegationRun
 	err := row.Scan(&r.ID, &r.Slug, &r.Name, &r.ProjectRoot, &r.ManifestJSON,
-		&r.BaseSHAs, &r.Integration, &r.Status, &r.CreatedAt, &r.UpdatedAt)
+		&r.BaseSHAs, &r.Integration, &r.Status, &r.Mode, &r.State, &r.CreatedAt, &r.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return DelegationRun{}, false, nil
 	}

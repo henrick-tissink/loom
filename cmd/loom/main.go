@@ -38,6 +38,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "run" {
+		if err := runDelegation(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "loom:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "loom:", err)
 		os.Exit(1)
@@ -105,6 +112,109 @@ func runManifest(args []string) error {
 		fmt.Printf("no manifests found in %s\n", dir)
 	}
 	return nil
+}
+
+// runDelegation implements the `loom run` subcommand (autonomy spec §11, Slice
+// 1):
+//
+//	loom run start --auto <projectRoot> <manifestName>
+//	loom run abort <runID>
+//
+// `start --auto` creates a delegation run through the SAME create path the GUI
+// uses (delegate.Runner.Create) and flags it `auto`. The autonomous LOOP —
+// spawn/check/merge — runs inside the long-lived loom GUI process, which holds
+// the tmux/launcher stack; this command records the run and hands it off. It is
+// the seam Slice 2's console trigger drives, and it works today for `abort`.
+func runDelegation(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: loom run (start --auto <projectRoot> <manifestName> | abort <runID>)")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	switch args[0] {
+	case "abort":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: loom run abort <runID>")
+		}
+		var id int64
+		if _, err := fmt.Sscan(args[1], &id); err != nil || id <= 0 {
+			return fmt.Errorf("invalid run id %q", args[1])
+		}
+		claimed, err := st.AbortDelegationRunStateCAS(id, time.Now().Unix())
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			return fmt.Errorf("run %d is already stopped", id)
+		}
+		fmt.Printf("run %d aborted\n", id)
+		return nil
+
+	case "start":
+		if len(args) != 4 || args[1] != "--auto" {
+			return fmt.Errorf("usage: loom run start --auto <projectRoot> <manifestName>")
+		}
+		root, name := args[2], args[3]
+		targets, err := projects.New(st).LaunchTargets()
+		if err != nil {
+			return fmt.Errorf("load projects: %w", err)
+		}
+		ms, loadErrs := delegate.LoadAll(delegate.ManifestDir(root), delegate.NewResolver(targets))
+		var m delegate.Manifest
+		for _, cand := range ms {
+			if cand.Name == name {
+				m = cand
+				break
+			}
+		}
+		if m.Name == "" {
+			for _, e := range loadErrs {
+				if filepath.Base(e.Path) == name+".json" {
+					return fmt.Errorf("manifest %q did not load: %s", name, e.Err)
+				}
+			}
+			return fmt.Errorf("no valid manifest named %q under %s", name, delegate.ManifestDir(root))
+		}
+		if m.ProjectRoot != root {
+			return fmt.Errorf("manifest %q belongs to project %q, not this one", m.Name, m.Project)
+		}
+		// The SAME create path as the GUI: pin, snapshot, insert, §10.1 worktrees,
+		// CAS to running. A minimal Runner — no launcher, no rendezvous — because
+		// Create never spawns; the loop that does runs in the GUI.
+		layout := delegate.NewLayout(cfg.LoomDir)
+		checker := &delegate.Checker{}
+		w := &delegate.Worktrees{Layout: layout, Store: st, Cap: delegate.Concurrency3a}
+		r := &delegate.Runner{
+			Store: st, Layout: layout, Checker: checker, Worktrees: w,
+			Integrator: &delegate.Integrator{Store: st, Layout: layout, Checker: checker, Worktrees: w},
+		}
+		run, cerr := r.Create(m)
+		if run.ID == 0 {
+			return fmt.Errorf("run was not created: %v", cerr)
+		}
+		if err := st.SetDelegationRunMode(run.ID, string(delegate.RunModeAuto), time.Now().Unix()); err != nil {
+			return fmt.Errorf("run %d created but could not be flagged auto: %w", run.ID, err)
+		}
+		if cerr != nil {
+			// Created WITH FAULTS (§10.1 worktrees): the run is real and flagged
+			// auto, and the fault is recorded on it. Reported, not swallowed.
+			fmt.Printf("run %d (%s) started --auto, with faults: %v\n", run.ID, run.Slug, cerr)
+			return nil
+		}
+		fmt.Printf("run %d (%s) started --auto\n", run.ID, run.Slug)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown `loom run` subcommand %q (want start|abort)", args[0])
+	}
 }
 
 func run() error {

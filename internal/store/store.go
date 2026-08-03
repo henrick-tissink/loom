@@ -494,6 +494,17 @@ func (s *Store) migrate() error {
 			reviewed_at INTEGER NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_frlog_card ON flashcard_review_log(card_id, reviewed_at)`,
+		// v23: whether a delegation run is human-gated or autonomous (autonomy
+		// spec §11, Slice 1). DEFAULT 'supervised' so every existing run keeps its
+		// current behaviour — nothing drives itself until something sets 'auto'.
+		// Own slot: ALTER has no IF NOT EXISTS.
+		`ALTER TABLE delegation_runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'supervised'`,
+		// v24: the auto-runner's control state (running|paused|escalated|aborted|
+		// done). A SEPARATE axis from status: an abort stops the loop without
+		// rewriting the run's data status. DEFAULT 'running' so supervised runs —
+		// which never touch this column — read as running, which they are. Own
+		// slot: ALTER has no IF NOT EXISTS.
+		`ALTER TABLE delegation_runs ADD COLUMN run_state TEXT NOT NULL DEFAULT 'running'`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {

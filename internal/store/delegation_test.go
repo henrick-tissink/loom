@@ -21,6 +21,69 @@ func newTask(runID int64, id string) DelegationTask {
 		RepoLabel: "bankenstein", UpdatedAt: 1000}
 }
 
+// TestRunModeAndStateLifecycle pins autonomy Slice 1's two columns: a run is
+// born supervised/running; SetDelegationRunMode flags it auto; the control-state
+// CAS advances only from the expected state; and an abort stops it from any
+// non-terminal control state without touching the run's data status.
+func TestRunModeAndStateLifecycle(t *testing.T) {
+	s := open(t)
+	r := newRun(t, s)
+
+	if r.Mode != "supervised" || r.State != "running" {
+		t.Fatalf("new run mode/state = %q/%q, want supervised/running (the column DEFAULTs)", r.Mode, r.State)
+	}
+
+	if err := s.SetDelegationRunMode(r.ID, "auto", 1100); err != nil {
+		t.Fatal(err)
+	}
+
+	// A CAS from the WRONG state must not move the row.
+	claimed, err := s.AdvanceDelegationRunStateCAS(r.ID, "paused", "done", 1200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("CAS claimed from paused, but the run is running — a stale claim moved the state")
+	}
+	// The legal move succeeds.
+	claimed, err = s.AdvanceDelegationRunStateCAS(r.ID, "running", "paused", 1300)
+	if err != nil || !claimed {
+		t.Fatalf("running->paused CAS: claimed=%v err=%v", claimed, err)
+	}
+
+	got, ok, err := s.GetDelegationRun(r.ID)
+	if err != nil || !ok {
+		t.Fatalf("GetDelegationRun: ok=%v err=%v", ok, err)
+	}
+	if got.Mode != "auto" || got.State != "paused" {
+		t.Fatalf("mode/state = %q/%q, want auto/paused", got.Mode, got.State)
+	}
+	if got.Status != "planning" {
+		t.Fatalf("data status = %q, want planning — the control-state axis must not touch it", got.Status)
+	}
+
+	// Abort works from a non-terminal control state (paused) and is idempotent-
+	// refusing: a second abort reports already-stopped.
+	claimed, err = s.AbortDelegationRunStateCAS(r.ID, 1400)
+	if err != nil || !claimed {
+		t.Fatalf("first abort: claimed=%v err=%v", claimed, err)
+	}
+	claimed, err = s.AbortDelegationRunStateCAS(r.ID, 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("second abort claimed, but the run is already aborted")
+	}
+	got, _, _ = s.GetDelegationRun(r.ID)
+	if got.State != "aborted" {
+		t.Fatalf("state = %q, want aborted", got.State)
+	}
+	if got.Status != "planning" {
+		t.Fatalf("data status = %q, want planning — an abort stops the loop, it does not rewrite status", got.Status)
+	}
+}
+
 // TestInsertDelegationRunSlug pins the slug's shape and its uniqueness. The
 // slug is the worktree and branch component (§6.2), so two runs of the same
 // manifest colliding on it would put two children in one worktree — which
