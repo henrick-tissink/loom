@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -141,20 +142,64 @@ func TestAutoRunnerEscalatesOnFailedCheck(t *testing.T) {
 	}
 }
 
-// TestAutoRunnerEscalatesOnRefusedMerge: a Merge seam that errors (a refused
-// auto-merge) escalates the run rather than looping forever on the mergeable
-// task.
+// TestAutoRunnerEscalatesOnRefusedMerge: a genuine (non-transient) merge refusal
+// — a divergence a human must acknowledge — escalates the run rather than
+// looping forever on the mergeable task.
 func TestAutoRunnerEscalatesOnRefusedMerge(t *testing.T) {
 	f := newFakeRun("a")
 	f.views["a"] = &TaskView{ID: "a", State: StateMergeable}
 	ar := f.runner(t)
-	ar.Merge = func(id string) error { return context.DeadlineExceeded } // any refusal
+	ar.Merge = func(id string) error { return errors.New("scope divergence needs acknowledgement") }
 
 	if err := ar.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if f.state != RunStateEscalated {
 		t.Fatalf("state = %q, want escalated after a refused merge", f.state)
+	}
+}
+
+// TestAutoRunnerRetriesTransientMerge: a TRANSIENT merge error (the branch moved,
+// another integration in flight) is retried next tick, NOT escalated — so a
+// child pushing a fix while its task is mergeable does not permanently halt the
+// run. The merge succeeds on the second attempt and the run completes.
+func TestAutoRunnerRetriesTransientMerge(t *testing.T) {
+	f := newFakeRun("a")
+	f.views["a"] = &TaskView{ID: "a", State: StateMergeable}
+	ar := f.runner(t)
+	attempts := 0
+	ar.Merge = func(id string) error {
+		attempts++
+		if attempts == 1 {
+			return ErrBranchMoved // transient: the child pushed a commit
+		}
+		f.views[id].State = StateMerged
+		return nil
+	}
+
+	if err := ar.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if f.state != RunStateDone {
+		t.Fatalf("state = %q, want done — a transient merge error must retry, not escalate", f.state)
+	}
+	if attempts < 2 {
+		t.Fatalf("merge attempted %d times, want a retry after the transient error", attempts)
+	}
+}
+
+// TestAutoRunnerEscalatesOnPermanentSpawnFailure: a non-transient spawn failure
+// escalates the run instead of retrying forever and silently holding a cap slot.
+func TestAutoRunnerEscalatesOnPermanentSpawnFailure(t *testing.T) {
+	f := newFakeRun("a")
+	ar := f.runner(t)
+	ar.Spawn = func(id string) error { return errors.New("worktree add failed: branch already exists") }
+
+	if err := ar.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if f.state != RunStateEscalated {
+		t.Fatalf("state = %q, want escalated after a permanent spawn failure", f.state)
 	}
 }
 

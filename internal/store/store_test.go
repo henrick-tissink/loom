@@ -1086,10 +1086,10 @@ func TestMigrationHeadIsPinned(t *testing.T) {
 	// TestMigrationV10ToV18FromStaleUserVersion exercises against a real file.
 	// v19/v20 (2026-07-25-flashcards-slice1 plan) added the flashcards and
 	// flashcard_reviews tables; v21/v22 (2026-07-25-flashcards-slice2 plan)
-	// added flashcard_reviews.introduced_at and flashcard_review_log; v23/v24
-	// (2026-08-03-autonomy-auto-runner plan) added delegation_runs.mode and
-	// .run_state — both standalone ADD COLUMNs, confirmed safe to replay from
-	// every stale version by TestMigrationsReplayFromEveryStaleVersion.
+	// added flashcard_reviews.introduced_at and flashcard_review_log; v23/v24/v25
+	// (2026-08-03-autonomy-auto-runner plan) added delegation_runs.mode,
+	// .run_state and .escalation — all standalone ADD COLUMNs, confirmed safe to
+	// replay from every stale version by TestMigrationsReplayFromEveryStaleVersion.
 	const wantHead = 25
 
 	s := open(t)

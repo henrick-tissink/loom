@@ -404,8 +404,8 @@ type DelegationRunDTO struct {
 	// (running|paused|escalated|aborted|done). A supervised run reads auto=false
 	// and the frontend renders no autonomy controls for it. Escalation is the
 	// reason the loop stopped for a human — non-empty only for an escalated run,
-	// and in-memory (Slice 1), so a run escalated before a restart shows the
-	// state without the sentence.
+	// and DURABLE on the run row (migration v25), so it is present for every
+	// escalated run, including one escalated by a previous process.
 	Mode       string `json:"mode"`
 	RunState   string `json:"runState"`
 	Escalation string `json:"escalation"`

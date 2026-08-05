@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -46,10 +47,11 @@ type AutoRunner struct {
 	Project func() ([]TaskView, error)
 
 	// Spawn launches a ready/approved task's child; Merge full-auto-merges a
-	// mergeable task. A Spawn error is transient (logged, retried next tick); a
-	// Merge error is a refused auto-merge (divergence/drift/conflict) that
-	// escalates the run. A benign no-op (cap race, task already moved) is a nil
-	// error from either.
+	// mergeable task. Each returns the raw error; execute() classifies it. A
+	// TRANSIENT error (isTransient — a lost race, another integration in flight,
+	// the branch moved under a certify, a cancelled context) is logged and
+	// retried next tick; anything else is genuine trouble (a real spawn failure,
+	// a divergence/drift/conflict a human must acknowledge) and escalates the run.
 	Spawn func(taskID string) error
 	Merge func(taskID string) error
 
@@ -111,11 +113,13 @@ func (ar *AutoRunner) Run(ctx context.Context) error {
 }
 
 // execute runs one tick's actions in order and reports whether the run reached a
-// terminal control state (Done/Escalate). A Spawn error is transient — logged,
-// and the task is retried next tick. A Merge error is NOT: a refused auto-merge
-// means a human must acknowledge a divergence/drift/conflict, so it escalates the
-// run then and there, with the merge's own reason (the seam returns nil for a
-// benign race, so any error it does return is a genuine refusal).
+// terminal control state (Done/Escalate). Spawn and Merge are classified the same
+// way: a TRANSIENT error is logged and the task retried next tick; a
+// non-transient one is trouble a human must see, so it escalates the run with the
+// action's own reason. This symmetry is the fix for two review findings — a
+// permanent spawn failure must NOT spin forever silently, and a merge that
+// refuses only because the branch moved or another integration is in flight must
+// NOT permanently halt the run.
 func (ar *AutoRunner) execute(ctx context.Context, acts []AutoAction) (stop bool) {
 	for _, a := range acts {
 		if err := ctx.Err(); err != nil {
@@ -130,16 +134,41 @@ func (ar *AutoRunner) execute(ctx context.Context, acts []AutoAction) (stop bool
 			return true
 		case SpawnTask:
 			if err := ar.Spawn(act.ID); err != nil {
-				ar.log("spawn " + act.ID + ": " + err.Error())
+				if isTransient(err) {
+					ar.log("spawn " + act.ID + " (transient, will retry): " + err.Error())
+				} else {
+					ar.finish(RunStateEscalated, "spawn failed for "+act.ID+": "+err.Error())
+					return true
+				}
 			}
 		case MergeTask:
 			if err := ar.Merge(act.ID); err != nil {
-				ar.finish(RunStateEscalated, "auto-merge refused for "+act.ID+": "+err.Error())
-				return true
+				if isTransient(err) {
+					ar.log("merge " + act.ID + " (transient, will retry): " + err.Error())
+				} else {
+					ar.finish(RunStateEscalated, "auto-merge refused for "+act.ID+": "+err.Error())
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+// isTransient reports whether an executor error is a routine, self-clearing
+// condition the loop should retry next tick rather than escalate on. Each is a
+// state the codebase already documents as "not a failure — next tick": a lost
+// CAS race (the row moved), another integration holding the run-wide lock, the
+// task branch moving past a certified commit (the child pushed a fix and Tick
+// will re-check it), or a cancelled/expired context (an abort or shutdown, which
+// the loop's own state check handles). Everything else — a real spawn failure, a
+// divergence/drift/conflict a human must acknowledge — is genuine trouble.
+func isTransient(err error) bool {
+	return errors.Is(err, ErrTaskMovedElsewhere) ||
+		errors.Is(err, ErrIntegrationBusy) ||
+		errors.Is(err, ErrBranchMoved) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
 }
 
 // finish records an escalation reason (if any) and CASes the run to its terminal

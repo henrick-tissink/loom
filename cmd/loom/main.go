@@ -163,9 +163,18 @@ func runDelegation(args []string) error {
 			return fmt.Errorf("usage: loom run start --auto <projectRoot> <manifestName>")
 		}
 		root, name := args[2], args[3]
-		targets, err := projects.New(st).LaunchTargets()
+		svc := projects.New(st)
+		targets, err := svc.LaunchTargets()
 		if err != nil {
 			return fmt.Errorf("load projects: %w", err)
+		}
+		// The §3/§14 hidden gate, the same one the GUI's Start-run applies: a run
+		// creates worktrees and a child window titled with the project's repo, so
+		// a hidden project must refuse new Loom-initiated work — at creation, here,
+		// not just downstream at spawn. Wired into the Runner below via Hidden.
+		pres, perr := svc.Resolver()
+		if perr != nil {
+			return fmt.Errorf("resolve project visibility: %w", perr)
 		}
 		ms, loadErrs := delegate.LoadAll(delegate.ManifestDir(root), delegate.NewResolver(targets))
 		var m delegate.Manifest
@@ -195,6 +204,15 @@ func runDelegation(args []string) error {
 		r := &delegate.Runner{
 			Store: st, Layout: layout, Checker: checker, Worktrees: w,
 			Integrator: &delegate.Integrator{Store: st, Layout: layout, Checker: checker, Worktrees: w},
+			// Match the GUI: an unknown or not-visible project is hidden, so Create
+			// refuses it. Without this the CLI is a second create path that skips a
+			// gate the GUI enforces.
+			Hidden: func(pr string) bool {
+				if _, ok := pres.Project(pr); !ok {
+					return true
+				}
+				return !pres.ProjectVisible(pr)
+			},
 		}
 		run, cerr := r.Create(m)
 		if run.ID == 0 {

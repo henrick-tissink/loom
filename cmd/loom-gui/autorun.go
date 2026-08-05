@@ -143,6 +143,11 @@ func (a *App) startAutoRunner(runID int64) {
 	}
 
 	go func() {
+		// cancel on EVERY exit — not just abort — so the child context is released
+		// from the long-lived app context whether the loop is aborted or finishes
+		// on its own (Done/Escalate). It stays in h.cancel for stopAutoRunner too;
+		// cancel is idempotent.
+		defer cancel()
 		defer close(h.done)
 		_ = ar.Run(ctx)
 		a.autoMu.Lock()
@@ -265,8 +270,15 @@ func (a *App) childDone(sessionName string) bool {
 		return false // not spawned: there is no child yet
 	}
 	row, ok, err := a.st.Get(sessionName)
-	if err != nil || !ok {
-		return true // gone = done
+	if err != nil {
+		// A transient read error is NOT evidence the child stopped. Reporting
+		// "done" here can flip a still-working task into the escalate branch (a
+		// red-checked task whose child is mid-fix), so we conservatively report
+		// "still working" and let the next tick read again.
+		return false
+	}
+	if !ok {
+		return true // the session row is gone = the child ended = done
 	}
 	return childDoneRow(row)
 }
@@ -292,16 +304,10 @@ func (a *App) autoSpawn(ctx context.Context, runID int64, taskID string) error {
 	if err != nil {
 		return err
 	}
-	if err := r.Approve(ctx, runID, taskID); err != nil {
-		// The task moved out from under us (a concurrent abandon, the cap
-		// backstop, or a stale ready-set) — not this tick's problem; the next
-		// projection sees the real state.
-		if errors.Is(err, delegate.ErrTaskMovedElsewhere) {
-			return nil
-		}
-		return err
-	}
-	return nil
+	// The raw error is returned; the loop's execute() classifies it. A lost race
+	// (ErrTaskMovedElsewhere) is transient there and retried; a real spawn
+	// failure escalates rather than spinning.
+	return r.Approve(ctx, runID, taskID)
 }
 
 // autoMerge is the mergeable -> merged executor: the one step Tick leaves to
@@ -316,11 +322,9 @@ func (a *App) autoMerge(ctx context.Context, runID int64, taskID string) error {
 	if err != nil {
 		return err
 	}
-	if _, merr := r.Merge(ctx, runID, taskID, delegate.MergeAck{}, false); merr != nil {
-		if errors.Is(merr, delegate.ErrTaskMovedElsewhere) {
-			return nil
-		}
-		return merr
-	}
-	return nil
+	// The raw error is returned for the loop to classify: a branch that moved
+	// (the child pushed a fix), another integration in flight, or a lost race are
+	// transient and retried; a genuine divergence/drift/conflict escalates.
+	_, merr := r.Merge(ctx, runID, taskID, delegate.MergeAck{}, false)
+	return merr
 }

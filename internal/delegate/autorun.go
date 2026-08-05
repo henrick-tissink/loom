@@ -170,6 +170,15 @@ func NextActions(tasks []TaskView, cap int) []AutoAction {
 		if t.State == StateRunning && t.ChildIdle && checkIsRed(t.CheckStatus) && t.CommittedAt <= t.CheckedAt {
 			return []AutoAction{Escalate{Reason: fmt.Sprintf("check failed for %s (%s) and its child is idle with no new work", t.ID, t.CheckStatus)}}
 		}
+		// A `failed` task is a state neither NextActions nor Tick advances, so a
+		// task that ever reaches it must escalate rather than wedge the loop. No
+		// autonomous path lands a task in `failed` today (a red check goes back to
+		// `running`), but TaskState.Terminal() counts `failed` as terminal while
+		// this decision does not, and that divergence is a trap for any future
+		// path that does set it — escalating surfaces it to a human instead.
+		if t.State == StateFailed {
+			return []AutoAction{Escalate{Reason: "task " + t.ID + " is in a failed state that needs a human"}}
+		}
 	}
 
 	var acts []AutoAction
