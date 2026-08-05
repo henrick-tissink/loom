@@ -505,6 +505,12 @@ func (s *Store) migrate() error {
 		// which never touch this column — read as running, which they are. Own
 		// slot: ALTER has no IF NOT EXISTS.
 		`ALTER TABLE delegation_runs ADD COLUMN run_state TEXT NOT NULL DEFAULT 'running'`,
+		// v25: the reason the auto-runner escalated (autonomy spec §11). Durable
+		// so it survives the loop goroutine exiting and a process restart — the
+		// control room reads it on the next poll instead of the microsecond the
+		// escalation fired. DEFAULT '' = not escalated. Own slot: ALTER has no
+		// IF NOT EXISTS.
+		`ALTER TABLE delegation_runs ADD COLUMN escalation TEXT NOT NULL DEFAULT ''`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {

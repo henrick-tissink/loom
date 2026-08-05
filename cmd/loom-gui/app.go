@@ -101,8 +101,8 @@ type App struct {
 	genCancel bool
 
 	// autoRunners holds one live auto-runner per autonomous delegation run
-	// (autonomy spec §11). Guarded because StartAutonomousRun (a bound method),
-	// AbortRun and the recovery sweep all touch it. See autorun.go.
+	// (autonomy spec §11). Guarded because StartAutonomousRun, AbortRun and the
+	// startup SweepAutoRuns re-adoption all touch it. See autorun.go.
 	autoMu      sync.Mutex
 	autoRunners map[int64]*autoRunHandle
 }
@@ -121,8 +121,16 @@ func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *s
 	return a
 }
 
-// startup is called by Wails with the app context once the window is ready.
-func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+// startup is called by Wails with the app context once the window is ready. It
+// re-adopts any autonomous runs a previous process left live (their loop
+// goroutines are in-memory and died with that process), so an in-flight auto run
+// resumes rather than stalling silently at run_state='running'.
+func (a *App) startup(ctx context.Context) {
+	a.ctx = ctx
+	if n := a.SweepAutoRuns(); n > 0 {
+		a.logAuto(0, fmt.Sprintf("re-adopted %d autonomous run(s) on startup", n))
+	}
+}
 
 // ListSessions polls the engine and returns the live sessions as DTOs.
 // Any error (or panic from a half-built engine) degrades to an empty list.

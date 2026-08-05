@@ -621,9 +621,10 @@ func (a *App) delegationRunDTO(r store.DelegationRun) DelegationRunDTO {
 		ID: r.ID, Slug: r.Slug, Name: r.Name, Status: r.Status,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 		Mode: r.Mode, RunState: r.State,
-		// The reason is read from the live loop, not the row (Slice 1): only a
-		// currently-escalated run with its goroutine still resident has it.
-		Escalation: a.escalationReason(r.ID),
+		// Durable on the run row, so it is present for every escalated run — even
+		// one escalated by a previous process — not just while a loop goroutine is
+		// resident.
+		Escalation: r.Escalation,
 		Tasks:      []DelegationTaskDTO{},
 	}
 	dto.RedKind, dto.BaselineFaults = runRedKind(r)

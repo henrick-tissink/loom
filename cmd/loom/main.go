@@ -203,13 +203,22 @@ func runDelegation(args []string) error {
 		if err := st.SetDelegationRunMode(run.ID, string(delegate.RunModeAuto), time.Now().Unix()); err != nil {
 			return fmt.Errorf("run %d created but could not be flagged auto: %w", run.ID, err)
 		}
+		// Run the first Tick so the run's ready set is promoted (Create inserts
+		// every task `pending`; Tick is the one place that decides readiness). A
+		// zombie all-`pending` run would otherwise sit until the GUI adopted it.
+		// The GUI's startup SweepAutoRuns is what then DRIVES it — this command
+		// only records and primes the run (driving it from the CLI is Slice 2).
+		if _, terr := r.Tick(context.Background(), run.ID); terr != nil {
+			fmt.Printf("run %d (%s) started --auto; first tick reported: %v\n", run.ID, run.Slug, terr)
+			return nil
+		}
 		if cerr != nil {
 			// Created WITH FAULTS (§10.1 worktrees): the run is real and flagged
 			// auto, and the fault is recorded on it. Reported, not swallowed.
 			fmt.Printf("run %d (%s) started --auto, with faults: %v\n", run.ID, run.Slug, cerr)
 			return nil
 		}
-		fmt.Printf("run %d (%s) started --auto\n", run.ID, run.Slug)
+		fmt.Printf("run %d (%s) started --auto — the loom GUI drives it on next launch\n", run.ID, run.Slug)
 		return nil
 
 	default:

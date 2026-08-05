@@ -9,18 +9,17 @@ import (
 // body around it — the one thing in autonomy that touches the clock, the store,
 // tmux and git. Every one of those is an injected seam, so the loop itself is
 // tested with fakes (autorun_loop_test.go drives a whole run to completion) and
-// the GUI wires the real implementations (Tasks 3-5).
+// the GUI wires the real implementations.
 //
 // One AutoRunner runs per autonomous run, in its own goroutine. Each iteration:
-// read the control state (stop if aborted/terminal) → Tick (the existing state
-// engine: block detection, ready-set promotion) → project the live world into
-// []TaskView → NextActions → execute → sleep. Nothing here spawns or checks
-// directly; it calls the executor seams, which reuse loom's existing primitives.
+// read the control state (stop if aborted/terminal) → Tick (which itself checks,
+// integrates and promotes) → project the live world into []TaskView →
+// NextActions → execute → sleep. The only executors are Spawn and Merge — the
+// two steps Tick leaves undone — plus the loop's own escalate/done handling.
 
 // AutoRunner drives one autonomous run. The zero value is not usable — every
 // seam below must be set (the GUI's builder does that; tests set fakes).
 type AutoRunner struct {
-	RunID    int64
 	Cap      int
 	Interval time.Duration // between ticks; tests set it tiny
 
@@ -37,21 +36,22 @@ type AutoRunner struct {
 	RecordEscalation func(reason string) error
 
 	// Tick runs the existing scheduler pass (delegate.Runner.Tick): block
-	// detection, park re-proposals, pending→ready promotion. Its error is
-	// logged, not fatal — one bad tick must not kill an autonomous run.
+	// detection, park re-proposals, pending→ready promotion, CHECKS, and
+	// INTEGRATION. Its error is logged, not fatal — one bad tick must not kill
+	// an autonomous run.
 	Tick func(ctx context.Context) error
-	// Project builds the current []TaskView from the task rows, the status
-	// engine (child-idle) and git (committed-since). The real projection is the
-	// genuinely new signal Task 2's demo validates first.
+	// Project builds the current []TaskView from the task rows, the persisted
+	// session status (child-idle), git (committed-since) and the recorded check
+	// verdict.
 	Project func() ([]TaskView, error)
 
-	// The executor seams (Tasks 3-5). Each acts on ONE task and returns an
-	// error only for a genuine failure to ACT; a no-op (cap race, already
-	// claimed) is a nil error. A returned error is logged and the task is left
-	// for the next tick — it does not stop the run.
-	Spawn     func(taskID string) error
-	Check     func(taskID string) error
-	Integrate func(taskID string) error
+	// Spawn launches a ready/approved task's child; Merge full-auto-merges a
+	// mergeable task. A Spawn error is transient (logged, retried next tick); a
+	// Merge error is a refused auto-merge (divergence/drift/conflict) that
+	// escalates the run. A benign no-op (cap race, task already moved) is a nil
+	// error from either.
+	Spawn func(taskID string) error
+	Merge func(taskID string) error
 
 	// Sleep waits between iterations, cancellable. Injected so tests neither
 	// wall-clock-wait nor need a real timer. Defaults to a ctx-aware sleep.
@@ -111,10 +111,11 @@ func (ar *AutoRunner) Run(ctx context.Context) error {
 }
 
 // execute runs one tick's actions in order and reports whether the run reached a
-// terminal control state (Done/Escalate). A single action's error escalates
-// nothing on its own — it is logged and the task waits for the next tick, which
-// is where NextActions' own escalation ceiling (repeated lapses, deadlock) fires
-// instead.
+// terminal control state (Done/Escalate). A Spawn error is transient — logged,
+// and the task is retried next tick. A Merge error is NOT: a refused auto-merge
+// means a human must acknowledge a divergence/drift/conflict, so it escalates the
+// run then and there, with the merge's own reason (the seam returns nil for a
+// benign race, so any error it does return is a genuine refusal).
 func (ar *AutoRunner) execute(ctx context.Context, acts []AutoAction) (stop bool) {
 	for _, a := range acts {
 		if err := ctx.Err(); err != nil {
@@ -131,13 +132,10 @@ func (ar *AutoRunner) execute(ctx context.Context, acts []AutoAction) (stop bool
 			if err := ar.Spawn(act.ID); err != nil {
 				ar.log("spawn " + act.ID + ": " + err.Error())
 			}
-		case CheckTask:
-			if err := ar.Check(act.ID); err != nil {
-				ar.log("check " + act.ID + ": " + err.Error())
-			}
-		case IntegrateTask:
-			if err := ar.Integrate(act.ID); err != nil {
-				ar.log("integrate " + act.ID + ": " + err.Error())
+		case MergeTask:
+			if err := ar.Merge(act.ID); err != nil {
+				ar.finish(RunStateEscalated, "auto-merge refused for "+act.ID+": "+err.Error())
+				return true
 			}
 		}
 	}

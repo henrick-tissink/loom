@@ -8,28 +8,33 @@ import (
 	"github.com/henricktissink/loom/internal/store"
 )
 
-// TestChildDone pins the child-done signal: a session actively Running is not
-// done; idle/needs-you/ended are done; an unspawned task (no session) is not.
-func TestChildDone(t *testing.T) {
-	snap := status.Snapshot{Live: []status.Row{
-		{SessionRow: store.SessionRow{Name: "working"}, Status: status.Running},
-		{SessionRow: store.SessionRow{Name: "waiting"}, Status: status.NeedsYou},
-		{SessionRow: store.SessionRow{Name: "resting"}, Status: status.Idle},
-	}}
+// TestChildDoneRow pins the child-done predicate over a persisted session row: a
+// live session actively Running is not done; idle/needs-you and an ended session
+// are done.
+func TestChildDoneRow(t *testing.T) {
 	cases := []struct {
 		name string
+		row  store.SessionRow
 		want bool
 	}{
-		{"working", false}, // still working
-		{"waiting", true},  // needs you = stopped working
-		{"resting", true},  // idle = stopped working
-		{"ended", true},    // not live = ended
-		{"", false},        // never spawned: no child yet
+		{"running", store.SessionRow{EndedAt: -1, LastStatus: string(status.Running)}, false},
+		{"needs-you", store.SessionRow{EndedAt: -1, LastStatus: string(status.NeedsYou)}, true},
+		{"idle", store.SessionRow{EndedAt: -1, LastStatus: string(status.Idle)}, true},
+		{"ended", store.SessionRow{EndedAt: 2000, LastStatus: string(status.Running)}, true},
 	}
 	for _, c := range cases {
-		if got := childDone(snap, c.name); got != c.want {
-			t.Errorf("childDone(%q) = %v, want %v", c.name, got, c.want)
+		if got := childDoneRow(c.row); got != c.want {
+			t.Errorf("childDoneRow(%s) = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestChildDoneUnspawned: a task with no session name has no child yet, so it is
+// not "done".
+func TestChildDoneUnspawned(t *testing.T) {
+	a := newTestApp(t)
+	if a.childDone("") {
+		t.Fatal("an unspawned task must not read as child-done")
 	}
 }
 

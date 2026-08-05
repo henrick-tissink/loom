@@ -58,9 +58,16 @@ type DelegationRun struct {
 	// running|paused|escalated|aborted|done. Supervised runs never leave
 	// 'running'; only the auto-runner moves this. Distinct from Status so an
 	// abort stops the loop without rewriting the run's data status.
-	State     string
-	CreatedAt int64
-	UpdatedAt int64
+	State string
+	// Escalation is WHY the auto-runner stopped for a human (migration v25):
+	// the reason recorded when run_state moved to 'escalated'. Durable — not
+	// in-memory — so it survives the loop goroutine exiting and a process
+	// restart, and so the control room can name the reason on the next poll
+	// rather than the microsecond the escalation happened. Empty for a run that
+	// has not escalated.
+	Escalation string
+	CreatedAt  int64
+	UpdatedAt  int64
 }
 
 // DelegationTask is one row of `delegation_tasks` (migration v12): one unit of
@@ -163,7 +170,7 @@ type DelegationArtifact struct {
 }
 
 const (
-	drunCols  = "id, slug, name, project_root, manifest_json, base_shas, integration, status, mode, run_state, created_at, updated_at"
+	drunCols  = "id, slug, name, project_root, manifest_json, base_shas, integration, status, mode, run_state, escalation, created_at, updated_at"
 	dtaskCols = "run_id, task_id, state, session_name, repo_label, worktree, branch, base_sha, " +
 		"base_producers, check_status, check_exit, check_out, check_at, branch_head, " +
 		"block_json, pending_seed, divergence, spawn_snapshot, needs_snapshot, " +
@@ -318,6 +325,27 @@ func (s *Store) AdvanceDelegationRunStateCAS(id int64, expected, next string, no
 	return s.casExec(
 		"UPDATE delegation_runs SET run_state=?, updated_at=? WHERE id=? AND run_state=?",
 		next, now, id, expected)
+}
+
+// SetDelegationRunEscalation records WHY the auto-runner escalated (migration
+// v25), written just before run_state moves to 'escalated' so the reason is
+// durable before the state that points a human at it. Ungated: the loop that
+// owns a run is its single writer, and re-recording a newer reason over an
+// older one is correct (the latest stop is the one a human acts on).
+func (s *Store) SetDelegationRunEscalation(id int64, reason string, now int64) error {
+	return s.execTask(
+		"UPDATE delegation_runs SET escalation=?, updated_at=? WHERE id=?", reason, now, id)
+}
+
+// ResumableAutoRuns returns every autonomous run whose control state is still
+// live (running or paused) — the set a GUI restart must re-adopt, since the
+// auto-runner goroutines are in-memory and die with the process. Without this
+// an in-flight auto run would sit at run_state='running' with nothing driving
+// it. Newest first, matching the other run listings.
+func (s *Store) ResumableAutoRuns() ([]DelegationRun, error) {
+	return s.queryDelegationRuns("SELECT " + drunCols +
+		" FROM delegation_runs WHERE mode='auto' AND run_state IN ('running','paused')" +
+		" ORDER BY created_at DESC, id DESC")
 }
 
 // AbortDelegationRunStateCAS moves the run's control state to 'aborted' from any
@@ -999,7 +1027,7 @@ func (s *Store) queryDelegationRuns(q string, args ...any) ([]DelegationRun, err
 func scanDelegationRun(row rowScanner) (DelegationRun, bool, error) {
 	var r DelegationRun
 	err := row.Scan(&r.ID, &r.Slug, &r.Name, &r.ProjectRoot, &r.ManifestJSON,
-		&r.BaseSHAs, &r.Integration, &r.Status, &r.Mode, &r.State, &r.CreatedAt, &r.UpdatedAt)
+		&r.BaseSHAs, &r.Integration, &r.Status, &r.Mode, &r.State, &r.Escalation, &r.CreatedAt, &r.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return DelegationRun{}, false, nil
 	}

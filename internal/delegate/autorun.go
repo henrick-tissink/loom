@@ -26,8 +26,27 @@ func WorktreeHeadTime(dir string) int64 {
 // This is the brain of the auto-runner (spec §11): given a read of every task in
 // an autonomous run plus the concurrency cap, decide what to do THIS tick. It is
 // a pure function so the entire autonomy decision is testable without a live
-// tmux, a store, or a clock — the loop around it (autorun_loop, a later task)
-// only executes what this returns.
+// tmux, a store, or a clock — the loop around it (autorun_loop) only executes
+// what this returns.
+//
+// DIVISION OF LABOUR — the load-bearing fact this whole file is built on. The
+// loop calls Runner.Tick BEFORE consulting NextActions every iteration, and Tick
+// ALREADY drives most of the pipeline itself: it promotes pending→ready, CHECKS
+// running tasks whose branch head moved (green→verified, red→back to running),
+// re-checks blocked tasks, INTEGRATES verified tasks (verified→mergeable), and
+// resumes parked tasks. So the auto-runner does NOT check or integrate — Tick
+// does. It adds only the three things Tick never does:
+//
+//   1. SPAWN ready/approved tasks (Tick promotes to `ready` but never launches);
+//   2. MERGE mergeable tasks (Tick integrates to `mergeable` but never merges —
+//      that is §5.2's human gate, which the auto-runner performs on green);
+//   3. ESCALATE when the run is genuinely stuck (a red check on an idle child
+//      that will not fix itself, or an all-blocked deadlock).
+//
+// An earlier revision had NextActions also emit Check and Integrate actions; it
+// was wrong because Tick front-runs both, so those actions never fired on their
+// intended states and a `mergeable` task (Tick's own output) was misread as a
+// refused merge. This division is the fix.
 
 // RunMode is delegation_runs.mode: whether a run is human-gated or autonomous.
 // It is a distinct axis from the run's data status (planning|running|…) and
@@ -60,14 +79,13 @@ const (
 // AutoAction is one thing the auto-runner does this tick.
 type AutoAction interface{ isAutoAction() }
 
-// SpawnTask launches a ready task's child (reusing the ApproveTask spawn core).
+// SpawnTask launches a ready/approved task's child (via Runner.Approve, which
+// computes the §9.2 producer-merged base). Tick never spawns.
 type SpawnTask struct{ ID string }
 
-// CheckTask runs a done child's check.
-type CheckTask struct{ ID string }
-
-// IntegrateTask integrates + full-auto-merges a verified task on green gates.
-type IntegrateTask struct{ ID string }
+// MergeTask full-auto-merges a `mergeable` task — the one step Tick leaves to
+// §5.2's gate. The executor merges only on clean gates; a refusal escalates.
+type MergeTask struct{ ID string }
 
 // Escalate pauses the run and pulls in the human, with a reason.
 type Escalate struct{ Reason string }
@@ -75,37 +93,42 @@ type Escalate struct{ Reason string }
 // Done marks the run complete (every task terminal).
 type Done struct{}
 
-func (SpawnTask) isAutoAction()     {}
-func (CheckTask) isAutoAction()     {}
-func (IntegrateTask) isAutoAction() {}
-func (Escalate) isAutoAction()      {}
-func (Done) isAutoAction()          {}
+func (SpawnTask) isAutoAction() {}
+func (MergeTask) isAutoAction() {}
+func (Escalate) isAutoAction()  {}
+func (Done) isAutoAction()      {}
 
 // TaskView is the auto-runner's projection of one task: its row state plus the
-// two facts only the live world knows — whether its child has finished working
-// (from the status engine) and whether it has committed since it was last
-// checked. Pure input to NextActions.
+// live facts NextActions needs — whether the child has stopped working, when it
+// last committed, when it was last checked, and that check's verdict. Pure input
+// to NextActions; the App builds it from the row + the persisted session status
+// + git.
 type TaskView struct {
 	ID          string
 	State       TaskState
-	ChildIdle   bool  // child session is idle/ended (done working) per status.Snapshot
-	CommittedAt int64 // last commit on the task's branch; 0 = none yet
-	CheckedAt   int64 // last time its check ran; 0 = never
-	Lapses      int   // failed-check count
+	ChildIdle   bool   // child session is idle/ended (stopped working)
+	CommittedAt int64  // committer time of the branch HEAD; 0 = nothing committed
+	CheckedAt   int64  // when the check last ran (row.CheckAt); 0 = never
+	CheckStatus string // that check's verdict (row.CheckStatus): ""|pass|fail|unpublished|infra-error
 }
 
-// MaxCheckRetries is how many times a task's check may fail (each followed by a
-// nudge to the child to fix it) before the run escalates to the human.
-const MaxCheckRetries = 3
+// checkIsRed reports whether a check has run and did not pass. A pass moves a
+// task to `verified` (so a `running` task never carries `pass`), and "" means no
+// check has run yet — neither is a reason to escalate.
+func checkIsRed(status string) bool {
+	return status != "" && status != string(CheckPass)
+}
 
-// countsAgainstCap reports whether a state occupies a worktree/child, i.e. holds
-// a concurrency slot. Explicit (not derived from HoldsAChild) so the cap policy
-// is stated here and this function stays self-contained.
+// countsAgainstCap reports whether a state holds a concurrency slot — a live or
+// imminent child. It deliberately MATCHES the set the store's ClaimTaskSpawnCAS
+// counts (spawning/running/blocked/checking) plus `approved` (a claimed,
+// about-to-spawn slot), so NextActions never offers a spawn the store's own cap
+// would refuse. Post-child states (verified/integrating/mergeable) do NOT count:
+// their child has finished and they are on the merge path, so they must not
+// block a fresh task from spawning.
 func countsAgainstCap(s TaskState) bool {
 	switch s {
-	case StateApproved, StateSpawning, StateRunning, StateBlocked, StateChecking, StateFailed, StateIntegrating, StateMergeable:
-		// StateFailed counts: a failed task is mid-retry and still holds its
-		// worktree/child, so it occupies a slot until it verifies or escalates.
+	case StateApproved, StateSpawning, StateRunning, StateBlocked, StateChecking:
 		return true
 	}
 	return false
@@ -114,10 +137,10 @@ func countsAgainstCap(s TaskState) bool {
 func isTerminal(s TaskState) bool { return s == StateMerged || s == StateAbandoned }
 
 // NextActions decides the tick's work, deterministically (task-id order), purely
-// from the task views and the cap. Precedence: a lapsed task escalates and stops
-// the tick; otherwise integrate verified, check done children, and spawn ready
-// up to the remaining cap; a fully-terminal run is Done; an all-blocked run
-// deadlocks.
+// from the task views and the cap. Precedence: a fully-terminal run is Done; a
+// red-checked idle child that will not fix itself escalates and stops the tick;
+// otherwise merge every mergeable task and spawn ready/approved up to the
+// remaining cap; an all-blocked remainder is a deadlock.
 func NextActions(tasks []TaskView, cap int) []AutoAction {
 	sorted := append([]TaskView(nil), tasks...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
@@ -136,51 +159,35 @@ func NextActions(tasks []TaskView, cap int) []AutoAction {
 		}
 	}
 
-	// Escalation on repeated check failure takes precedence and stops the tick.
+	// Escalate a genuinely failed check. Tick lands a red check back in `running`
+	// (never a `failed` state) and re-runs it only when the branch head moves; so
+	// a `running` task whose check is red, whose child has STOPPED, and which has
+	// not committed anything since that check, will never turn green on its own —
+	// a human is needed. The idle guard is what distinguishes this from a child
+	// still working on a fix (which will commit and trigger Tick's re-check).
+	// This stops the tick: an escalation pauses the whole run.
 	for _, t := range sorted {
-		if t.Lapses >= MaxCheckRetries {
-			return []AutoAction{Escalate{Reason: fmt.Sprintf("check failed %dx: %s", t.Lapses, t.ID)}}
-		}
-	}
-
-	// A task left `mergeable` means full-auto-merge was ATTEMPTED and refused —
-	// a scope divergence, out-of-worktree drift, or a merge conflict. Spec §11
-	// is explicit that none of those merge automatically; they escalate. (The
-	// auto-runner's integrate executor merges immediately on a green
-	// integration, so a mergeable task surviving to the next tick is a refusal,
-	// never a merge that simply has not been tried.)
-	for _, t := range sorted {
-		if t.State == StateMergeable {
-			return []AutoAction{Escalate{Reason: "auto-merge refused (divergence/drift/conflict): " + t.ID}}
+		if t.State == StateRunning && t.ChildIdle && checkIsRed(t.CheckStatus) && t.CommittedAt <= t.CheckedAt {
+			return []AutoAction{Escalate{Reason: fmt.Sprintf("check failed for %s (%s) and its child is idle with no new work", t.ID, t.CheckStatus)}}
 		}
 	}
 
 	var acts []AutoAction
 
-	// Integrate every verified task (full-auto-merge happens in the executor,
-	// only on green gates).
+	// Merge every `mergeable` task. Tick integrated it to `mergeable` (all §10.2
+	// gates green) but never merges — that is §5.2's human gate, which the
+	// auto-runner performs. The executor merges only when nothing needs a human
+	// acknowledgement (divergence/drift/conflict); a refusal escalates there.
 	for _, t := range sorted {
-		if t.State == StateVerified {
-			acts = append(acts, IntegrateTask{ID: t.ID})
+		if t.State == StateMergeable {
+			acts = append(acts, MergeTask{ID: t.ID})
 		}
 	}
 
-	// Check a task, two ways: the FIRST check when a running task's child has
-	// finished working and committed since its last check; and a RETRY of a
-	// failed task that has not yet hit the ceiling (the escalation above already
-	// caught the ones that have). The retry does not require a new commit — a
-	// nudged child may fix in place, and re-running the check is also how a flake
-	// clears.
-	for _, t := range sorted {
-		switch {
-		case t.State == StateRunning && t.ChildIdle && t.CommittedAt > t.CheckedAt:
-			acts = append(acts, CheckTask{ID: t.ID})
-		case t.State == StateFailed && t.Lapses < MaxCheckRetries:
-			acts = append(acts, CheckTask{ID: t.ID})
-		}
-	}
-
-	// Spawn ready tasks up to the remaining concurrency slots.
+	// Spawn ready and approved tasks up to the remaining concurrency slots. Both
+	// go through the same executor (Runner.Approve, which is idempotent for an
+	// already-`approved` task from a prior tick's partial spawn), so `approved`
+	// is not a stranded state.
 	live := 0
 	for _, t := range sorted {
 		if countsAgainstCap(t.State) {
@@ -192,38 +199,28 @@ func NextActions(tasks []TaskView, cap int) []AutoAction {
 		if remaining <= 0 {
 			break
 		}
-		if t.State == StateReady {
+		if t.State == StateReady || t.State == StateApproved {
 			acts = append(acts, SpawnTask{ID: t.ID})
 			remaining--
 		}
 	}
 
-	// An `approved` task had its spawn CLAIMED but not completed — a prior tick's
-	// partial spawn, or a race with a concurrent human approve. It already holds
-	// its slot (countsAgainstCap includes approved), so retry its spawn
-	// unconditionally; leaving it approved would strand the run with a slot
-	// consumed and no child.
-	for _, t := range sorted {
-		if t.State == StateApproved {
-			acts = append(acts, SpawnTask{ID: t.ID})
-		}
-	}
-
-	// Deadlock: nothing to do, nothing live, nothing ready, yet something is
-	// blocked — the run cannot make progress on its own.
+	// Deadlock: no action this tick and EVERY non-terminal task is blocked. A
+	// task in a transient state Tick advances (verified/integrating/checking/…)
+	// is not a deadlock — Tick moves it next iteration — so the guard is the
+	// strict "nothing left but blocked tasks", not "some task is blocked".
 	if len(acts) == 0 {
-		blocked, ready, liveNow := false, false, false
+		anyNonTerminal, allBlocked := false, true
 		for _, t := range sorted {
-			switch {
-			case t.State == StateBlocked:
-				blocked = true
-			case t.State == StateReady:
-				ready = true
-			case countsAgainstCap(t.State):
-				liveNow = true
+			if isTerminal(t.State) {
+				continue
+			}
+			anyNonTerminal = true
+			if t.State != StateBlocked {
+				allBlocked = false
 			}
 		}
-		if blocked && !ready && !liveNow {
+		if anyNonTerminal && allBlocked {
 			return []AutoAction{Escalate{Reason: "deadlock: all remaining tasks are blocked"}}
 		}
 	}

@@ -84,6 +84,51 @@ func TestRunModeAndStateLifecycle(t *testing.T) {
 	}
 }
 
+// TestEscalationIsDurableAndResumeQuery covers autonomy Slice 1's rework fixes:
+// the escalation reason is a durable column (survives the loop exiting), and
+// ResumableAutoRuns returns exactly the auto runs a restart must re-adopt.
+func TestEscalationIsDurableAndResumeQuery(t *testing.T) {
+	s := open(t)
+
+	// A supervised run and two auto runs in different control states.
+	sup := newRun(t, s)
+	autoLive, _ := s.InsertDelegationRun("atlas", "/w/a", `{"manifest":1,"name":"atlas"}`, "{}", 1000)
+	autoDone, _ := s.InsertDelegationRun("atlas", "/w/b", `{"manifest":1,"name":"atlas"}`, "{}", 1001)
+	for _, id := range []int64{autoLive.ID, autoDone.ID} {
+		if err := s.SetDelegationRunMode(id, "auto", 1100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// autoDone is finished; only autoLive is resumable.
+	if _, err := s.AdvanceDelegationRunStateCAS(autoDone.ID, "running", "done", 1200); err != nil {
+		t.Fatal(err)
+	}
+
+	// The escalation reason round-trips durably.
+	if err := s.SetDelegationRunEscalation(autoLive.ID, "check failed for schema", 1300); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := s.GetDelegationRun(autoLive.ID)
+	if got.Escalation != "check failed for schema" {
+		t.Fatalf("escalation = %q, want the recorded reason", got.Escalation)
+	}
+
+	// ResumableAutoRuns returns only the live AUTO run — not the supervised one,
+	// not the done one.
+	resumable, err := s.ResumableAutoRuns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resumable) != 1 || resumable[0].ID != autoLive.ID {
+		ids := make([]int64, len(resumable))
+		for i, r := range resumable {
+			ids[i] = r.ID
+		}
+		t.Fatalf("ResumableAutoRuns = %v, want just the live auto run %d (supervised=%d, done=%d)",
+			ids, autoLive.ID, sup.ID, autoDone.ID)
+	}
+}
+
 // TestInsertDelegationRunSlug pins the slug's shape and its uniqueness. The
 // slug is the worktree and branch component (§6.2), so two runs of the same
 // manifest colliding on it would put two children in one worktree — which

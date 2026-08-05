@@ -754,9 +754,16 @@ func (r *Runner) Approve(ctx context.Context, runID int64, taskID string) error 
 	if r.Spawner == nil {
 		return errors.New("delegate: Runner needs a Spawner to approve")
 	}
+	// ready → approved, OR proceed against a task ALREADY `approved`. The second
+	// case is a prior call whose worktree/launch step failed after the claim
+	// (the autonomous loop retries such a task rather than stranding it); the
+	// double-spawn guard is not this CAS but ClaimTaskSpawnCAS inside SpawnWith,
+	// which admits exactly one `approved → spawning`. A claim that fails for any
+	// OTHER reason — the task is not ready and not approved — is a real
+	// "moved elsewhere" and refuses.
 	if claimed, err := r.Spawner.Approve(runID, taskID); err != nil {
 		return err
-	} else if !claimed {
+	} else if !claimed && st.states[taskID] != StateApproved {
 		return fmt.Errorf("%w: run %d task %q is not `ready`", ErrTaskMovedElsewhere, runID, taskID)
 	}
 

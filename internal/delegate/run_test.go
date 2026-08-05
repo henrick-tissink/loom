@@ -606,19 +606,19 @@ func TestEveryTransitionRefusesAStaleSnapshot(t *testing.T) {
 		wantLive TaskState
 	}{
 		{
-			name:  "approve a task another instance already approved",
+			// Another instance fully approved AND spawned the task (it is now
+			// `running` with a child). Re-approving refuses: Approve is idempotent
+			// only for a task still sitting `approved` (its spawn never completed —
+			// the autonomous retry path), NOT for one that already has a child. The
+			// double-spawn guarantee under a genuine race is TestApproveTwiceSpawnsOneChild.
+			name:  "approve a task another instance already spawned",
 			setup: func(f *runFixture) { f.tick() },
-			move: func(f *runFixture) {
-				if _, err := f.st.AdvanceTaskCAS(f.run.ID, "schema",
-					string(StateReady), string(StateApproved), epoch.Unix()); err != nil {
-					f.t.Fatal(err)
-				}
-			},
+			move:  func(f *runFixture) { f.approve("schema") },
 			act: func(f *runFixture) error {
 				return f.r.Approve(context.Background(), f.run.ID, "schema")
 			},
 			wantErr:  ErrTaskMovedElsewhere,
-			wantLive: StateApproved,
+			wantLive: StateRunning,
 		},
 		{
 			name:  "check a task another instance abandoned",
@@ -715,6 +715,34 @@ func TestApproveTwiceSpawnsOneChild(t *testing.T) {
 	}
 	if f.lnch.n != 1 {
 		t.Fatalf("launcher called %d times for two presses — the claim must precede every side effect", f.lnch.n)
+	}
+}
+
+// Approve is idempotent for a task left `approved` when its spawn did not
+// complete (a worktree failure releases the claim back to `approved`). The
+// autonomous loop retries such a task by calling Approve again, and it must
+// COMPLETE the spawn rather than refuse — otherwise the slot is held with no
+// child forever. The double-spawn guard is ClaimTaskSpawnCAS, not this CAS, so a
+// re-approve of an approved-but-unspawned task launches exactly one child.
+func TestApproveCompletesAnApprovedButUnspawnedTask(t *testing.T) {
+	f := newRunner(t)
+	f.tick()
+
+	// Simulate a prior approve whose spawn never completed: the row sits
+	// `approved` with no session bound.
+	if _, err := f.st.AdvanceTaskCAS(f.run.ID, "schema",
+		string(StateReady), string(StateApproved), epoch.Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.r.Approve(context.Background(), f.run.ID, "schema"); err != nil {
+		t.Fatalf("re-approve of an approved-but-unspawned task = %v, want nil (it should complete)", err)
+	}
+	if got := f.state("schema"); got != StateRunning {
+		t.Fatalf("state after retry = %s, want running — the spawn should have completed", got)
+	}
+	if f.lnch.n != 1 {
+		t.Fatalf("launcher called %d times, want 1", f.lnch.n)
 	}
 }
 

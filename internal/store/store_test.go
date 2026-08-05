@@ -897,8 +897,8 @@ func TestUserVersionIsPinned(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 24 {
-		t.Fatalf("user_version = %d, want 24", v)
+	if v != 25 {
+		t.Fatalf("user_version = %d, want 25", v)
 	}
 	for _, obj := range []string{"orchestrators", "delegation_runs", "delegation_tasks",
 		"delegation_artifacts", "delegation_amendments"} {
@@ -1090,7 +1090,7 @@ func TestMigrationHeadIsPinned(t *testing.T) {
 	// (2026-08-03-autonomy-auto-runner plan) added delegation_runs.mode and
 	// .run_state — both standalone ADD COLUMNs, confirmed safe to replay from
 	// every stale version by TestMigrationsReplayFromEveryStaleVersion.
-	const wantHead = 24
+	const wantHead = 25
 
 	s := open(t)
 	var v int

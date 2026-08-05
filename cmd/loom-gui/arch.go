@@ -396,7 +396,7 @@ func (a *App) OrchestrationSnapshot(root string, runID int64, sinceRev uint64) (
 	}
 	out.Run = &RunHeadDTO{ID: run.ID, Name: run.Name, Slug: run.Slug,
 		Status: run.Status, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
-		Mode: run.Mode, RunState: run.State, Escalation: a.escalationReason(run.ID)}
+		Mode: run.Mode, RunState: run.State, Escalation: run.Escalation}
 	out.Run.RedKind, out.Run.BaselineFaults = runRedKind(run)
 
 	// Decoded here rather than through orchestration.go's decodeSnapshot
