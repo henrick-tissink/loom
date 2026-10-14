@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/henricktissink/loom/internal/ccsessions"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
@@ -172,9 +173,27 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	// claude's own registry is the only place a pane's CURRENT session id
+	// is written once /clear or an in-pane resume mints a new one; read it
+	// once per poll (a handful of tiny files) and rebind below.
+	reg := ccsessions.ByTmuxSession(ccsessions.Dir(e.ccd))
+
 	var live []Row
 	var newly []string
 	for _, r := range liveRows {
+		if ent, ok := reg[r.Name]; ok && ent.SessionID != r.ClaudeSessionID {
+			// rebind: the pane's claude now runs a different session id, so
+			// the transcript this row was tailing is abandoned and its status
+			// would freeze forever. Follow the registry, persist it (resume,
+			// search and summaries key on this column), and drop the reader
+			// so the next lookup opens the live transcript. The registry's
+			// cwd is not adopted: loom launched claude in r.Cwd, and the
+			// project grouping must not move because of a /clear.
+			if err := e.st.SetClaudeSessionID(r.Name, ent.SessionID); err == nil {
+				r.ClaudeSessionID = ent.SessionID
+				delete(e.readers, r.Name)
+			}
+		}
 		rd, ok := e.readers[r.Name]
 		if !ok {
 			rd = transcript.NewReader(transcript.Path(e.ccd, r.Cwd, r.ClaudeSessionID))

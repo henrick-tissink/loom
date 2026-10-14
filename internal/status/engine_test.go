@@ -399,3 +399,68 @@ func TestPollConcurrentSafe(t *testing.T) {
 		t.Fatalf("maxPollDepth = %d, want 1 (concurrent Poll critical sections overlapped — finding 1 regression)", max)
 	}
 }
+
+// TestPollRebindsClaudeSessionIDFromRegistry pins the fix for the frozen-row
+// bug: a pane whose claude ran /clear (or an in-pane resume) carries a NEW
+// session id and a NEW transcript, and nothing in the old transcript says
+// so. The engine must follow claude's own registry
+// (<ccd>/sessions/<pid>.json, keyed by tmux target), persist the new id and
+// re-point the reader — proven here by the title that only the NEW
+// transcript carries.
+func TestPollRebindsClaudeSessionIDFromRegistry(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	oldID := "11111111-1111-4111-8111-111111111111"
+	newID := "22222222-2222-4222-8222-222222222222"
+	name := launchFake(t, tm, ccd, cwd, oldID)
+	st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: oldID, ProjectLabel: "p",
+		Cwd: cwd, CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "unknown"})
+
+	e := NewEngine(tm, st, ccd)
+	now := time.Now().Add(time.Hour)
+	if _, err := e.Poll(now); err != nil {
+		t.Fatal(err)
+	}
+	if row, _, _ := st.Get(name); row.ClaudeSessionID != oldID {
+		t.Fatalf("before rebind: ClaudeSessionID = %q, want %q", row.ClaudeSessionID, oldID)
+	}
+
+	// claude ran /clear: a new transcript appears and the registry now
+	// reports the new id for this pane.
+	newPath := transcript.Path(ccd, cwd, newID)
+	if err := os.WriteFile(newPath, []byte(fakeTranscriptTitled), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	regDir := filepath.Join(ccd, "sessions")
+	if err := os.MkdirAll(regDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"cwd":%q,"tmux":"%s:@1.%%1","status":"idle","updatedAt":1}`,
+		os.Getpid(), newID, cwd, name)
+	if err := os.WriteFile(filepath.Join(regDir, fmt.Sprintf("%d.json", os.Getpid())), []byte(entry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := e.Poll(now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, ok, _ := st.Get(name)
+	if !ok || row.ClaudeSessionID != newID {
+		t.Fatalf("after rebind: ClaudeSessionID = %q, want %q", row.ClaudeSessionID, newID)
+	}
+	if len(snap.Live) != 1 || snap.Live[0].ClaudeSessionID != newID {
+		t.Fatalf("snapshot not rebound: %+v", snap.Live)
+	}
+	if snap.Live[0].Title != "probe the flux" {
+		t.Fatalf("reader not re-pointed at the new transcript: Title = %q", snap.Live[0].Title)
+	}
+
+	// a registry entry that agrees with the row is a no-op on later polls
+	if _, err := e.Poll(now.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if row, _, _ := st.Get(name); row.ClaudeSessionID != newID {
+		t.Fatalf("rebind not stable: %q", row.ClaudeSessionID)
+	}
+}
