@@ -207,7 +207,16 @@ func (a *App) ListRecent() []FinishedDTO {
 	}
 	res := a.resolver()
 	a.maybeAutoSummarize(rows, res)
-	out = recentToDTOs(rows, a.summaryFor, a.attributor(res))
+	// one query for every row's transcript instead of one per row per tick
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.ClaudeSessionID != "" {
+			ids = append(ids, r.ClaudeSessionID)
+		}
+	}
+	trs, _ := a.st.GetTranscripts(ids)
+	summaryFor := func(id string) string { return trs[id].LLMSummary }
+	out = recentToDTOs(rows, summaryFor, a.attributor(res))
 	if len(out) > recentLimit {
 		out = out[:recentLimit]
 	}

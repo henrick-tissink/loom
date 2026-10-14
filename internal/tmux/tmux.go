@@ -158,6 +158,62 @@ func (c *Client) PaneStatus(name string) (PaneStatus, error) {
 	return ps, nil
 }
 
+// Pane is one session's active pane as a single `list-panes -a` reports it:
+// the session's activity stamp plus the pane fields PaneStatus carries.
+type Pane struct {
+	Name     string
+	Activity int64 // #{session_activity}, unix seconds
+	PaneStatus
+}
+
+// ListPanes returns the active pane of every session on the server in ONE
+// tmux invocation. The engine used to call ListSessions and then PaneStatus
+// per session, which at 15 sessions was 16 fork+execs every poll (about ten
+// a second); this is the same information from one process. A session with
+// several panes contributes its active one (window_active && pane_active),
+// falling back to the first listed. No server means no sessions, not an
+// error.
+func (c *Client) ListPanes() ([]Pane, error) {
+	out, err := c.run("list-panes", "-a", "-F",
+		"#{session_name}\t#{session_activity}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_current_path}\t#{window_active}\t#{pane_active}")
+	if err != nil {
+		// no server, or a server with zero sessions ("no current target"):
+		// both mean no panes, not an error
+		if isNoServerErr(out) || strings.Contains(out, "no current target") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("tmux list-panes -a: %s: %w", strings.TrimSpace(out), err)
+	}
+	idx := map[string]int{}
+	var ps []Pane
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 7)
+		if len(parts) < 5 {
+			continue // mangled line (see ensureLocale); skip rather than invent a session
+		}
+		p := Pane{Name: parts[0]}
+		p.Activity, _ = strconv.ParseInt(parts[1], 10, 64)
+		p.Dead = parts[2] == "1"
+		if parts[3] != "" {
+			p.ExitCode, _ = strconv.Atoi(parts[3])
+		}
+		p.CurrentPath = parts[4]
+		active := len(parts) == 7 && parts[5] == "1" && parts[6] == "1"
+		if i, seen := idx[p.Name]; seen {
+			if active {
+				ps[i] = p
+			}
+			continue
+		}
+		idx[p.Name] = len(ps)
+		ps = append(ps, p)
+	}
+	return ps, nil
+}
+
 // SendLiteral sends text with -l -- so key names ("Enter") and leading dashes
 // are never reinterpreted (spec §3.2).
 func (c *Client) SendLiteral(name, text string) error {

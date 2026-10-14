@@ -51,6 +51,15 @@ type Indexer struct {
 	// concurrent passes contending over the same rowid ranges.
 	sweepMu sync.Mutex
 
+	// known is the indexed_files table loaded once at the start of a Sweep
+	// (one query instead of one per file); evicted holds paths whose row was
+	// rewritten during this sweep, so a second lookup (a session's meta doc
+	// after both its main and subagent files merged) goes back to the store
+	// for the new rowid range instead of deleting the wrong one. Both are
+	// nil outside Sweep, and lookups then query the store directly.
+	known   map[string]store.IndexedFile
+	evicted map[string]bool
+
 	swept   atomic.Int64
 	changed atomic.Int64
 	total   atomic.Int64
@@ -106,6 +115,11 @@ func (ix *Indexer) Sweep() error {
 	defer ix.active.Store(false)
 
 	var swept, changed int64
+
+	if known, err := ix.st.ListIndexedFiles(); err == nil {
+		ix.known, ix.evicted = known, map[string]bool{}
+		defer func() { ix.known, ix.evicted = nil, nil }()
+	}
 
 	projectsDir := filepath.Join(ix.ccd, "projects")
 	entries, err := os.ReadDir(projectsDir)
@@ -195,7 +209,24 @@ func (ix *Indexer) Sweep() error {
 	ix.swept.Store(swept)
 	ix.changed.Store(changed)
 	ix.total.Store(int64(len(all)))
+	_ = ix.st.Compact() // give this sweep's freed pages back (auto_vacuum INCREMENTAL)
 	return nil
+}
+
+// lookup is GetIndexedFile through the per-sweep cache (see Indexer.known).
+func (ix *Indexer) lookup(path string) (store.IndexedFile, bool, error) {
+	if ix.known != nil && !ix.evicted[path] {
+		f, ok := ix.known[path]
+		return f, ok, nil
+	}
+	return ix.st.GetIndexedFile(path)
+}
+
+// rewrote records that path's indexed_files row changed under this sweep.
+func (ix *Indexer) rewrote(path string) {
+	if ix.evicted != nil {
+		ix.evicted[path] = true
+	}
 }
 
 // indexFile fingerprints one source file (main or subagent), skipping it
@@ -209,7 +240,7 @@ func (ix *Indexer) indexFile(path, sessionID, projectDir string, isSubagent bool
 	}
 	size, mtime := fi.Size(), fi.ModTime().Unix()
 
-	existing, ok, err := ix.st.GetIndexedFile(path)
+	existing, ok, err := ix.lookup(path)
 	if err != nil {
 		return false, err
 	}
@@ -234,6 +265,7 @@ func (ix *Indexer) indexFile(path, sessionID, projectDir string, isSubagent bool
 	if err := ix.st.ReplaceFileDocs(idxFile, ex.Docs); err != nil {
 		return false, err
 	}
+	ix.rewrote(path)
 
 	if err := ix.mergeTranscript(sessionID, projectDir, ex, isSubagent); err != nil {
 		return false, err
@@ -324,13 +356,14 @@ func (ix *Indexer) indexMetaDoc(sessionID, title, files string, lastTS int64) er
 	path := "loom://meta/" + sessionID
 
 	idxFile := store.IndexedFile{Path: path, SessionID: sessionID, Size: int64(len(content)), Mtime: 0}
-	if existing, ok, err := ix.st.GetIndexedFile(path); err != nil {
+	if existing, ok, err := ix.lookup(path); err != nil {
 		return err
 	} else if ok {
 		idxFile.FirstRowid = existing.FirstRowid
 		idxFile.LastRowid = existing.LastRowid
 	}
 
+	ix.rewrote(path)
 	return ix.st.ReplaceFileDocs(idxFile, []store.Doc{{Content: content, Role: "meta", TS: lastTS}})
 }
 

@@ -45,7 +45,34 @@ func OpenWithDriver(driverName, path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	s.ensureAutoVacuum()
 	return s, nil
+}
+
+// ensureAutoVacuum switches the database to incremental auto-vacuum, once.
+// The indexer deletes and reinserts every live transcript's docs each sweep,
+// and without auto-vacuum the freed pages only ever go on the freelist (the
+// live file was 827 MB with 574 MB free). Changing the mode on an existing
+// file requires a VACUUM, which is also what gives that space back; it runs
+// once, on the first open after this change, and takes seconds to tens of
+// seconds on a file that size. Best effort: a second process holding the
+// database makes VACUUM fail busy, and the next open simply tries again.
+func (s *Store) ensureAutoVacuum() {
+	var mode int
+	if err := s.db.QueryRow("PRAGMA auto_vacuum").Scan(&mode); err != nil || mode != 0 {
+		return
+	}
+	if _, err := s.db.Exec("PRAGMA auto_vacuum = INCREMENTAL"); err != nil {
+		return
+	}
+	_, _ = s.db.Exec("VACUUM")
+}
+
+// Compact returns freed pages to the filesystem. Cheap when there is nothing
+// to return; the indexer calls it after each sweep.
+func (s *Store) Compact() error {
+	_, err := s.db.Exec("PRAGMA incremental_vacuum")
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }

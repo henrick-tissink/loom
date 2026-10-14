@@ -238,3 +238,23 @@ func TestAttachCmdPreservesExistingLocale(t *testing.T) {
 		t.Fatalf("LANG = %q, want en_US.UTF-8", got)
 	}
 }
+
+func TestListPanesOneCall(t *testing.T) {
+	c := testClient(t)
+	if ps, err := c.ListPanes(); err != nil || len(ps) != 0 {
+		t.Fatalf("ListPanes on empty server = %v, %v", ps, err)
+	}
+	name := "loom-33333333-3333-3333-3333-333333333333"
+	cwd := t.TempDir()
+	if err := c.NewSession(name, cwd, "sleep 30", 80, 24); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	ps, err := c.ListPanes()
+	if err != nil || len(ps) != 1 {
+		t.Fatalf("ListPanes = %v, %v", ps, err)
+	}
+	p := ps[0]
+	if p.Name != name || p.Dead || p.Activity == 0 || p.CurrentPath == "" {
+		t.Fatalf("pane = %+v", p)
+	}
+}

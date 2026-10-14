@@ -1039,3 +1039,35 @@ func TestMigrationsReplayFromEveryStaleVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenEnablesIncrementalAutoVacuum(t *testing.T) {
+	s := open(t)
+	var mode int
+	if err := s.db.QueryRow("PRAGMA auto_vacuum").Scan(&mode); err != nil || mode != 2 {
+		t.Fatalf("auto_vacuum = %d, %v; want 2 (INCREMENTAL)", mode, err)
+	}
+	if err := s.Compact(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListIndexedFilesAndGetTranscripts(t *testing.T) {
+	s := open(t)
+	if err := s.ReplaceFileDocs(IndexedFile{Path: "/a", SessionID: "s1", Size: 3, Mtime: 4}, []Doc{{Content: "x", Role: "user"}}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.ListIndexedFiles()
+	if err != nil || len(m) != 1 || m["/a"].SessionID != "s1" || m["/a"].FirstRowid == 0 {
+		t.Fatalf("ListIndexedFiles = %+v, %v", m, err)
+	}
+	if err := s.UpsertTranscript(Transcript{SessionID: "s1", Outcome: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	trs, err := s.GetTranscripts([]string{"s1", "nope"})
+	if err != nil || len(trs) != 1 || trs["s1"].Outcome != "done" {
+		t.Fatalf("GetTranscripts = %+v, %v", trs, err)
+	}
+	if trs, err := s.GetTranscripts(nil); err != nil || len(trs) != 0 {
+		t.Fatalf("GetTranscripts(nil) = %+v, %v", trs, err)
+	}
+}

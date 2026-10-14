@@ -115,6 +115,53 @@ func (s *Store) ListTranscripts() ([]Transcript, error) {
 	return out, rows.Err()
 }
 
+// ListIndexedFiles loads the whole fingerprint table keyed by path: one
+// query per sweep instead of one per file (6,700 files on the live machine).
+func (s *Store) ListIndexedFiles() (map[string]IndexedFile, error) {
+	rows, err := s.db.Query("SELECT path, session_id, size, mtime, first_rowid, last_rowid FROM indexed_files")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]IndexedFile{}
+	for rows.Next() {
+		var f IndexedFile
+		if err := rows.Scan(&f.Path, &f.SessionID, &f.Size, &f.Mtime, &f.FirstRowid, &f.LastRowid); err != nil {
+			return nil, err
+		}
+		out[f.Path] = f
+	}
+	return out, rows.Err()
+}
+
+// GetTranscripts fetches the rows for the given session ids in one query,
+// keyed by id; ids with no row are absent from the map.
+func (s *Store) GetTranscripts(ids []string) (map[string]Transcript, error) {
+	out := map[string]Transcript{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	q := "SELECT " + transcriptCols + " FROM transcripts WHERE session_id IN (?" + strings.Repeat(",?", len(ids)-1) + ")"
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var t Transcript
+		if err := rows.Scan(&t.SessionID, &t.ProjectDir, &t.Cwd, &t.Title, &t.FirstTS, &t.LastTS, &t.MsgCount,
+			&t.Ask, &t.Outcome, &t.Files, &t.FileMissing, &t.LLMSummary, &t.SummaryAt); err != nil {
+			return nil, err
+		}
+		out[t.SessionID] = t
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetIndexedFile(path string) (IndexedFile, bool, error) {
 	f := IndexedFile{Path: path}
 	err := s.db.QueryRow("SELECT session_id, size, mtime, first_rowid, last_rowid FROM indexed_files WHERE path=?", path).

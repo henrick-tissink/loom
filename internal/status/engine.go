@@ -102,36 +102,28 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 		}
 	}
 
-	sessions, err := e.tm.ListSessions()
+	// one tmux exec per poll: every session's active pane with its liveness
+	// and the session activity stamp. list-sessions + list-panes per session
+	// was 1+N spawns every 1.5 s.
+	panes, err := e.tm.ListPanes()
 	if err != nil {
 		return Snapshot{}, err
 	}
 
 	var aliveNames []string
 	activity := map[string]int64{}
-	for _, s := range sessions {
-		if _, ok := session.SessionIDFromTmuxName(s.Name); !ok {
+	for _, p := range panes {
+		if _, ok := session.SessionIDFromTmuxName(p.Name); !ok {
 			continue // not ours
 		}
-		ps, err := e.tm.PaneStatus(s.Name)
-		if err != nil {
-			// list-sessions just said this session is alive; a failed pane
-			// probe (kill race, transient tmux hiccup) must still count it
-			// alive, or MarkLiveOrphansEnded below retires it — and when the
-			// probe fails across the board (e.g. mangled -F output), that
-			// retired EVERY session on every poll. Skip the dead/adopt logic
-			// (no pane info) and let the next poll settle it.
-			aliveNames = append(aliveNames, s.Name)
-			activity[s.Name] = s.Activity
-			continue
-		}
-		if row, ok, _ := e.st.Get(s.Name); !ok {
+		ps := p.PaneStatus
+		if row, ok, _ := e.st.Get(p.Name); !ok {
 			// adopt orphan BEFORE branching on Dead: a tmux session found on
 			// startup with no store row must be recorded before it can be
 			// reaped, dead or alive (spec §6 "record before reap").
-			id, _ := session.SessionIDFromTmuxName(s.Name)
+			id, _ := session.SessionIDFromTmuxName(p.Name)
 			_ = e.st.Upsert(store.SessionRow{
-				Name: s.Name, ClaudeSessionID: id,
+				Name: p.Name, ClaudeSessionID: id,
 				ProjectLabel: filepath.Base(ps.CurrentPath), Cwd: ps.CurrentPath,
 				CreatedAt: now.Unix(), EndedAt: -1, ExitCode: -1,
 				LastStatus: string(Unknown),
@@ -145,19 +137,19 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 			// is the source of truth for liveness (spec §6): if it says the
 			// pane is alive, the row must not stay stuck in a terminal
 			// status, or the session becomes permanently invisible to Live().
-			_ = e.st.SetStatus(s.Name, string(Unknown))
+			_ = e.st.SetStatus(p.Name, string(Unknown))
 		}
 		if ps.Dead {
 			st := "done"
 			if ps.ExitCode != 0 {
 				st = "error"
 			}
-			_ = e.st.MarkEnded(s.Name, st, int64(ps.ExitCode), now.Unix())
-			_ = e.tm.KillSession(s.Name) // reap after recording (spec §6)
+			_ = e.st.MarkEnded(p.Name, st, int64(ps.ExitCode), now.Unix())
+			_ = e.tm.KillSession(p.Name) // reap after recording (spec §6)
 			continue
 		}
-		aliveNames = append(aliveNames, s.Name)
-		activity[s.Name] = s.Activity
+		aliveNames = append(aliveNames, p.Name)
+		activity[p.Name] = p.Activity
 	}
 
 	// drop cached readers for anything not observed live this poll, so
