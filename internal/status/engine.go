@@ -43,6 +43,12 @@ type Row struct {
 	HasTask bool
 	// Checkpoint is the session's last hand-over note, if any.
 	Checkpoint taskfile.Checkpoint
+	// External marks a claude loom did not start and has no pane for: a
+	// process in claude's registry running in some terminal outside loom's
+	// tmux server. Its row is synthesised from the registry and its
+	// transcript each poll and is never stored; there is nothing to attach
+	// to, reply into, or kill.
+	External bool
 }
 
 type Snapshot struct {
@@ -75,6 +81,9 @@ type Engine struct {
 	ccd     string
 	readers map[string]*transcript.Reader
 	tasks   *taskfile.Cache
+	// extStatus is the last status per external row, which the store holds
+	// for loom's own rows: it is what makes the needs-you bell once-only.
+	extStatus map[string]string
 
 	// mu serializes Poll end-to-end. Defense in depth against finding 1: the
 	// UI must never fire two concurrent Poll goroutines against the same
@@ -97,8 +106,9 @@ type Engine struct {
 
 func NewEngine(tm *tmux.Client, st *store.Store, claudeConfigDir string) *Engine {
 	return &Engine{tm: tm, st: st, ccd: claudeConfigDir,
-		readers: map[string]*transcript.Reader{},
-		tasks:   taskfile.NewCache(taskfile.Dir(claudeConfigDir))}
+		readers:   map[string]*transcript.Reader{},
+		tasks:     taskfile.NewCache(taskfile.Dir(claudeConfigDir)),
+		extStatus: map[string]string{}}
 }
 
 func (e *Engine) Poll(now time.Time) (Snapshot, error) {
@@ -166,11 +176,6 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 		activity[p.Name] = p.Activity
 	}
 
-	// drop cached readers for anything not observed live this poll, so
-	// sessions that vanish from tmux without a dead pane (e.g. an external
-	// `tmux kill-session`) don't leak their Reader forever.
-	e.GC(aliveNames)
-
 	// store rows that claim live but have no tmux backing → history (never
 	// deleted). graceUnix protects rows created within orphanGrace of now so
 	// a poll that races a session's own launch never retires it (finding 2a).
@@ -185,11 +190,23 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 	// claude's own registry is the only place a pane's CURRENT session id
 	// is written once /clear or an in-pane resume mints a new one; read it
 	// once per poll (a handful of tiny files) and rebind below.
-	reg := ccsessions.ByTmuxSession(ccsessions.Dir(e.ccd))
+	entries := ccsessions.List(ccsessions.Dir(e.ccd))
+	reg := map[string]ccsessions.Entry{}
+	for _, ent := range entries {
+		if ent.TmuxSession == "" {
+			continue
+		}
+		if prev, dup := reg[ent.TmuxSession]; dup && prev.UpdatedAt >= ent.UpdatedAt {
+			continue
+		}
+		reg[ent.TmuxSession] = ent
+	}
 
 	var live []Row
 	var newly []string
+	liveIDs := map[string]bool{}
 	for _, r := range liveRows {
+		liveIDs[r.ClaudeSessionID] = true
 		ent, hasEnt := reg[r.Name]
 		if hasEnt && ent.SessionID != r.ClaudeSessionID {
 			// rebind: the pane's claude now runs a different session id, so
@@ -227,27 +244,85 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 			_ = e.st.SetStatus(r.Name, string(st))
 			r.LastStatus = string(st)
 		}
-		row := Row{SessionRow: r, Status: st, LastTool: rs.LastTool,
-			Activity: activity[r.Name], Title: r.Title, CtxTokens: rs.CtxTokens,
-			WaitingFor: waitingFor}
-		if st == NeedsYou {
-			// the wait is measured from the ask; a registry "waiting" (a
-			// dialog) is timed by the registry, which is what flipped it.
-			row.Ask, row.Since = rs.Ask, rs.AskAt
-			if hasEnt && ent.Status == "waiting" && ent.StatusUpdatedAt > 0 {
-				row.Since = ent.StatusUpdatedAt / 1000
-			}
+		live = append(live, e.row(r, rs, st, waitingFor, activity[r.Name], ent, hasEnt))
+	}
+
+	// external sessions: every live registry entry that is not in a loom
+	// pane. Shown, never stored: the registry file is its liveness and the
+	// transcript its state, so there is nothing for the store to retire.
+	// A conversation a loom row already tails (the same id resumed in a
+	// terminal) is not shown twice.
+	keep := append([]string(nil), aliveNames...)
+	seen := map[string]bool{}
+	for _, ent := range entries {
+		if _, loom := session.SessionIDFromTmuxName(ent.TmuxSession); loom || ent.Cwd == "" || liveIDs[ent.SessionID] {
+			continue
 		}
-		row.Task, row.HasTask = e.tasks.Task(r.ClaudeSessionID)
-		row.Checkpoint, _ = e.tasks.Checkpoint(r.ClaudeSessionID)
+		name := "ext-" + ent.SessionID
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		keep = append(keep, name)
+		r := store.SessionRow{Name: name, ClaudeSessionID: ent.SessionID,
+			ProjectLabel: filepath.Base(ent.Cwd), Cwd: ent.Cwd,
+			CreatedAt: ent.StartedAt / 1000, EndedAt: -1, ExitCode: -1,
+			LastStatus: e.extStatus[name]}
+		rd, ok := e.readers[name]
+		if !ok {
+			rd = transcript.NewReader(transcript.Path(e.ccd, ent.Cwd, ent.SessionID))
+			e.readers[name] = rd
+		}
+		rs, _ := rd.Poll()
+		r.Title = rs.Title
+		st, waitingFor := Merge(Fuse(rs.State, false), ent.Status, ent.WaitingFor)
+		if st == NeedsYou && e.extStatus[name] != string(NeedsYou) {
+			newly = append(newly, name)
+		}
+		e.extStatus[name] = string(st)
+		r.LastStatus = string(st)
+		row := e.row(r, rs, st, waitingFor, 0, ent, true)
+		row.External = true
 		live = append(live, row)
 	}
+	for name := range e.extStatus {
+		if !seen[name] {
+			delete(e.extStatus, name)
+		}
+	}
+
+	// drop cached readers for anything not observed live this poll, so
+	// sessions that vanish from tmux without a dead pane (e.g. an external
+	// `tmux kill-session`), and external claudes that exit, don't leak
+	// their Reader forever.
+	e.GC(keep)
 
 	recent, err := e.st.Recent(10)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	return Snapshot{Live: live, Recent: recent, NewlyNeedsYou: newly}, nil
+}
+
+// row assembles a live row from its store row, transcript snapshot, fused
+// status and registry entry: the ask and its age, and the task file and
+// checkpoint the session's hooks wrote.
+func (e *Engine) row(r store.SessionRow, rs transcript.ReaderSnapshot, st Status, waitingFor string,
+	activity int64, ent ccsessions.Entry, hasEnt bool) Row {
+	row := Row{SessionRow: r, Status: st, LastTool: rs.LastTool,
+		Activity: activity, Title: r.Title, CtxTokens: rs.CtxTokens,
+		WaitingFor: waitingFor}
+	if st == NeedsYou {
+		// the wait is measured from the ask; a registry "waiting" (a
+		// dialog) is timed by the registry, which is what flipped it.
+		row.Ask, row.Since = rs.Ask, rs.AskAt
+		if hasEnt && ent.Status == "waiting" && ent.StatusUpdatedAt > 0 {
+			row.Since = ent.StatusUpdatedAt / 1000
+		}
+	}
+	row.Task, row.HasTask = e.tasks.Task(r.ClaudeSessionID)
+	row.Checkpoint, _ = e.tasks.Checkpoint(r.ClaudeSessionID)
+	return row
 }
 
 // GC drops cached readers for names not in the given set. Called once per

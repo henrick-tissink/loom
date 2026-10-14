@@ -34,9 +34,12 @@ func TestSnapshotToDTOs_taskAndAskFields(t *testing.T) {
 		{SessionRow: store.SessionRow{Name: "a"}, Status: status.NeedsYou, Ask: "merge it?", Since: 50,
 			HasTask: true, Task: taskfile.Task{Status: "open", Done: 2, Total: 3, Outcome: "the rail shows it"},
 			Checkpoint: taskfile.Checkpoint{WrittenAt: 40, NextStep: "hand back"}},
-		{SessionRow: store.SessionRow{Name: "b"}, Status: status.Running},
+		{SessionRow: store.SessionRow{Name: "b", Cwd: "/w/b"}, Status: status.Running, External: true},
 	}}
 	got := snapshotToDTOs(snap, nil)
+	if !got[1].External || got[1].Cwd != "/w/b" || got[0].External {
+		t.Fatalf("external: %+v %+v", got[0], got[1])
+	}
 	if got[0].Ask != "merge it?" || got[0].Since != 50 || got[0].TaskStatus != "open" || got[0].TaskDone != 2 ||
 		got[0].TaskTotal != 3 || got[0].TaskOutcome != "the rail shows it" || got[0].CheckpointAt != 40 || got[0].NextStep != "hand back" {
 		t.Fatalf("row a: %+v", got[0])

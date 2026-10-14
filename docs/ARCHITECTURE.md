@@ -109,6 +109,14 @@ frontend.
 | `transcript` | Locate + interpret Claude's JSONL | Path encoding, incremental `Reader`, turn-boundary `Classifier`. |
 | `ccsessions` | Read Claude's own session registry | The only way to learn a pane's *current* session id after `/clear` or an in-pane resume. |
 | `taskfile` | Read the hooks' task file and checkpoint | Finish line (status, Done-when ticks, outcome) and hand-over age per session; stat-cached per poll. |
+
+**External sessions.** Every live registry entry that is not in a loom pane (a
+`claude` started in some terminal) is shown as an `ext-<id>` row: status from
+its transcript and the registry, title, ask, task pill, gauge. Never stored —
+the registry file is its liveness, so there is nothing to retire — and with
+no pane there is nothing to attach, reply into, or kill; the engine keeps the
+last status per external row only so the needs-you bell stays once-only. A
+conversation a loom row already tails is not shown twice.
 | `status` | Fuse transcript state with tmux liveness | The reconcile loop. The only writer of live-session status. |
 | `store` | SQLite: schema, sessions, projects, memory index | Migrations are transactional & re-entrant. |
 | `memory` | Index / extract / summarize | Reads the whole Claude archive; the only package that calls out to an LLM. |

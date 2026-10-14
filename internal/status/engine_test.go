@@ -561,3 +561,68 @@ func TestPollCarriesAskTaskAndCheckpoint(t *testing.T) {
 		t.Fatalf("checkpoint: %+v", r.Checkpoint)
 	}
 }
+
+func TestPollShowsExternalSessionsOnce(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	id := "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	tpath := transcript.Path(ccd, cwd, id)
+	if err := os.MkdirAll(filepath.Dir(tpath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tpath, []byte(fakeTranscriptAsk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	regDir := filepath.Join(ccd, "sessions")
+	if err := os.MkdirAll(regDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// a claude in a plain terminal: alive pid, no tmux target
+	body := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"cwd":%q,"status":"idle","startedAt":5000,"updatedAt":1}`, os.Getpid(), id, cwd)
+	if err := os.WriteFile(filepath.Join(regDir, "7.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(tm, st, ccd)
+	now := time.Now().Add(time.Hour)
+	snap, err := e.Poll(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Live) != 1 {
+		t.Fatalf("live = %+v", snap.Live)
+	}
+	r := snap.Live[0]
+	if !r.External || r.Name != "ext-"+id || r.ClaudeSessionID != id || r.Cwd != cwd || r.CreatedAt != 5 ||
+		r.Status != NeedsYou || r.Ask != "Done. Merge it?" {
+		t.Fatalf("external row: %+v", r)
+	}
+	if len(snap.NewlyNeedsYou) != 1 || snap.NewlyNeedsYou[0] != r.Name {
+		t.Fatalf("bell: %v", snap.NewlyNeedsYou)
+	}
+	if rows, _ := st.Live(); len(rows) != 0 {
+		t.Fatalf("external rows must not be stored: %+v", rows)
+	}
+	snap, _ = e.Poll(now)
+	if len(snap.NewlyNeedsYou) != 0 {
+		t.Fatalf("bell must ring once: %v", snap.NewlyNeedsYou)
+	}
+
+	// the same conversation in a loom pane wins; the external twin is hidden
+	name := launchFake(t, tm, ccd, cwd, id)
+	st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id, ProjectLabel: "p",
+		Cwd: cwd, CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "unknown"})
+	snap, _ = e.Poll(now)
+	if len(snap.Live) != 1 || snap.Live[0].External || snap.Live[0].Name != name {
+		t.Fatalf("live = %+v", snap.Live)
+	}
+
+	// the process goes away: the row goes with it
+	os.Remove(filepath.Join(regDir, "7.json"))
+	_ = tm.KillSession(name)
+	snap, _ = e.Poll(now.Add(time.Hour))
+	for _, r := range snap.Live {
+		if r.External {
+			t.Fatalf("external row outlived its registry entry: %+v", r)
+		}
+	}
+}

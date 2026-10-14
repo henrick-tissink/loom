@@ -51,6 +51,32 @@ func TestByTmuxSessionPicksFreshestLiveEntry(t *testing.T) {
 	}
 }
 
+func TestListIncludesEntriesWithoutTmux(t *testing.T) {
+	dir := t.TempDir()
+	orig := pidAlive
+	pidAlive = func(pid int) bool { return pid != 999 }
+	t.Cleanup(func() { pidAlive = orig })
+	writeEntry(t, dir, "101.json", `{"pid":101,"sessionId":"s-tmux","tmux":"loom-A:@1.%1","status":"idle","updatedAt":20}`)
+	writeEntry(t, dir, "102.json", `{"pid":102,"sessionId":"s-plain","cwd":"/w","status":"waiting","startedAt":5000,"updatedAt":40}`)
+	writeEntry(t, dir, "999.json", `{"pid":999,"sessionId":"s-dead","updatedAt":30}`)
+	got := List(dir)
+	if len(got) != 2 {
+		t.Fatalf("want the two live entries, got %+v", got)
+	}
+	var plain *Entry
+	for i := range got {
+		if got[i].SessionID == "s-plain" {
+			plain = &got[i]
+		}
+	}
+	if plain == nil || plain.TmuxSession != "" || plain.Cwd != "/w" || plain.Status != "waiting" || plain.StartedAt != 5000 {
+		t.Fatalf("plain entry = %+v", plain)
+	}
+	if List(filepath.Join(dir, "nope")) != nil {
+		t.Fatal("missing dir → nil")
+	}
+}
+
 func TestDir(t *testing.T) {
 	if got := Dir("/home/x/.claude"); got != filepath.Join("/home/x/.claude", "sessions") {
 		t.Fatalf("Dir = %q", got)

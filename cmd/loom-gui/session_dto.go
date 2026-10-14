@@ -37,6 +37,11 @@ type SessionDTO struct {
 	// (unix seconds; 0 = never) and NextStep its one-line next step.
 	CheckpointAt int64  `json:"checkpointAt"`
 	NextStep     string `json:"nextStep"`
+	// External is a claude running in a terminal outside loom: visible,
+	// with no pane to attach to, reply into, or kill. Cwd is shown in its
+	// place on the stage.
+	External bool   `json:"external"`
+	Cwd      string `json:"cwd"`
 }
 
 // snapshotToDTOs flattens a status.Snapshot's live rows into SessionDTOs,
@@ -70,6 +75,8 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 			TaskOutcome:  r.Task.Outcome,
 			CheckpointAt: r.Checkpoint.WrittenAt,
 			NextStep:     r.Checkpoint.NextStep,
+			External:     r.External,
+			Cwd:          r.Cwd,
 		})
 	}
 	return out

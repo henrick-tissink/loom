@@ -330,6 +330,10 @@ body {
 }
 .tpill-ok { color: #2F7A4F; background: rgba(66,160,103,.12); border-color: rgba(66,160,103,.35); }
 .tpill-consult { color: var(--text-faint); font-style: italic; }
+.tpill-ext { color: var(--text-faint); border-style: dashed; background: transparent; }
+.stage-note { text-align: center; line-height: 1.8; max-width: 520px; padding: 0 24px; }
+.stage-note .sn-path { color: var(--text-dim); font-size: 11px; word-break: break-all; }
+.stage-note .sn-ask { display: block; text-align: left; color: var(--text); font-family: var(--font-ui); font-size: 12px; white-space: pre-wrap; }
 .task-ask {
   display: block; margin-top: 3px; font-size: 11px; color: var(--text-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

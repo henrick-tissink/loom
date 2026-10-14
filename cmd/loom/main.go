@@ -3,6 +3,8 @@
 // the indexed session history. It is a thin view, not a second frontend.
 //
 //	loom ls              live sessions: name, project, status, age, title
+//	                     (claudes running in terminals outside loom are listed
+//	                     too, marked "(terminal)"; attach/kill do not apply)
 //	loom attach <name>   hand this terminal to the session's tmux pane
 //	loom kill <name>     kill the session (the GUI retires its row on its next poll)
 //	loom search <query>  full-text search over indexed session history
@@ -95,7 +97,11 @@ func ls() error {
 		if r.WaitingFor != "" {
 			stat += " (" + r.WaitingFor + ")"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Name, r.ProjectLabel, stat,
+		proj := r.ProjectLabel
+		if r.External {
+			proj += " (terminal)" // not in a loom pane: nothing to attach to
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Name, proj, stat,
 			age(now, r.CreatedAt), r.Title)
 	}
 	return w.Flush()

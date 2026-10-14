@@ -266,7 +266,13 @@ const GROUPS = [
 // otherwise a short id, so the rail never displays a raw uuid.
 function displayName(s) {
   if (s.title && s.title.trim()) return s.title.trim();
-  return "session " + s.name.replace(/^loom-/, "").slice(0, 8);
+  return "session " + s.name.replace(/^(loom|ext)-/, "").slice(0, 8);
+}
+
+// externalTag marks a claude running in a terminal outside loom: loom sees
+// its status, question and finish line, but has no pane for it.
+function externalTag(s) {
+  return s.external ? `<span class="tpill tpill-ext" title="Running in a terminal outside loom${s.cwd ? " — " + esc(s.cwd) : ""}">terminal</span>` : "";
 }
 
 function actionBtn(pathInner, title, onClick, extraClass) {
@@ -326,13 +332,18 @@ function appendGroup(label) {
 // mixes projects, so it shows each thread's PROJECT there instead.
 function appendLiveRow(s, projLabel) {
   const li = document.createElement("li");
-  li.className = "thread" + (s.name === activeName ? " active" : "");
+  li.className = "thread" + (s.name === activeName ? " active" : "") + (s.external ? " external" : "");
   const color = statusColor(s.status);
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${taskPillHtml(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${taskPillHtml(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
+  li.addEventListener("click", () => selectSession(s.name));
+  threadsEl.appendChild(li);
+  // No pane, so nothing to reply into, hand over from, or kill: the row is
+  // information only, and its stage says where the claude actually runs.
+  if (s.external) return;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
   if (overBudget(s)) {
@@ -342,8 +353,6 @@ function appendLiveRow(s, projLabel) {
     }));
   }
   acts.appendChild(killButton(s.name));
-  li.addEventListener("click", () => selectSession(s.name));
-  threadsEl.appendChild(li);
 }
 
 function appendFinishedRow(s) {
@@ -655,7 +664,8 @@ function renderStageHeader(name) {
     `<span class="sh-name">${esc(label)}</span>` +
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(project)}</span>` : "") +
     `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}</span></span>` +
-    `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>`;
+    (s && s.external ? "" :
+      `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>`);
   const diffBtn = el.querySelector("#sh-diff");
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
 }
@@ -1335,6 +1345,20 @@ function selectSession(name) {
   const header = document.createElement("div");
   header.id = "stage-header";
   stage.appendChild(header);
+  const sel = latestSessions.find((x) => x.name === name);
+  if (sel && sel.external) {
+    // A claude loom did not start has no pane to attach: the stage says
+    // where it runs and what loom can and cannot do with it.
+    renderStageHeader(name);
+    renderRail(latestSessions, latestRecent);
+    const note = document.createElement("div");
+    note.id = "stage-empty";
+    note.className = "stage-note";
+    note.innerHTML = `This claude runs in a terminal outside loom.<br><span class="sn-path">${esc(sel.cwd || "")}</span><br>` +
+      `Loom shows its status, question and finish line, but cannot attach, reply or kill it.${sel.ask ? `<br><br><span class="sn-ask">${esc(sel.ask)}</span>` : ""}`;
+    stage.appendChild(note);
+    return;
+  }
   const outer = document.createElement("div");
   outer.id = "terminal";
   stage.appendChild(outer);
@@ -1699,7 +1723,7 @@ function buildPaletteItems() {
   for (const s of latestSessions) {
     items.push({
       label: displayName(s),
-      hint: `${s.project} · ${statusWord(s.status)}${s.waitingFor ? " · " + s.waitingFor : ""}`,
+      hint: `${s.project} · ${statusWord(s.status)}${s.waitingFor ? " · " + s.waitingFor : ""}${s.external ? " · terminal" : ""}`,
       run: () => selectSession(s.name),
     });
   }

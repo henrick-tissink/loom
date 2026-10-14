@@ -38,6 +38,7 @@ type Entry struct {
 	// StatusUpdatedAt is when Status last changed (unix milliseconds): for a
 	// waiting pane, how long it has been waiting.
 	StatusUpdatedAt int64
+	StartedAt       int64 // unix milliseconds the process started
 }
 
 // Dir is the registry directory under a claude config dir.
@@ -56,23 +57,36 @@ var pidAlive = func(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// ByTmuxSession scans dir and returns, per tmux SESSION name, the freshest
-// entry whose process is still alive. A registry file can outlive its
-// process (claude killed without cleanup), and a pane can be re-entered by
-// a new process (`claude --resume` typed into the same window), so liveness
-// filters first and updatedAt breaks ties.
-func ByTmuxSession(dir string) map[string]Entry {
-	out := map[string]Entry{}
+// List scans dir and returns every entry whose process is still alive,
+// under tmux or not. A registry file can outlive its process (claude killed
+// without cleanup), so liveness filters here, once, for every reader.
+func List(dir string) []Entry {
+	var out []Entry
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return out
+		return nil
 	}
 	for _, de := range entries {
 		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
 			continue
 		}
 		e, ok := readFile(filepath.Join(dir, de.Name()))
-		if !ok || e.TmuxSession == "" || !pidAlive(e.PID) {
+		if !ok || !pidAlive(e.PID) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// ByTmuxSession returns, per tmux SESSION name, the freshest live entry. A
+// pane can be re-entered by a new process (`claude --resume` typed into the
+// same window), so updatedAt breaks ties. Entries not under tmux have
+// nothing to key on and are left out; List has them.
+func ByTmuxSession(dir string) map[string]Entry {
+	out := map[string]Entry{}
+	for _, e := range List(dir) {
+		if e.TmuxSession == "" {
 			continue
 		}
 		if prev, dup := out[e.TmuxSession]; dup && prev.UpdatedAt >= e.UpdatedAt {
@@ -98,13 +112,14 @@ func readFile(path string) (Entry, bool) {
 		Name       string `json:"name"`
 		UpdatedAt  int64  `json:"updatedAt"`
 		StatusAt   int64  `json:"statusUpdatedAt"`
+		StartedAt  int64  `json:"startedAt"`
 	}
 	if err := json.Unmarshal(raw, &f); err != nil || f.SessionID == "" {
 		return Entry{}, false
 	}
 	e := Entry{PID: f.PID, SessionID: f.SessionID, Cwd: f.Cwd, TmuxTarget: f.Tmux,
 		Status: f.Status, WaitingFor: f.WaitingFor, Name: f.Name, UpdatedAt: f.UpdatedAt,
-		StatusUpdatedAt: f.StatusAt}
+		StatusUpdatedAt: f.StatusAt, StartedAt: f.StartedAt}
 	if i := strings.IndexByte(f.Tmux, ':'); i > 0 {
 		e.TmuxSession = f.Tmux[:i]
 	} else {
