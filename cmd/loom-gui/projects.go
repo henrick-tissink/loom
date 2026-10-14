@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/henricktissink/loom/internal/delegate"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/session"
@@ -19,9 +18,9 @@ import (
 //
 // Everything here is read-through rather than cached. A startup snapshot of
 // the project set is exactly the bug §7 names: registry.Discover ran once into
-// App.repos, which buildRecipe, Fanout and workflow.LoadAll all validated
-// against, so a project created in-app was listed but not launchable until the
-// next restart, and hide/rename/reassign never reached the launcher at all.
+// App.repos, which buildRecipe validated against, so a project created in-app
+// was listed but not launchable until the next restart, and
+// hide/rename/reassign never reached the launcher at all.
 
 // resolver returns the current attribution/visibility authority, or nil when
 // there is no project service (tests, and the degraded path where the store
@@ -80,29 +79,35 @@ func attribute(r *projects.Resolver, cwd string) projects.Attribution {
 	return at
 }
 
-// attributor wraps a resolver with delegation §14.1's identity override. EVERY
-// session-row attribution and visibility decision in the DTO layer goes through
-// it, because a delegation child's cwd is a worktree under ~/.loom that matches
-// no project target: the bare resolver answers ok=false, Visible fails closed,
-// and the children vanish from the rail, Finished, search and needs-you the
-// moment anything is hidden — including when the user solos precisely the
-// project the run belongs to. With nothing hidden they group under Ungrouped
-// instead of their project.
-//
-// The override is a WRAPPER, deliberately: internal/projects keeps no knowledge
-// of delegation and its own tests stay exactly as they are. For a row with no
-// delegation column it is a pass-through, so this is safe to route everything
-// through and wrong to route only some things through.
-//
-// *store.Store already satisfies delegate.Runs. The nil check matters: a typed
-// nil in the interface would panic on the first delegation row rather than
-// degrading.
-func (a *App) attributor(res *projects.Resolver) *delegate.Attributor {
-	at := &delegate.Attributor{Resolver: res}
-	if a.st != nil {
-		at.Runs = a.st
+// rowAttributor is the one place the DTO layer asks "which project is this
+// session row, and may it be shown". Nil-safe: a nil receiver or resolver
+// attributes nothing and hides nothing, which is what the tests that build an
+// App without projects rely on.
+type rowAttributor struct {
+	Resolver *projects.Resolver
+}
+
+// Attribute resolves the row's cwd to its project.
+func (at *rowAttributor) Attribute(row store.SessionRow) (projects.Attribution, bool) {
+	if at == nil || at.Resolver == nil {
+		return projects.Attribution{}, false
 	}
-	return at
+	return at.Resolver.Attribute(row.Cwd)
+}
+
+// Visible applies §6's predicate over the row's whole directory set.
+func (at *rowAttributor) Visible(row store.SessionRow) bool {
+	if at == nil || at.Resolver == nil {
+		return true
+	}
+	return at.Resolver.Visible(sessionDirs(row)...)
+}
+
+// attributor wraps a resolver for the DTO layer. Every session-row attribution
+// and visibility decision goes through it so the rail, Finished, search and
+// needs-you all answer the same way.
+func (a *App) attributor(res *projects.Resolver) *rowAttributor {
+	return &rowAttributor{Resolver: res}
 }
 
 // sessionDirs is a session's WHOLE directory set — cwd ∪ add_dirs — which is
@@ -163,26 +168,6 @@ func (a *App) launchableTargets() []projects.Target {
 	return out
 }
 
-// workflowRepos is the set workflow.LoadAll validates step labels against:
-// repos ∪ project roots (§2), so a definition naming a promoted group dir
-// ("Innostream") still resolves.
-//
-// Target.Label is already the stable, directory-derived identifier §2 binds
-// workflow labels to — a root's label is its BASENAME, never the project's
-// user-editable name, so a rename cannot invalidate a saved workflow on disk —
-// and is therefore used verbatim. Hidden projects are deliberately NOT
-// filtered out: hiding is a presentation concern (§6.2a) and a definition that
-// stops resolving would be a behaviour change; the definitions LIST is
-// filtered instead.
-func (a *App) workflowRepos() []registry.Repo {
-	ts := a.targets()
-	out := make([]registry.Repo, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, registry.Repo{Label: t.Label, Path: t.Path})
-	}
-	return out
-}
-
 // ProjectRepoDTO is one member repo of a project, for the overview.
 type ProjectRepoDTO struct {
 	Path    string `json:"path"`
@@ -204,11 +189,6 @@ type ProjectDetailDTO struct {
 	Collapsed bool             `json:"collapsed"`
 	Ungrouped bool             `json:"ungrouped"`
 	Repos     []ProjectRepoDTO `json:"repos"`
-	// Orchestrator is nil for a project that has never had one and has never
-	// been briefed — the overwhelmingly common case, and the one where an
-	// empty card would be noise. Populated from ONE ListOrchestrators read
-	// joined in memory (see orchestratorsByRoot), never a per-project query.
-	Orchestrator *OrchestratorDTO `json:"orchestrator"`
 }
 
 // ListProjectDetails returns every project with its repos. It is NOT filtered
@@ -234,25 +214,17 @@ func (a *App) ListProjectDetails() []ProjectDetailDTO {
 		byRoot[m.ProjectRoot] = append(byRoot[m.ProjectRoot],
 			ProjectRepoDTO{Path: m.Path, Label: m.Label, Missing: m.Missing})
 	}
-	// One read for the whole list, indexed by root. A query inside the loop
-	// would be an N+1 against a table holding at most one row per project.
-	orchs := a.orchestratorsByRoot()
 	for _, p := range ps {
 		repos := byRoot[p.Root]
 		if repos == nil {
 			repos = []ProjectRepoDTO{}
 		}
-		o, haveRow := orchs[p.Root]
 		out = append(out, ProjectDetailDTO{
 			Root: p.Root, Name: p.Name, Origin: p.Origin,
 			Hidden: p.Hidden, Solo: p.Solo, Missing: p.Missing,
 			Collapsed: p.Collapsed,
 			Ungrouped: p.Root == store.UngroupedRoot,
 			Repos:     repos,
-			// Ungrouped can never have an orchestrator (§2: no directory to
-			// launch at, no coherent repo set), and the backend refuses it —
-			// so it never gets a block to click on either.
-			Orchestrator: a.orchestratorDTOFor(p.Root, o, haveRow),
 		})
 	}
 	return out
@@ -458,8 +430,7 @@ func (a *App) RemoveProjectRepo(path string) error {
 }
 
 // RenameProject sets the display name. Labels are unaffected by construction
-// (§2 derives them from the root basename), so a rename can never invalidate a
-// workflow definition on disk.
+// (§2 derives them from the root basename).
 func (a *App) RenameProject(root, name string) error {
 	if a.st == nil {
 		return fmt.Errorf("store unavailable")

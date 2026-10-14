@@ -769,23 +769,24 @@ func TestMigrationV10ToV18FromStaleUserVersion(t *testing.T) {
 			if err := s.Upsert(row("loom-old")); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.SetProjectNotesDir(UngroupedRoot, "/h/.loom/projects/x/notes", 1500); err != nil {
+			if _, err := s.db.Exec("UPDATE projects SET notes_dir=? WHERE root=?", "/h/.loom/projects/x/notes", UngroupedRoot); err != nil {
 				t.Fatal(err)
 			}
-			if ok, _, err := s.ClaimOrchestrator("/w/a", 1000); err != nil || !ok {
-				t.Fatalf("claim: %v %v", ok, err)
-			}
-			run, err := s.InsertDelegationRun("atlas", "/w/a", "{}", "{}", 1000)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := s.InsertDelegationTask(DelegationTask{RunID: run.ID, TaskID: "seed",
-				State: "pending", RepoLabel: "r", NeedsSnapshot: `{"a":{"fingerprint":"f1"}}`,
-				UpdatedAt: 1000}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := s.AppendDelegationAmendment(run.ID, "needs-artifact", `{"e":1}`, 1000); err != nil {
-				t.Fatal(err)
+			// The parked arcs' tables are seeded with raw SQL: their store
+			// methods left with the arcs, but the migrations (and any rows a
+			// user's loom.db still holds) stay, and a replay must not touch them.
+			for _, q := range []string{
+				`INSERT INTO orchestrators(project_root, spawned_at) VALUES ('/w/a', 1000)`,
+				`INSERT INTO delegation_runs(id, slug, name, project_root, manifest_json, base_shas, status, created_at, updated_at)
+				 VALUES (1, 'atlas-1', 'atlas', '/w/a', '{}', '{}', 'running', 1000, 1000)`,
+				`INSERT INTO delegation_tasks(run_id, task_id, state, repo_label, needs_snapshot, updated_at)
+				 VALUES (1, 'seed', 'pending', 'r', '{"a":{"fingerprint":"f1"}}', 1000)`,
+				`INSERT INTO delegation_amendments(run_id, seq, kind, body, created_at)
+				 VALUES (1, 1, 'needs-artifact', '{"e":1}', 1000)`,
+			} {
+				if _, err := s.db.Exec(q); err != nil {
+					t.Fatalf("seed %q: %v", q, err)
+				}
 			}
 			if err := s.Close(); err != nil {
 				t.Fatal(err)
@@ -825,24 +826,21 @@ func TestMigrationV10ToV18FromStaleUserVersion(t *testing.T) {
 				if err != nil || !ok || ung.NotesDir != "/h/.loom/projects/x/notes" {
 					t.Fatalf("notes_dir clobbered by the replay: %+v %v %v", ung, ok, err)
 				}
-				o, ok, err := s2.GetOrchestrator("/w/a")
-				if err != nil || !ok || o.SpawnedAt != 1000 {
-					t.Fatalf("orchestrator claim clobbered by the replay: %+v %v %v", o, ok, err)
+				var spawned int64
+				if err := s2.db.QueryRow("SELECT spawned_at FROM orchestrators WHERE project_root='/w/a'").Scan(&spawned); err != nil || spawned != 1000 {
+					t.Fatalf("orchestrator claim clobbered by the replay: %d %v", spawned, err)
 				}
-				got, ok, err := s2.GetDelegationRun(run.ID)
-				if err != nil || !ok || got.Slug != run.Slug {
-					t.Fatalf("delegation run clobbered by the replay: %+v %v %v", got, ok, err)
+				var slug, snap, body string
+				if err := s2.db.QueryRow("SELECT slug FROM delegation_runs WHERE id=1").Scan(&slug); err != nil || slug != "atlas-1" {
+					t.Fatalf("delegation run clobbered by the replay: %q %v", slug, err)
 				}
-				task, ok, err := s2.GetDelegationTask(run.ID, "seed")
-				if err != nil || !ok || task.NeedsSnapshot != `{"a":{"fingerprint":"f1"}}` {
-					t.Fatalf("needs_snapshot clobbered by the replay: %+v %v %v", task, ok, err)
+				if err := s2.db.QueryRow("SELECT needs_snapshot FROM delegation_tasks WHERE run_id=1 AND task_id='seed'").Scan(&snap); err != nil || snap != `{"a":{"fingerprint":"f1"}}` {
+					t.Fatalf("needs_snapshot clobbered by the replay: %q %v", snap, err)
 				}
-				// An amendment is append-only history the effective graph is
-				// replayed from; a migration that rewrote or dropped one would
-				// silently change a plan a child is parked against.
-				am, err := s2.ListDelegationAmendments(run.ID)
-				if err != nil || len(am) != 1 || am[0].Seq != 1 || am[0].Body != `{"e":1}` {
-					t.Fatalf("amendments clobbered by the replay: %+v %v", am, err)
+				// An amendment is append-only history; a migration that rewrote
+				// or dropped one would silently change a recorded plan.
+				if err := s2.db.QueryRow("SELECT body FROM delegation_amendments WHERE run_id=1 AND seq=1").Scan(&body); err != nil || body != `{"e":1}` {
+					t.Fatalf("amendments clobbered by the replay: %q %v", body, err)
 				}
 			}
 
@@ -850,32 +848,21 @@ func TestMigrationV10ToV18FromStaleUserVersion(t *testing.T) {
 			if err := s2.Upsert(row("loom-new")); err != nil {
 				t.Fatalf("sessions unusable after the v13 replay: %v", err)
 			}
-			if err := s2.SetSessionDelegation("loom-new", "1:schema"); err != nil {
-				t.Fatalf("sessions.delegation unusable after the v13 replay: %v", err)
-			}
-			if err := s2.SetProjectNotesDir(UngroupedRoot, "/h/notes2", 1600); err != nil {
-				t.Fatalf("projects.notes_dir unusable after the v11 replay: %v", err)
-			}
-			if _, _, err := s2.ClaimOrchestrator("/w/b", 2000); err != nil {
-				t.Fatalf("orchestrators unusable after the v10 replay: %v", err)
-			}
-			r2, err := s2.InsertDelegationRun("atlas2", "/w/a", "{}", "{}", 2000)
-			if err != nil {
-				t.Fatalf("delegation_runs unusable after the v12 replay: %v", err)
-			}
-			if err := s2.InsertDelegationTask(DelegationTask{RunID: r2.ID, TaskID: "t",
-				State: "pending", RepoLabel: "r", UpdatedAt: 2000}); err != nil {
-				t.Fatalf("delegation_tasks unusable after the v12 replay: %v", err)
-			}
-			if err := s2.SetTaskNeedsSnapshot(r2.ID, "t", `{"x":{}}`, 2000); err != nil {
-				t.Fatalf("needs_snapshot unusable after the v15 replay: %v", err)
-			}
-			if seq, err := s2.AppendDelegationAmendment(r2.ID, "needs-scope", `{}`, 2000); err != nil || seq != 1 {
-				t.Fatalf("delegation_amendments unusable after the v14 replay: %d %v", seq, err)
-			}
-			if err := s2.UpsertDelegationArtifact(DelegationArtifact{RunID: r2.ID,
-				ArtifactID: "a", TaskID: "t", Path: "p"}); err != nil {
-				t.Fatalf("delegation_artifacts unusable after the v12 replay: %v", err)
+			for _, q := range []string{
+				`UPDATE sessions SET delegation='1:schema' WHERE name='loom-new'`,              // v13
+				`UPDATE projects SET notes_dir='/h/notes2' WHERE root='` + UngroupedRoot + `'`, // v11
+				`INSERT INTO orchestrators(project_root, spawned_at) VALUES ('/w/b', 2000)`,    // v10
+				`INSERT INTO delegation_runs(id, slug, name, project_root, manifest_json, base_shas, status, created_at, updated_at, mode, run_state, escalation)
+				 VALUES (2, 'atlas-2', 'atlas2', '/w/a', '{}', '{}', 'running', 2000, 2000, 'auto', 'running', '')`, // v12, v23-v25
+				`INSERT INTO delegation_tasks(run_id, task_id, state, repo_label, updated_at, needs_snapshot, seed_owed_since, certified_sha)
+				 VALUES (2, 't', 'pending', 'r', 2000, '{"x":{}}', 0, '')`, // v12, v15, v17, v18
+				`INSERT INTO delegation_amendments(run_id, seq, kind, body, created_at, rejected_at)
+				 VALUES (2, 1, 'needs-scope', '{}', 2000, 0)`, // v14, v16
+				`INSERT INTO delegation_artifacts(run_id, artifact_id, task_id, path) VALUES (2, 'a', 't', 'p')`, // v12
+			} {
+				if _, err := s2.db.Exec(q); err != nil {
+					t.Fatalf("object unusable after the replay: %q: %v", q, err)
+				}
 			}
 		})
 	}
@@ -913,151 +900,6 @@ func TestUserVersionIsPinned(t *testing.T) {
 		if err := s.db.QueryRow(
 			"SELECT name FROM sqlite_master WHERE type='index' AND name=?", idx).Scan(&name); err != nil {
 			t.Fatalf("%s missing: %v", idx, err)
-		}
-	}
-}
-
-// TestDelegationAmendmentsShape pins v14's SHAPE plus v16's column, and
-// replaces the assertion
-// that used to pin the table's ABSENCE while §§9-12 were parked. The shape is
-// what the append-only property rests on: (run_id, seq) as the PK is what makes
-// a duplicate ordinal a visible constraint violation instead of an ambiguous
-// replay order, and `approved_at INTEGER NOT NULL DEFAULT 0` is what makes
-// "proposed but not approved" a value every existing row already has rather
-// than a NULL every reader has to remember to handle.
-func TestDelegationAmendmentsShape(t *testing.T) {
-	s := open(t)
-	want := []struct {
-		name    string
-		typ     string
-		notNull bool
-		dflt    string
-		pk      int
-	}{
-		{"run_id", "INTEGER", true, "", 1},
-		{"seq", "INTEGER", true, "", 2},
-		{"kind", "TEXT", true, "", 0},
-		{"body", "TEXT", true, "", 0},
-		{"approved_at", "INTEGER", true, "0", 0},
-		{"created_at", "INTEGER", true, "", 0},
-		// v16, and it is LAST because ALTER appends: a rejection is a timestamp
-		// beside the approval, defaulted to 0 so every pre-v16 row already reads
-		// as "no decision" rather than as a NULL each caller must remember.
-		{"rejected_at", "INTEGER", true, "0", 0},
-	}
-	rows, err := s.db.Query("PRAGMA table_info(delegation_amendments)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	i := 0
-	for rows.Next() {
-		var cid, notNull, pk int
-		var name, typ string
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-			t.Fatal(err)
-		}
-		if i >= len(want) {
-			t.Fatalf("unexpected extra column %q", name)
-		}
-		w := want[i]
-		if name != w.name || typ != w.typ || (notNull == 1) != w.notNull ||
-			dflt.String != w.dflt || pk != w.pk {
-			t.Errorf("column %d = %q %q notnull=%d default=%q pk=%d; want %+v",
-				i, name, typ, notNull, dflt.String, pk, w)
-		}
-		i++
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if i != len(want) {
-		t.Fatalf("delegation_amendments has %d columns, want %d", i, len(want))
-	}
-
-	// The PK is the enforcement, not a convention: a duplicated (run_id, seq)
-	// must be refused by the database, because the replay order it would make
-	// ambiguous is what the effective graph is built from.
-	if _, err := s.AppendDelegationAmendment(1, "needs-artifact", "{}", 1000); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(
-		"INSERT INTO delegation_amendments (run_id, seq, kind, body, created_at) VALUES (1,1,'x','{}',1)",
-	); err == nil {
-		t.Fatal("a duplicate (run_id, seq) was accepted")
-	}
-}
-
-// TestSessionDelegationRoundtrip pins migration v13 through the session path.
-// Without it a delegation child's cwd (a worktree under ~/.loom) matches no
-// project target, the resolver fails closed, and every child vanishes from the
-// rail the moment anything is hidden — including when the user soloed the run's
-// own project.
-func TestSessionDelegationRoundtrip(t *testing.T) {
-	s := open(t)
-	r := row("loom-child")
-	if err := s.Upsert(r); err != nil {
-		t.Fatal(err)
-	}
-	got, _, _ := s.Get("loom-child")
-	if got.Delegation != "" {
-		t.Fatalf("default Delegation = %q, want empty (migration v13 default)", got.Delegation)
-	}
-	if err := s.SetSessionDelegation("loom-child", "7:auth-api"); err != nil {
-		t.Fatal(err)
-	}
-	got, _, _ = s.Get("loom-child")
-	if got.Delegation != "7:auth-api" {
-		t.Fatalf("Delegation = %q", got.Delegation)
-	}
-	live, _ := s.Live()
-	if len(live) != 1 || live[0].Delegation != "7:auth-api" {
-		t.Fatalf("Delegation lost in query(): %+v", live)
-	}
-	// a re-spawn writes a second row from the first (the Resume shape): the
-	// linkage must survive or the new child is unattributable again
-	resumed := got
-	resumed.Name = "loom-child-2"
-	if err := s.Upsert(resumed); err != nil {
-		t.Fatal(err)
-	}
-	if got2, _, _ := s.Get("loom-child-2"); got2.Delegation != "7:auth-api" {
-		t.Fatalf("resumed Delegation = %q", got2.Delegation)
-	}
-}
-
-// TestProjectNotesDirSurvivesRepoint is the derived-default regression the
-// orchestrator spec §3 names explicitly: notes_dir is MATERIALIZED into the row
-// rather than derived from root, so renaming the project's directory does not
-// silently relocate its whole brain.
-func TestProjectNotesDirSurvivesRepoint(t *testing.T) {
-	s := open(t)
-	if err := s.UpsertProject(Project{Root: "/w/old", Name: "P", Origin: "created",
-		CreatedAt: 1000, UpdatedAt: 1000}); err != nil {
-		t.Fatal(err)
-	}
-	if got, _, _ := s.GetProject("/w/old"); got.NotesDir != "" {
-		t.Fatalf("default NotesDir = %q, want empty (migration v11 default)", got.NotesDir)
-	}
-	const notes = "/h/.loom/projects/P-9f2c1ab4/notes"
-	if err := s.SetProjectNotesDir("/w/old", notes, 1100); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.RepointProject("/w/old", "/w/new", 1200); err != nil {
-		t.Fatal(err)
-	}
-	got, ok, err := s.GetProject("/w/new")
-	if err != nil || !ok {
-		t.Fatalf("GetProject after repoint: %v %v", ok, err)
-	}
-	if got.NotesDir != notes {
-		t.Fatalf("NotesDir = %q after repoint, want %q", got.NotesDir, notes)
-	}
-	list, _ := s.ListProjects()
-	for _, p := range list {
-		if p.Root == "/w/new" && p.NotesDir != notes {
-			t.Fatalf("NotesDir lost in ListProjects: %+v", p)
 		}
 	}
 }
@@ -1180,25 +1022,19 @@ func TestMigrationsReplayFromEveryStaleVersion(t *testing.T) {
 			// The replayed objects must still be USABLE, not merely present —
 			// a re-run that silently emptied or reshaped a table would leave
 			// the version correct and the DB wrong. One touch per slice's
-			// headline table, orchestrator (v10/v11) and delegation (v12/v13)
-			// included, since those are the slots this suite is newest at.
+			// headline table. The parked arcs' tables are probed with raw SQL:
+			// their store methods are gone, their migrations are not.
 			if _, err := s2.TranscriptCount(); err != nil {
 				t.Fatalf("transcripts unusable after replay from %d: %v", stale, err)
-			}
-			if _, err := s2.ListOrchestrators(); err != nil {
-				t.Fatalf("orchestrators unusable after replay from %d: %v", stale, err)
 			}
 			if _, err := s2.ListProjects(); err != nil {
 				t.Fatalf("projects unusable after replay from %d: %v", stale, err)
 			}
-			// v14/v15's objects, which is also the proof that a DB sitting at
-			// the previous head (13) receives both new slots rather than
-			// skipping them.
-			if _, err := s2.ListDelegationAmendments(1); err != nil {
-				t.Fatalf("delegation_amendments unusable after replay from %d: %v", stale, err)
-			}
-			if _, err := s2.DelegationTasksInStates("spawning"); err != nil {
-				t.Fatalf("delegation_tasks unusable after replay from %d: %v", stale, err)
+			for _, table := range []string{"orchestrators", "delegation_amendments", "delegation_tasks", "flashcards"} {
+				var n int
+				if err := s2.db.QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+					t.Fatalf("%s unusable after replay from %d: %v", table, stale, err)
+				}
 			}
 		})
 	}

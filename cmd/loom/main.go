@@ -5,13 +5,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/henricktissink/loom/internal/config"
-	"github.com/henricktissink/loom/internal/delegate"
-	"github.com/henricktissink/loom/internal/flashcards"
 	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/registry"
@@ -20,227 +17,12 @@ import (
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
 	"github.com/henricktissink/loom/internal/ui"
-	"github.com/henricktissink/loom/internal/workflow"
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "flashcards" {
-		if err := runFlashcards(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "loom:", err)
-			os.Exit(1)
-		}
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "manifest" {
-		if err := runManifest(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "loom:", err)
-			os.Exit(1)
-		}
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "run" {
-		if err := runDelegation(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "loom:", err)
-			os.Exit(1)
-		}
-		return
-	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "loom:", err)
 		os.Exit(1)
-	}
-}
-
-// runFlashcards wires the flashcards CLI to config + store, using the real
-// `claude` binary and the loom data dir as the child workdir.
-func runFlashcards(args []string) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	st, err := store.Open(cfg.DBPath())
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	return flashcards.RunCLI(args, st, "claude", cfg.LoomDir, time.Now().Unix(), os.Stdin, os.Stdout)
-}
-
-// runManifest implements `loom manifest validate <projectRoot>`: it loads every
-// delegation manifest under <projectRoot>/.loom/manifests through the SAME loader
-// the GUI's Start-run uses, and reports which load and which do not (with the
-// exact reason). The orchestrator runs this to validate the manifest it just
-// authored and self-correct before handing it off — so it never punts an
-// "is this valid?" question to the human.
-func runManifest(args []string) error {
-	if len(args) < 2 || args[0] != "validate" {
-		return fmt.Errorf("usage: loom manifest validate <projectRoot>")
-	}
-	root := args[1]
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	st, err := store.Open(cfg.DBPath())
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	targets, err := projects.New(st).LaunchTargets()
-	if err != nil {
-		return fmt.Errorf("load projects: %w", err)
-	}
-	dir := delegate.ManifestDir(root)
-	ms, errs := delegate.LoadAll(dir, delegate.NewResolver(targets))
-	for _, m := range ms {
-		fmt.Printf("ok   %s — %d task(s)\n", m.Name, len(m.Tasks))
-		for _, w := range m.Warnings {
-			if w.Task != "" {
-				fmt.Printf("     warning [%s]: %s\n", w.Task, w.Text)
-			} else {
-				fmt.Printf("     warning: %s\n", w.Text)
-			}
-		}
-	}
-	for _, e := range errs {
-		fmt.Printf("FAIL %s — %s\n", filepath.Base(e.Path), e.Err)
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("%d manifest(s) did not load in %s", len(errs), dir)
-	}
-	if len(ms) == 0 {
-		fmt.Printf("no manifests found in %s\n", dir)
-	}
-	return nil
-}
-
-// runDelegation implements the `loom run` subcommand (autonomy spec §11, Slice
-// 1):
-//
-//	loom run start --auto <projectRoot> <manifestName>
-//	loom run abort <runID>
-//
-// `start --auto` creates a delegation run through the SAME create path the GUI
-// uses (delegate.Runner.Create) and flags it `auto`. The autonomous LOOP —
-// spawn/check/merge — runs inside the long-lived loom GUI process, which holds
-// the tmux/launcher stack; this command records the run and hands it off. It is
-// the seam Slice 2's console trigger drives, and it works today for `abort`.
-func runDelegation(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: loom run (start --auto <projectRoot> <manifestName> | abort <runID>)")
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	st, err := store.Open(cfg.DBPath())
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-
-	switch args[0] {
-	case "abort":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: loom run abort <runID>")
-		}
-		var id int64
-		if _, err := fmt.Sscan(args[1], &id); err != nil || id <= 0 {
-			return fmt.Errorf("invalid run id %q", args[1])
-		}
-		claimed, err := st.AbortDelegationRunStateCAS(id, time.Now().Unix())
-		if err != nil {
-			return err
-		}
-		if !claimed {
-			return fmt.Errorf("run %d is already stopped", id)
-		}
-		fmt.Printf("run %d aborted\n", id)
-		return nil
-
-	case "start":
-		if len(args) != 4 || args[1] != "--auto" {
-			return fmt.Errorf("usage: loom run start --auto <projectRoot> <manifestName>")
-		}
-		root, name := args[2], args[3]
-		svc := projects.New(st)
-		targets, err := svc.LaunchTargets()
-		if err != nil {
-			return fmt.Errorf("load projects: %w", err)
-		}
-		// The §3/§14 hidden gate, the same one the GUI's Start-run applies: a run
-		// creates worktrees and a child window titled with the project's repo, so
-		// a hidden project must refuse new Loom-initiated work — at creation, here,
-		// not just downstream at spawn. Wired into the Runner below via Hidden.
-		pres, perr := svc.Resolver()
-		if perr != nil {
-			return fmt.Errorf("resolve project visibility: %w", perr)
-		}
-		ms, loadErrs := delegate.LoadAll(delegate.ManifestDir(root), delegate.NewResolver(targets))
-		var m delegate.Manifest
-		for _, cand := range ms {
-			if cand.Name == name {
-				m = cand
-				break
-			}
-		}
-		if m.Name == "" {
-			for _, e := range loadErrs {
-				if filepath.Base(e.Path) == name+".json" {
-					return fmt.Errorf("manifest %q did not load: %s", name, e.Err)
-				}
-			}
-			return fmt.Errorf("no valid manifest named %q under %s", name, delegate.ManifestDir(root))
-		}
-		if m.ProjectRoot != root {
-			return fmt.Errorf("manifest %q belongs to project %q, not this one", m.Name, m.Project)
-		}
-		// The SAME create path as the GUI: pin, snapshot, insert, §10.1 worktrees,
-		// CAS to running. A minimal Runner — no launcher, no rendezvous — because
-		// Create never spawns; the loop that does runs in the GUI.
-		layout := delegate.NewLayout(cfg.LoomDir)
-		checker := &delegate.Checker{}
-		w := &delegate.Worktrees{Layout: layout, Store: st, Cap: delegate.Concurrency3a}
-		r := &delegate.Runner{
-			Store: st, Layout: layout, Checker: checker, Worktrees: w,
-			Integrator: &delegate.Integrator{Store: st, Layout: layout, Checker: checker, Worktrees: w},
-			// Match the GUI: an unknown or not-visible project is hidden, so Create
-			// refuses it. Without this the CLI is a second create path that skips a
-			// gate the GUI enforces.
-			Hidden: func(pr string) bool {
-				if _, ok := pres.Project(pr); !ok {
-					return true
-				}
-				return !pres.ProjectVisible(pr)
-			},
-		}
-		run, cerr := r.Create(m)
-		if run.ID == 0 {
-			return fmt.Errorf("run was not created: %v", cerr)
-		}
-		if err := st.SetDelegationRunMode(run.ID, string(delegate.RunModeAuto), time.Now().Unix()); err != nil {
-			return fmt.Errorf("run %d created but could not be flagged auto: %w", run.ID, err)
-		}
-		// Run the first Tick so the run's ready set is promoted (Create inserts
-		// every task `pending`; Tick is the one place that decides readiness). A
-		// zombie all-`pending` run would otherwise sit until the GUI adopted it.
-		// The GUI's startup SweepAutoRuns is what then DRIVES it — this command
-		// only records and primes the run (driving it from the CLI is Slice 2).
-		if _, terr := r.Tick(context.Background(), run.ID); terr != nil {
-			fmt.Printf("run %d (%s) started --auto; first tick reported: %v\n", run.ID, run.Slug, terr)
-			return nil
-		}
-		if cerr != nil {
-			// Created WITH FAULTS (§10.1 worktrees): the run is real and flagged
-			// auto, and the fault is recorded on it. Reported, not swallowed.
-			fmt.Printf("run %d (%s) started --auto, with faults: %v\n", run.ID, run.Slug, cerr)
-			return nil
-		}
-		fmt.Printf("run %d (%s) started --auto — the loom GUI drives it on next launch\n", run.ID, run.Slug)
-		return nil
-
-	default:
-		return fmt.Errorf("unknown `loom run` subcommand %q (want start|abort)", args[0])
 	}
 }
 
@@ -296,11 +78,6 @@ func run() error {
 		PollEvery:       500 * time.Millisecond,
 	}
 
-	workflowsDir := filepath.Join(cfg.LoomDir, "workflows")
-	if err := os.MkdirAll(workflowsDir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", workflowsDir, err)
-	}
-
 	deps := ui.Deps{
 		Engine:        status.NewEngine(tm, st, cfg.ClaudeConfigDir),
 		Launcher:      launcher,
@@ -314,13 +91,7 @@ func run() error {
 			Binary:  "claude",
 			WorkDir: cfg.LoomDir,
 		},
-		Runner: &workflow.Runner{
-			Store:           st,
-			Launcher:        launcher,
-			ClaudeConfigDir: cfg.ClaudeConfigDir,
-		},
-		WorkflowsDir: workflowsDir,
-		Projects:     projectSvc,
+		Projects: projectSvc,
 	}
 	p := tea.NewProgram(ui.NewApp(deps), tea.WithAltScreen())
 	_, err = p.Run()
@@ -328,10 +99,9 @@ func run() error {
 }
 
 // launchRepos flattens the project service's target set into the flat repo
-// list the TUI's launcher, fan-out checklist and workflow loader validate
-// against. Target.Label is used verbatim: it is the stable directory-derived
-// identifier saved workflow definitions resolve through (§2), never the
-// user-editable project name.
+// list the TUI's launcher validates against. Target.Label is used verbatim:
+// it is the stable directory-derived identifier, never the user-editable
+// project name.
 //
 // Missing targets are dropped here rather than dimmed — the TUI has no
 // non-launchable row, and offering a path that no longer exists ends in tmux

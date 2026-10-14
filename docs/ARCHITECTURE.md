@@ -9,8 +9,8 @@
 > schema, a cross-package invariant, or one of the concurrency guards in §7,
 > update the matching section here in the same commit. Feature-level detail
 > (keybindings, flags) belongs in the MANUAL, not here. Last verified against
-> the tree at commit `fac253a` (2026-07-14); `go test ./...` green across all
-> 12 packages.
+> the tree on branch `cut-parked-arcs` (2026-10-14); `go test ./...` green
+> across all 16 packages.
 
 ---
 
@@ -27,12 +27,18 @@ Everything follows from three structural commitments:
 | Commitment | Consequence |
 |---|---|
 | **A session is a real `claude` in tmux** (`tmux -L loom`) | Full fidelity on attach; sessions outlive Loom, the terminal, and crashes. Loom is a *window*, never an owner. |
-| **Observation is read-only** | Status comes from `~/.claude/projects/**/*.jsonl` (Claude's own transcripts) + tmux pane liveness. Loom never instruments, patches, or intercepts Claude. |
+| **Observation is read-only** | Status comes from `~/.claude/projects/**/*.jsonl` (Claude's own transcripts), Claude's own session registry, and tmux pane liveness. Loom never instruments, patches, or intercepts Claude. |
 | **Two sources of truth, cleanly split** | tmux owns *liveness*; `~/.loom/loom.db` owns *history*. Reconciliation may retire a row, never delete one. |
 
 The corollary that shapes half the codebase: **Loom's model of a session is
 always inferred, never authoritative.** So every inference is written to
 degrade — a bad status label, never a lost session.
+
+Five earlier arcs (multi-step chains, same-prompt launches across many
+projects, a per-project agent with its own notes, task graphs run in
+worktrees, and a study deck built from transcripts) were cut from the tree.
+Their last state is reachable at the git tag `parked-arcs`; their tables
+remain in the schema (§6.4) so an existing `loom.db` opens unchanged.
 
 ---
 
@@ -42,27 +48,27 @@ Two binaries over one shared engine:
 
 ```
 cmd/loom      →  Bubble Tea TUI  (internal/ui)      ─┐
-                                                     ├─→  internal/{status,session,store,memory,workflow,tmux,…}
+                                                     ├─→  internal/{status,session,store,memory,projects,tmux,…}
 cmd/loom-gui  →  Wails v2 + xterm.js (frontend/)    ─┘
 ```
 
 Both `main()`s do the same wiring: check binaries → load config → ensure tmux
-server → open store (migrate) → discover projects → start the indexer
-goroutine → build `Launcher`, `Engine`, `Summarizer`, `Runner` → run the
+server → open store (migrate) → discover and reconcile projects → start the
+indexer goroutine → build `Launcher`, `Engine`, `Summarizer` → run the
 frontend. The GUI adds `hydratePATH()`/`hydrateLocale()` first, because a
 Finder-launched bundle inherits neither a usable `PATH` nor a locale.
 
 **Two Loom instances against one DB is a supported state** — hence WAL,
-`busy_timeout`, and the CAS discipline in §6.
+`busy_timeout`, and the single-connection discipline in §6.
 
 ### Filesystem contract
 
 | Path | Owner | Role |
 |---|---|---|
-| `~/.loom/loom.db` | Loom (rw) | sessions, transcripts index, FTS, workflow runs |
-| `~/.loom/workflows/*.json` | user (rw) | workflow definitions |
+| `~/.loom/loom.db` | Loom (rw) | sessions, projects, transcripts index, FTS |
 | `~/.loom/settings.json` | GUI (rw, atomic) | editor, notifications, auto-summarize, terminal theme |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
+| `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status |
 | `~/.claude.json` | Claude (Loom: read-only) | per-project trust flags |
 | `$LOOM_WORKSPACE` (default `~/Sauce`) | user | project discovery root |
 
@@ -78,32 +84,35 @@ frontend.
 ```
    cmd/loom (TUI)                    cmd/loom-gui (Wails)
         │                                    │
-   internal/ui  ───────────────┬──────────────┘
-        │                      │
-   internal/workflow ──────────┤
-        │                      │
-   internal/status ────────────┤        internal/memory
-        │        │             │          │        │
-   internal/session   internal/transcript │   internal/store
-        │                                 │        │
-   internal/tmux                internal/registry, trust, config
+   internal/ui ────────────────┬─────────────┤
+        │                      │             │
+   internal/status ────────────┤     internal/{gitdiff,cleanup}
+        │        │             │
+   internal/session   internal/transcript   internal/memory
+        │                │                     │
+   internal/tmux   internal/ccsessions   internal/store ── internal/projects
+                                               │
+                              internal/registry, trust, config
 ```
 
 | Package | Responsibility | Notes |
 |---|---|---|
 | `tmux` | Every interaction with the `-L loom` server | Only place that shells out to `tmux`. Exact-match targets (`=name`), locale defense. |
-| `session` | Launch recipe + orchestrated launch/resume | Owns tmux naming, argv construction, the ready/trust gate, seed delivery. |
+| `session` | Launch recipe + the launch/resume sequence | Owns tmux naming, argv construction, the ready/trust gate, seed delivery, multi-repo `--add-dir`. |
 | `transcript` | Locate + interpret Claude's JSONL | Path encoding, incremental `Reader`, turn-boundary `Classifier`. |
+| `ccsessions` | Read Claude's own session registry | The only way to learn a pane's *current* session id after `/clear` or an in-pane resume. |
 | `status` | Fuse transcript state with tmux liveness | The reconcile loop. The only writer of live-session status. |
-| `store` | SQLite: schema, sessions, memory index, runs | Migrations are transactional & re-entrant. |
+| `store` | SQLite: schema, sessions, projects, memory index | Migrations are transactional & re-entrant. |
 | `memory` | Index / extract / recall / summarize | Reads the whole Claude archive; the only package that calls out to an LLM. |
-| `workflow` | Definitions + CAS-guarded runner | Multi-step chains of real sessions. |
+| `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `trust` | Read Claude's trust flags | Purely defensive — never answers a trust dialog. |
+| `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
+| `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
-| `ui` | Bubble Tea app: 13 views, one model | ~2.9k lines; the TUI's whole state machine. |
+| `ui` | Bubble Tea app: 9 views, one model | The TUI's whole state machine. |
 
-Test mass is deliberate: **11,573 test lines vs 10,246 source lines.**
+Test mass is deliberate: roughly **13k test lines vs 11k source lines.**
 
 ---
 
@@ -127,8 +136,16 @@ observation possible without any cooperation from Claude.
 `claude --resume <id>` **appends to the same file under the same id** (spike
 verified, `docs/spikes/2026-07-02-session-id-spike.md`). So a resume mints a
 new tmux name but keeps the claude id — which is why identity resolution
-throughout the codebase goes *through* `ClaudeSessionID`, not the tmux name
-(see `workflow.ResolveStepSession`).
+throughout the codebase goes *through* `ClaudeSessionID`, not the tmux name.
+
+**The id can change under a live pane.** `/clear`, or `claude --resume` typed
+into the pane, mints a new session id and a new transcript file, and nothing
+in the old file says so. Claude's own registry (`~/.claude/sessions/<pid>.json`)
+is the only place the pane's current id is written, keyed by the tmux target
+Claude observed itself in. `status.Engine.Poll` reads it once per pass and
+rebinds the row (`SetClaudeSessionID`, drop the cached reader) when it drifts;
+the registry's cwd is deliberately *not* adopted, so a `/clear` never moves a
+session between projects.
 
 ### 4.2 Launch
 
@@ -136,7 +153,7 @@ throughout the codebase goes *through* `ClaudeSessionID`, not the tmux name
 seeded) spawn `seedWhenReady` goroutine. The argv:
 
 ```
-claude --session-id <uuid> --settings '{"theme":"light"}' [--model X] [--permission-mode Y]
+claude --session-id <uuid> --settings '{"theme":"light"}' [--model X] [--permission-mode Y] [--add-dir …]
 ```
 
 The injected `--settings` theme is a GUI concern leaking down for a real
@@ -144,6 +161,10 @@ reason: xterm.js can't remap Claude's 256-color output, so Claude's theme must
 match Loom's terminal theme or the text is illegible. It's merged over the
 user's global config, never mutating it (`session.SetClaudeTheme`, guarded by
 an RWMutex so a launch can't race a pref change).
+
+A multi-repo launch (§5 of the projects spec) keeps the topmost selected repo
+as cwd and passes the rest as `--add-dir`; the row stores them in `add_dirs`,
+and visibility (§8) is evaluated over the whole set.
 
 ### 4.3 The seed gate
 
@@ -225,7 +246,9 @@ One pass, mutex-serialized end to end:
 7. `MarkLiveOrphansEnded` retires live rows with no tmux backing — protected
    by a **5s grace window** so a poll racing a session's own launch can't
    retire a newborn.
-8. Read live rows, poll each transcript, persist title/status changes, and
+8. Read Claude's session registry once; rebind any live row whose pane now
+   runs a different session id (§4.1).
+9. Read live rows, poll each transcript, persist title/status changes, and
    compute `NewlyNeedsYou` **before** persisting the new status — which is
    what makes the notification naturally once-only.
 
@@ -241,8 +264,10 @@ single connection is not just a simplification — the FTS rowid-range trick in
 §6.2 depends on per-file insert contiguity, which it guarantees.
 
 Migrations are a versioned list applied **one transaction per migration**
-(DDL + `PRAGMA user_version` together), with `IF NOT EXISTS` on every object.
-A crash between the two used to brick the next `Open()`.
+(DDL + `PRAGMA user_version` together), with `IF NOT EXISTS` on every CREATE
+and an "already applied" check on every ALTER, so a replay from a stale
+`user_version` is safe. A crash between the two used to brick the next
+`Open()`.
 
 | v | Adds |
 |---|---|
@@ -250,16 +275,18 @@ A crash between the two used to brick the next `Open()`.
 | 2 | `sessions.seed_status` |
 | 3 | `sessions.title` |
 | 4 | `transcripts`, `indexed_files`, `messages_fts` (FTS5) |
-| 5 | `workflow_runs` |
 | 6 | `idx_transcripts_project` |
+| 7 | `projects`, `project_repos` (hidden / solo / missing) |
+| 8 | `sessions.add_dirs` |
+| 9 | `projects.collapsed` |
+| 5, 10–25 | tables and columns of the parked arcs (§6.4) |
 
 ### 6.1 `sessions` — Loom's own launches
 
 Keyed by tmux name. Terminal statuses are `done`/`error`; live is
 `running|needs_you|idle|unknown`. Several rows can share a
 `claude_session_id` (one per resume) — `GetLatestByClaudeSessionID` picks the
-newest, which is the identity primitive workflows and resume-collision
-detection rely on.
+newest, which is the identity primitive resume-collision detection relies on.
 
 ### 6.2 The memory index — three tables, one idea
 
@@ -310,6 +337,16 @@ quoted, trailing `*` on the last for as-you-type prefix matching) and
 `SearchSessionsRaw` (recall supplies its own expression). Both swallow FTS
 syntax errors into "zero results" rather than surfacing an error.
 
+### 6.4 Parked tables
+
+Migrations 5 and 10–25 create tables and columns that no code reads any more
+(one extra column each on `sessions` and `projects`, and ten tables of their own).
+They stay for two reasons: migrations are append-only, so a DB at head must
+keep opening without a rewrite, and the arcs they served are parked at the
+tag `parked-arcs`, not abandoned. `TestMigrationsReplayFromEveryStaleVersion`
+still probes them with raw SQL. A future migration may drop them; nothing
+should be built on them.
+
 ---
 
 ## 7. Concurrency & failure ledger
@@ -324,13 +361,14 @@ knowing:
 | resurrection branch | a launch/reconcile race stranding a live session in a terminal status forever |
 | alive-on-probe-failure | a transient `list-panes` failure retiring *every* session |
 | adopt-before-reap | a tmux session dying unrecorded |
-| `AdvanceRunCAS` (§8) | double-press / two-instance workflow double-advance |
+| registry rebind (§4.1) | a row tailing an abandoned transcript forever after `/clear` |
 | `sendPendingSeed` re-read | double-delivering a seed when a 60s gate wait races a manual retry |
 | `Indexer.sweepMu` | overlapping sweeps contending over rowid ranges |
 | `ptyRegistry` double-attach check | two PTYs on one session; killed children are reaped |
 | captured `actionTarget` in the TUI | rows reorder every 1.5s poll — kill/tag must act on the row captured at confirm-open |
 | debounce generation counters | a stale search/recall result overwriting a newer one |
 | `cmd.WaitDelay` in the summarizer | an orphaned grandchild wedging `Wait()` forever |
+| `lastRes` fallback in the GUI resolver | a transient DB error un-hiding a project mid-screen-share |
 
 Two `ensureLocale`/`hydrateLocale` defenses exist because tmux keys UTF-8 off
 `LC_ALL`/`LC_CTYPE`/`LANG`, and a Finder-launched bundle has none: in non-UTF-8
@@ -340,57 +378,31 @@ every parsed session name.
 
 ---
 
-## 8. Workflows
+## 8. Projects, attribution and hiding
 
-A workflow is a named chain of steps, each an ordinary `claude` session.
-**Nothing auto-advances** — the user presses `n`, sees a confirm with the
-fully substituted seed, and approves.
+A **project** is a root directory plus member repos (`projects`,
+`project_repos`). `registry.Discover` finds candidates under
+`$LOOM_WORKSPACE`; `projects.Service.Reconcile` folds them into `loom.db`
+without clobbering user-set state (name, hidden, solo, collapsed), and a
+failed scan is non-fatal — everything already reconciled stays launchable.
+`Ungrouped` is a real reserved row, not a computed bucket, so every frontend
+has one code path.
 
-**Definitions** (`~/.loom/workflows/<name>.json`) are validated at load:
-name matches filename stem; ≥1 step; every model/mode/relation in a known set;
-step 1 names a project; every `{{…}}` token whitelisted
-(`prev.outcome|title|ask`) so a typo can never ship as literal braces; newline
-runs in seeds collapsed at load (a literal `\n` in `send-keys` submits early).
-Step `project` is a registry **label** on disk and is rewritten in place to the
-resolved **absolute path** by `LoadAll` — the `Runner` has no registry, so
-resolution must happen while one is in hand. An empty project means "inherit
-the previous step's cwd".
+**Attribution is computed from paths, never stored.** A session belongs to the
+project whose root or repo contains its cwd. The display label on the row
+(`ProjectLabel`, `filepath.Base(cwd)` for adopted orphans) is never an
+attribution input — two same-basename repos in different projects are
+routine in a multi-repo workspace.
 
-**Relations:**
-
-| Relation | Effect |
-|---|---|
-| `fresh` | new session, seed as-is |
-| `fork` | new session, `{{prev.*}}` substituted from the previous step's transcript extraction |
-| `continue` | seed sent into the *current* session (no new session; model/mode can't change — a known v1 limit) |
-
-Substitution reads the previous step's transcript through the same
-`memory.ExtractFile` machinery, at **confirm-open time**. Missing values render
-as `(unavailable)` rather than blocking; values are capped at 8 KB each and
-15 KB assembled, with a visible truncation marker; stray CR/LF is stripped
-(again: a newline is an Enter).
-
-**`AdvanceRunCAS` is the concurrency primitive.** Every advance is a
-compare-and-swap on `(id, step_idx, status='running')`:
-
-- `continue`: **CAS first** (claiming the step, storing the seed in
-  `pending_seed`), then an async goroutine delivers it once the transcript
-  state reaches idle/needs-you — because `❯` is meaningless mid-generation, so
-  the gate is transcript-derived, not a pane read. `pending_seed` is the
-  durable "still owed" record; it survives restart and `n` retries it.
-- `fork`/`fresh`: Launch, *then* CAS — `Launcher.Launch` mints its own session
-  id and there's no API to hand it a pre-chosen one. The disclosed failure
-  mode: a rejected CAS after a successful launch leaves a real, untracked
-  session and the run shows its dead-step hint.
-
-A dead `continue` target returns `ErrContinueDead`; the UI offers a one-shot
-demotion (`Advance(..., forceFork=true)`). `Finish` and `Abandon` are CAS'd
-too, so an abandon confirm opened against a running snapshot can't overwrite a
-run that finished meanwhile. **Abandon ≠ kill** — the sessions keep running.
-
-Runs never garbage-collect. Sessions are tagged `wf:<name>#<id>:step<N>`; a
-dashboard `r`-resume of a dead step reconnects transparently because
-`ResolveStepSession` resolves by claude id, not tmux name.
+**Hiding fails closed.** `projects.Resolver.Visible(dirs…)` evaluates a
+session's whole directory set (cwd ∪ `add_dirs`): if *any* lands in a hidden
+project, or none can be attributed while anything is hidden, the session is
+not shown. Solo is "hide everything else". The predicate is applied at the
+DTO/row layer of each surface — rail, Finished, search, needs-you count,
+title, dock badge, notifications, launcher targets, palette, auto-summarize —
+not in the engine, which keeps polling hidden sessions (§6.2a of the spec).
+The GUI keeps the last resolver that built successfully and falls back to it
+on a read error, so a transient DB hiccup cannot reveal a hidden client.
 
 ---
 
@@ -453,7 +465,7 @@ at an even stride to fill the remainder; agent docs excluded; head+tail 3:1
 fallback if user docs alone overflow; UTF-8-safe cuts everywhere. Nothing is
 stored on failure. It is user-triggered (`s`) in the TUI; the GUI adds an
 opt-in background auto-summarize that does **one at a time, once per session
-per process**.
+per process**, and skips hidden projects without marking them tried.
 
 ---
 
@@ -461,24 +473,27 @@ per process**.
 
 ### 11.1 TUI (`internal/ui`) — Bubble Tea
 
-One `App` model, 13 views (`viewDash`, `viewLauncher`, `viewSearch`,
-`viewDetail`, `viewWorkflows`, `viewWall`, `viewFanout`, confirms, …), one
-`Update` switch. Recurring discipline throughout:
+One `App` model, 9 views (`viewDash`, `viewLauncher`, `viewConfirmKill`,
+`viewConfirmClear`, `viewTag`, `viewPeek`, `viewSearch`, `viewDetail`,
+`viewWall`), one `Update` switch. Recurring discipline throughout:
 
 - **Captured targets.** Anything a confirm acts on is captured at open time,
   because rows reorder under the cursor on every poll.
 - **Generation counters.** Every debounced/async result carries the seq it was
   issued with; stale ones are discarded.
-- **Nil-safe `Deps`.** `Store`, `Summarizer`, `Runner`, `IndexerStatus` may all
-  be nil — every path no-ops instead of panicking, so dashboard-only tests use
-  a bare `Deps{}`.
+- **Nil-safe `Deps`.** `Store`, `Summarizer`, `Projects`, `IndexerStatus` may
+  all be nil — every path no-ops instead of panicking, so dashboard-only tests
+  use a bare `Deps{}`.
 
 ### 11.2 GUI (`cmd/loom-gui`) — Wails v2 + xterm.js
 
-The Go side is a thin **bridge**: `App` owns no orchestration beyond the PTY
-registry; every method is a DTO-shaped call over the same engine, with
-`defer recover()` on the poll paths so a half-built engine degrades to an
-empty list rather than crashing the window.
+The Go side is a thin **bridge**: `App` owns nothing beyond the PTY registry
+and the settings store; every bound method is a DTO-shaped call over the same
+engine, with `defer recover()` on the poll paths so a half-built engine
+degrades to an empty list rather than crashing the window. Surfaces: the
+rail (projects · threads · stage), the launcher with multi-repo targets, the
+project overview (rename, re-point, add/remove repo, hide/solo, clean repo),
+search, the diff panel, preferences, and the ⌘K palette.
 
 Native touches, each with a real reason:
 
@@ -492,14 +507,21 @@ Native touches, each with a real reason:
 - ⌘-click on terminal text: file paths resolve against the session cwd and open
   in Cursor/Code/Zed (plus an `open -a` to actually raise the window, since
   macOS won't transfer foreground activation); URLs are gated to `http(s)` only.
-- `SessionDiff` shells out to `git diff HEAD` for an in-app review panel.
+- `SessionDiff` shells out to `git diff HEAD` (`internal/gitdiff`) for an
+  in-app review panel, sectioned per repo for multi-repo sessions.
+- `RepoCleanupPreview`/`RepoCleanupRun` (`internal/cleanup`) delete only paths
+  that are both git-ignored and junk-patterned; tracked files and `.env`-style
+  configs are structurally unreachable.
 - Settings persist atomically (temp + rename), loaded over a defaults base so
   an old file with missing keys keeps sane values.
 
 Frontend is dependency-light: vanilla ES modules + xterm.js, a "Blush" palette
 in `theme.js`/`tokens.css`, light/dark terminal themes mirrored into Claude via
 `--settings`, Unicode v11 width addon so emoji measure 2 cells like tmux and
-Claude's own TUI.
+Claude's own TUI. Vite empties `dist/` on every build and rewrites
+`dist/.gitkeep`, so `//go:embed all:frontend/dist` never bakes a stale chunk
+into the binary and still compiles on a checkout that has not built the
+frontend.
 
 ---
 
@@ -508,16 +530,15 @@ Claude's own TUI.
 1. **Never own what you can observe.** Sessions live in tmux; transcripts
    belong to Claude. Loom holds only derived state, and can rebuild it.
 2. **Degrade the label, never the session.** Every inference path — status
-   fusion, extraction, substitution, recall — has a defined "unknown" outcome
-   that lets work continue.
-3. **Nothing silently auto-advances or auto-injects.** Workflows wait for a
-   keypress with a preview. Recall requires an explicit `space`. Summaries
-   cost quota, so they're opt-in.
-4. **Failures must be visible.** `seed_status`, `pending_seed`, `file_missing`,
-   `· seed FAILED`, `(pane unavailable)`, dim-red load errors — the codebase
-   consistently prefers a visible bad state to a silent drop.
-5. **CAS at every multi-writer boundary.** Two instances is a supported
-   configuration, so "read then write" is never left unguarded.
+   fusion, extraction, recall — has a defined "unknown" outcome that lets work
+   continue.
+3. **Nothing silently auto-injects.** Recall requires an explicit `space`.
+   Summaries cost quota, so they're opt-in.
+4. **Failures must be visible.** `seed_status`, `file_missing`,
+   `· seed FAILED`, `(pane unavailable)` — the codebase consistently prefers a
+   visible bad state to a silent drop.
+5. **Hiding fails closed.** A session that cannot be attributed is not shown
+   while anything is hidden; a read error keeps the last good resolver.
 6. **Comments carry the *why*, including the wrong answer.** Most non-obvious
    lines cite the spec section or the red-team finding that produced them.
    This is why the code is readable years later — preserve the habit.
@@ -526,15 +547,13 @@ Claude's own TUI.
 
 ## 13. Known limits (v1)
 
-Recall is lexical only (no embeddings — the interface is upgradeable).
-Workflows have no in-app editor, no branching, no auto-advance, no scheduling,
-no per-step worktree isolation, and `continue` can't change model/mode. Fan-out
-recipes are uniform across the group and there's no group view beyond the tag,
-marker, and summary line. The wall is read-only, colorless, left-edge-only, and
-only captures the visible page. Workflow run rows never GC. macOS-only in
-practice (Dock badge, `osascript`, `open`). Index freshness is bounded by the
-10-minute sweep. Scrollback inside a session is tmux copy-mode, not native
-scroll — the one deliberate deviation from raw `claude`.
+Recall is lexical only (no embeddings — the interface is upgradeable). The
+wall is read-only, colorless, left-edge-only, and only captures the visible
+page. macOS-only in practice (Dock badge, `osascript`, `open`). Index
+freshness is bounded by the 10-minute sweep. Scrollback inside a session is
+tmux copy-mode, not native scroll — the one deliberate deviation from raw
+`claude`. Claude's session registry is undocumented; the reader is tolerant,
+and a missing registry simply means no rebind.
 
 **There is deliberately no headless or scripted launch path, and there isn't
 going to be one.** Loom is a cockpit for a human who is present.
@@ -547,10 +566,11 @@ going to be one.** Loom is a cockpit for a human who is present.
 |---|---|
 | How is a session started? | `internal/session/{recipe,launch}.go` |
 | Why does a row say "running"? | `internal/transcript/classify.go` + `internal/status/status.go` |
-| Why did a row disappear / come back? | `internal/status/engine.go` |
-| What's in the DB? | `internal/store/store.go` (migrations), `memory.go`, `runs.go` |
+| Why did a row disappear / come back / change id? | `internal/status/engine.go`, `internal/ccsessions/ccsessions.go` |
+| What's in the DB? | `internal/store/store.go` (migrations), `memory.go`, `projects.go` |
 | How is search built? | `internal/store/memory.go` (`searchSQL`), `internal/memory/recall.go` |
 | What gets indexed, and what's filtered out? | `internal/memory/extract.go` |
-| Workflow semantics | `internal/workflow/{def,run}.go` |
+| Who can see what? | `internal/projects/resolver.go`, `cmd/loom-gui/session_dto.go`, `internal/ui/visibility.go` |
 | Design specs & plans (historical record) | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
 | Empirical findings about Claude's CLI | `docs/spikes/` |
+| The parked arcs | `git show parked-arcs` |

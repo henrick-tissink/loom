@@ -1,8 +1,11 @@
 import { defineConfig } from "vite";
+import { writeFileSync } from "node:fs";
 
 export default defineConfig({
-  // emptyOutDir stays false so the committed dist/.gitkeep survives builds —
-  // it keeps the //go:embed target present on fresh checkouts that haven't run
-  // a frontend build. dist/* is gitignored, so stale hashed chunks never reach git.
-  build: { outDir: "dist", emptyOutDir: false },
+  // emptyOutDir clears stale hashed chunks, which //go:embed all:frontend/dist
+  // would otherwise bake into every binary. The committed dist/.gitkeep keeps
+  // the embed target present on checkouts that have not run a frontend build,
+  // so it is written back after each build.
+  build: { outDir: "dist", emptyOutDir: true },
+  plugins: [{ name: "keep-gitkeep", closeBundle() { writeFileSync("dist/.gitkeep", ""); } }],
 });

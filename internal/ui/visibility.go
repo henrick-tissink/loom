@@ -235,8 +235,8 @@ func visibleRelated(res *projects.Resolver, hits []memory.RelatedHit, limit int)
 	return out
 }
 
-// visibleRepos scopes the launch surface — the launcher's project field and
-// the fan-out checklist — to the projects currently on screen. Offering a
+// visibleRepos scopes the launch surface — the launcher's project field — to
+// the projects currently on screen. Offering a
 // hidden client's repo in a picker is the same leak as showing its session,
 // and under solo the picker is the fastest way to accidentally launch back
 // into the project just put out of view.

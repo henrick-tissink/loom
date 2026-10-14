@@ -340,10 +340,6 @@ func TestLaunchSurfacesAreProjectScoped(t *testing.T) {
 	if len(a.form.repos) != 1 || a.form.repos[0].Path != visibleCwd {
 		t.Fatalf("launcher repos = %+v, want only %s", a.form.repos, visibleCwd)
 	}
-	a.openFanout()
-	if len(a.fanForm.repos) != 1 || a.fanForm.repos[0].Path != visibleCwd {
-		t.Fatalf("fan-out repos = %+v, want only %s", a.fanForm.repos, visibleCwd)
-	}
 
 	// With nothing hidden the surfaces are untouched — hiding is opt-in, and
 	// the fail-closed rule must stay dormant for a user who hid nothing.

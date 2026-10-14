@@ -38,59 +38,6 @@ behind the non-obvious choices.
   quota (a few seconds, one small request), and only runs when you press it.
   Pressing `s` again regenerates and replaces the stored summary.
 
-## Phase 3 — Workflows
-
-- `w` opens the workflows view: a **RUNS** section (active runs, honest
-  store-backed status: `▸ name#id · step 2/3 execute · needs you` plus
-  `· seed pending` / `· seed FAILED` markers) and a **WORKFLOWS** section
-  (definitions loaded from `~/.loom/workflows/*.json`, malformed files listed
-  dim-red with their error).
-- A workflow is a named chain of steps, each a normal `claude` session.
-  Starting one launches step 1; you advance (`n`) when you're ready — nothing
-  auto-advances. Loom launches the next step per its **relation** and offers
-  a confirm preview of exactly what will happen (including the substituted
-  seed) before it fires.
-- **Definition format** (`~/.loom/workflows/<name>.json`, name must match the
-  filename):
-
-  ```json
-  { "name": "plan-execute-review",
-    "steps": [
-      { "label": "plan",    "project": "myproject", "model": "opus", "mode": "plan",
-        "seed": "Plan the following work: <describe>. Write the plan to docs/plan.md.", "relation": "fresh" },
-      { "label": "execute", "model": "sonnet", "mode": "acceptEdits", "relation": "fork",
-        "seed": "Execute the plan just written. Prior step concluded: {{prev.outcome}}" },
-      { "label": "review",  "relation": "fresh", "seed": "/code-review" } ] }
-  ```
-
-  A starter copy lives at `docs/examples/plan-execute-review.json` — copy and
-  edit it:
-
-  ```sh
-  mkdir -p ~/.loom/workflows
-  cp docs/examples/plan-execute-review.json ~/.loom/workflows/
-  # edit the "project" field(s) and seed prompts to match your workspace
-  ```
-
-- **Relations** (ignored for step 1, which is always a fresh session):
-  - `fresh` — new session, seed used as-is.
-  - `fork` — new session, seed with `{{prev.*}}` templates substituted from
-    the previous step.
-  - `continue` — the seed is sent into the *current* step's still-running
-    session (model/mode are ignored — ignoring them is a known v1 limit).
-- **Template variables**: `{{prev.outcome}}`, `{{prev.title}}`,
-  `{{prev.ask}}` — filled in from the previous step's extracted transcript at
-  confirm-open time. Any other `{{...}}` token is rejected at load time (a
-  typo never ships as literal braces). A value that can't be resolved (or an
-  `ask` that fails the same filters memory search uses) renders as
-  `(unavailable)` rather than blocking the advance.
-- **Limits (v1)**: no in-app definition editor (hand-edit the JSON); no
-  branching/conditionals; no auto-advance; no scheduling; no per-step
-  worktree isolation; `continue` can't change model/mode; each substituted
-  value is capped at 8KB and the assembled seed at 15KB (both truncate with a
-  visible `…[truncated]` marker); a dead `continue` target offers `f` to fork
-  from the transcript instead; run rows are never garbage-collected.
-
 ## Phase 2.5 — Recall
 
 - The launcher (`n`) gains a **RELATED** panel below the form: pick a project
@@ -130,27 +77,8 @@ behind the non-obvious choices.
   small archive, same-project recency dominates simply because there isn't
   yet enough cross-project history for the query to rank against.
 
-## Phase 4 — Fan-out + Wall
+## Phase 4 — Wall
 
-- **`N`** opens fan-out: a project checklist plus one shared model · mode ·
-  optional seed. Check as many projects as you want (`space`), `tab`/
-  `shift-tab` moves between the checklist / model / mode / seed fields,
-  `↓`/`↑` scroll the checklist while it's focused. `↵` launches — one real
-  session per checked project, all sharing the same recipe (no per-project
-  seed in v1) — and stays on the form until every launch has resolved, then
-  drops you back on the dashboard with a summary line:
-
-  ```
-  fan #a1b2c3: 4/5 launched · failed: tavli (bad cwd) · volar launched untagged
-  ```
-
-  Every session in the group is tagged `fan:<groupID>` (visible in the tag
-  editor, `t`); a launched-but-untagged session is still counted as
-  launched, never silently dropped. Rows belonging to a group get a dim
-  `· fan` marker in the dashboard's activity column — that marker plus the
-  tag editor and the summary line above are the only group affordance in v1,
-  there's no dedicated group view yet. `r`-resume on a fanned-out session
-  carries its tags forward, so a resumed session rejoins its group.
 - **`W`** opens the wall: a read-only, 2-column grid of every live session's
   pane — header line (status · project · title/tool hint) plus a tail of
   recent output, refreshed once per poll. Order is stable (oldest-launched
@@ -164,10 +92,8 @@ behind the non-obvious choices.
 - **Limits (v1)**: wall cells are colorless and show only the left edge of
   wide panes (Claude's own chrome truncates on the right); only the visible
   page's panes are captured, so paging is a read, not a live feed of
-  everything at once; fan-out recipes are uniform across the group; no
-  group view beyond the marker/tag/summary above; no remote hosts; the wall
-  is read-only — there's still no headless/scripted launch path, and there
-  isn't going to be one.
+  everything at once; no remote hosts; the wall is read-only — there's still
+  no headless/scripted launch path, and there isn't going to be one.
 
 ## Requirements
 

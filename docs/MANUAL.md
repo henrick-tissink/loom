@@ -53,10 +53,8 @@ On first launch the indexer sweeps your entire archive in the background (~10s f
 | `↵` | Attach full-screen (F12 to come back) |
 | `space` | **Peek** — live read-only view of the pane without attaching (`↵` attaches from peek, `esc` backs out) |
 | `n` | New session (launcher) |
-| `N` | **Fan-out** — same recipe across many projects (§8) |
 | `/` | **Search** everything you've ever done (§6) |
-| `w` | **Workflows** (§7) |
-| `W` | **Wall** — live grid of all running sessions (§8) |
+| `W` | **Wall** — live grid of all running sessions (§7) |
 | `x`→`y` | Kill (confirm) |
 | `t` | Edit tags |
 | `r` | Reopen a RECENT session (`claude --resume` — same conversation) |
@@ -111,61 +109,21 @@ It's real Claude Code — nothing changes. Remember:
 
 Notes: new content appears in search up to one sweep (~10 min) late; deleted transcripts stay searchable forever (the index is the memory); search is text-match, not semantic.
 
-## 7. Workflows
-
-Saved multi-step chains of real sessions. Definitions are JSON files in `~/.loom/workflows/`:
-
-```json
-{ "name": "plan-execute-review",
-  "steps": [
-    { "label": "plan",    "project": "parallax", "model": "opus", "mode": "plan",
-      "seed": "Plan the following work: <describe>. Write the plan to docs/plan.md.", "relation": "fresh" },
-    { "label": "execute", "model": "sonnet", "mode": "acceptEdits", "relation": "fork",
-      "seed": "Execute the plan just written. Prior step concluded: {{prev.outcome}}" },
-    { "label": "review",  "relation": "fresh", "seed": "/code-review" } ] }
-```
-
-(Starter copy: `cp docs/examples/plan-execute-review.json ~/.loom/workflows/` — filename must match `"name"`.)
-
-**Relations** — how each step gets its context:
-
-| Relation | Meaning |
-|---|---|
-| `fresh` | Brand-new session, seed as-is (step 1 is always fresh) |
-| `fork` | New session; `{{prev.outcome}}`, `{{prev.title}}`, `{{prev.ask}}` in the seed are replaced with the previous step's distilled values |
-| `continue` | No new session — the seed is sent into the current step's session (delivered only when it's idle; model/mode can't change mid-session) |
-
-Steps without a `project` inherit the previous step's. Unknown template variables are rejected when the file loads.
-
-**Running:** `w` → select a definition → `↵` starts step 1. You work in that session as long as you like (it's a normal dashboard row, tagged `wf:name#id:stepN`). When ready:
-
-| Key (on a run) | Action |
-|---|---|
-| `n` | **Advance** — a confirm shows the next step + a preview of the substituted seed → `y` |
-| `f` | If the current session died, demote this advance to a fork from its transcript (offered in the confirm) |
-| `↵` | Attach to the current step's session |
-| `x` | Abandon the run (its sessions stay alive as normal sessions) |
-
-Advancing past the last step finishes the run. Runs survive restarts; an undelivered `continue` seed shows as *seed pending* — `n` retries it. Resuming a dead step session from the dashboard reconnects it to its run automatically.
-
-## 8. Fan-out & the Wall
-
-**`N` — fan-out:** a checklist of projects (`space` toggles, `↓/↑` scroll) + one shared model/mode/seed. `↵` launches one session per checked project, all tagged `fan:<group-id>`; a summary line reports successes and failures. The dashboard shows a dim `· fan` marker on group members; the swarm sorts itself through the normal attention queue.
+## 7. The Wall
 
 **`W` — the wall:** a read-only 2-column grid of every live session's pane tail, refreshing live. `↓/↑` select · `↵` attach · `esc` back. Order is stable (oldest first) so the grid never shuffles under you. Cells are plain-text tails — for full fidelity, attach.
 
-## 9. Under the hood
+## 8. Under the hood
 
 | Thing | Where |
 |---|---|
-| Loom's state (index, sessions, runs) | `~/.loom/loom.db` (SQLite) |
-| Workflow definitions | `~/.loom/workflows/*.json` |
+| Loom's state (index, sessions, projects) | `~/.loom/loom.db` (SQLite) |
 | Sessions | tmux server `-L loom` (`tmux -L loom list-sessions` to inspect raw) |
 | Transcripts (Claude's own, read-only to Loom) | `~/.claude/projects/…` |
 
 Two Loom instances can run against the same state safely. If Loom ever crashes, nothing is lost — relaunch and it re-adopts everything from tmux.
 
-## 10. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Explanation / fix |
 |---|---|

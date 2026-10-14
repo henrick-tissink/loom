@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/henricktissink/loom/internal/delegate"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 )
@@ -29,7 +28,7 @@ type SessionDTO struct {
 // HERE rather than in the engine: the engine keeps polling and transitioning
 // hidden sessions (§6.2a), it just stops being rendered. A nil resolver means
 // nothing is hidden. Always returns a non-nil slice so it marshals to [].
-func snapshotToDTOs(s status.Snapshot, at *delegate.Attributor) []SessionDTO {
+func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 	out := make([]SessionDTO, 0, len(s.Live))
 	for _, r := range s.Live {
 		if !at.Visible(r.SessionRow) {
@@ -69,7 +68,7 @@ type FinishedDTO struct {
 // nil) supplies each row's stored LLM summary by claude session id. Non-nil
 // slice. res (may be nil) applies §6's visibility predicate — the Finished
 // list is leak surface 2; the caller over-fetches and trims after this.
-func recentToDTOs(rows []store.SessionRow, summaryFor func(string) string, at *delegate.Attributor) []FinishedDTO {
+func recentToDTOs(rows []store.SessionRow, summaryFor func(string) string, at *rowAttributor) []FinishedDTO {
 	out := make([]FinishedDTO, 0, len(rows))
 	for _, r := range rows {
 		if r.EndedAt < 0 {

@@ -1,10 +1,6 @@
 package ui
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -21,7 +17,6 @@ import (
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
 	"github.com/henricktissink/loom/internal/transcript"
-	"github.com/henricktissink/loom/internal/workflow"
 )
 
 const pollInterval = 1500 * time.Millisecond
@@ -41,10 +36,6 @@ const (
 	viewPeek
 	viewSearch
 	viewDetail
-	viewWorkflows
-	viewWFConfirm
-	viewWFConfirmAbandon
-	viewFanout
 	viewWall
 )
 
@@ -62,18 +53,6 @@ type Deps struct {
 	Store         *store.Store
 	IndexerStatus func() memory.Status
 	Summarizer    *memory.Summarizer
-
-	// Runner/WorkflowsDir back the workflows view (Task 3, the `w` view).
-	// Both are nil-safe: a nil Runner means the workflows view still opens
-	// (LoadAll needs only Repos/WorkflowsDir) but shows an empty RUNS
-	// section and no-ops every run action; an empty WorkflowsDir makes
-	// LoadAll's os.ReadDir("") fail with IsNotExist, which LoadAll already
-	// treats as "no definitions" rather than an error. Repos (existing
-	// field above) doubles as the registry LoadAll validates each step-1
-	// "project" label against — the brief's "Registry" field is this one,
-	// reused.
-	Runner       *workflow.Runner
-	WorkflowsDir string
 
 	// Projects is the §4 attribution/visibility authority. Nil-safe like
 	// every other dep: a nil authority means nothing is ever hidden, so
@@ -201,64 +180,6 @@ type App struct {
 	detailConfirmRegen bool
 	detailSummarizing  bool
 
-	// --- Task 3: workflows view (`w`) ---------------------------------
-
-	// wfRuns/wfDefs/wfLoadErrs are the two RUNS/WORKFLOWS sections,
-	// refreshed by wfLoadCmd on every view-open and after every action
-	// (spec §4: "RUNS rows render honestly from store rows"). wfCursor
-	// indexes the concatenation wfRuns++wfDefs (LoadErrors are informational
-	// only, never selectable) — same clamp discipline as the dashboard's
-	// cursor/rows in rebuildRows.
-	wfRuns     []wfRunRow
-	wfDefs     []workflow.Definition
-	wfLoadErrs []workflow.LoadError
-	wfCursor   int
-
-	// wfHint is a transient dim message in the workflows body — currently
-	// only the dead-attach hint (spec §2.8), same captured/transient
-	// discipline as detailHint.
-	wfHint string
-
-	// wfTarget is the run row captured at the moment 'n'/'x' opens
-	// viewWFConfirm/viewWFConfirmAbandon (captured-target discipline, same
-	// as actionTarget/peekTarget/detailTarget elsewhere). wfPreview is the
-	// StepPreview fetched (via a tea.Cmd — Preview reads a transcript file)
-	// at confirm-open time (spec §2.11); wfPreviewLoading/wfPreviewErr cover
-	// the in-flight/failed states before it arrives; wfContinueDead is set
-	// when an advance attempt comes back ErrContinueDead (spec §2.8),
-	// arming the one-shot 'f' fork-demotion recovery key.
-	wfTarget         store.RunRow
-	wfPreview        workflow.StepPreview
-	wfPreviewLoading bool
-	wfPreviewErr     string
-	wfContinueDead   bool
-
-	// wfInFlight (keyed by run id) / wfStartInFlight (keyed by definition
-	// path) are the in-flight guards (spec §2.6/§4, the detailSummarizing
-	// precedent): a second 'n'/'x'/↵ on the same target while its previous
-	// action is still resolving is a no-op rather than firing a second
-	// launch/CAS.
-	wfInFlight      map[int64]bool
-	wfStartInFlight map[string]bool
-
-	// --- Fan-out (`N`) — spec §2 ------------------------------------------
-
-	// fanForm is fan-out's own form (fanout.go), reset fresh every time
-	// openFanout runs (same "fresh state on open" shape as the launcher).
-	fanForm fanoutForm
-
-	// fanInFlight is the double-↵ guard (spec §2.3 I2): set the moment a
-	// launch group is fired, cleared only when its fanResultMsg lands — a
-	// second ↵ while it's still true is a no-op.
-	fanInFlight bool
-
-	// fanHint is the dashboard's dedicated persistent summary field (spec
-	// §2.3, C1): unlike errStr — which every snapMsg wipes (see the snapMsg
-	// case in Update) — fanHint survives polling and is only cleared by the
-	// next actual keypress on the dashboard (the wfHint discipline,
-	// generalized to "any key" since fanHint isn't tied to one action).
-	fanHint string
-
 	// --- Wall (`W`) — spec §3 ----------------------------------------------
 
 	// wallOrder is the wall's STABLE display order (spec §3.1: CreatedAt
@@ -305,61 +226,6 @@ type App struct {
 	// where sharing App is not.
 	res *projects.Resolver
 }
-
-// wfRunRow is one RUNS-section entry: a store.RunRow plus the display/action
-// facts wfLoadCmd resolves for it up front (parsing def_json, resolving the
-// current step's session BY IDENTITY via Runner.ResolveStepSession — spec
-// §2.5) so rendering and attach/hint decisions never need to touch the
-// Runner or re-parse JSON themselves.
-type wfRunRow struct {
-	run store.RunRow
-
-	// stepLabel is "step N/M label" (1-based) built from the parsed
-	// def_json snapshot; defErr is true when def_json failed to parse
-	// (spec §2.12: "renders dim-red, abandonable, never panics") — in that
-	// case stepLabel is empty and the renderer substitutes a fixed message.
-	stepLabel string
-	defErr    bool
-
-	// resolved/resolvedOK/live are ResolveStepSession's result: ok=false
-	// only when the pinned session name has no store row at all (the
-	// documented Launch-failed-after-CAS accepted failure mode). live
-	// mirrors isLiveRow(resolved) and gates attach (spec §2.8: attach only
-	// when resolved-live, else the dead-attach hint).
-	resolved   store.SessionRow
-	resolvedOK bool
-	live       bool
-}
-
-// wfEntryKind distinguishes a RUNS-section row from a WORKFLOWS-section row
-// in the shared cursor space (spec §4: "↓/↑ across sections").
-type wfEntryKind int
-
-const (
-	wfEntryRun wfEntryKind = iota
-	wfEntryDef
-)
-
-// wfEntry is what a.wfSelected() returns: exactly one of run/def is
-// meaningful, discriminated by kind.
-type wfEntry struct {
-	kind wfEntryKind
-	run  wfRunRow
-	def  workflow.Definition
-}
-
-// wfActionKind discriminates wfActionMsg's four possible sources — needed
-// only so the ErrContinueDead→"offer f" recovery applies to advance and not
-// to finish/abandon/retry (spec §2.8 is specifically about advancing into a
-// dead continue target).
-type wfActionKind int
-
-const (
-	wfActionAdvance wfActionKind = iota
-	wfActionFinish
-	wfActionAbandon
-	wfActionRetry
-)
 
 type (
 	tickMsg     time.Time
@@ -422,69 +288,6 @@ type (
 	// Launcher.Resume. Same sessionID-staleness discipline as summaryMsg.
 	resumeBlockedMsg struct{ sessionID string }
 
-	// wfLoadedMsg is the result of wfLoadCmd (spec §4: LoadAll + ActiveRuns,
-	// both file/db IO, always run in a tea.Cmd — fired on every workflows-
-	// view open). Applied unconditionally (idempotent background refresh);
-	// harmless even if the user has since navigated away.
-	wfLoadedMsg struct {
-		runs     []wfRunRow
-		defs     []workflow.Definition
-		loadErrs []workflow.LoadError
-		err      error
-	}
-
-	// wfPreviewMsg is Runner.Preview's result for a confirm dialog (spec
-	// §2.11). Stale (view no longer viewWFConfirm, or runID no longer
-	// matches the captured wfTarget) is discarded — same discipline as
-	// peekMsg/summaryMsg.
-	wfPreviewMsg struct {
-		runID   int64
-		preview workflow.StepPreview
-		err     error
-	}
-
-	// wfStartMsg is Runner.Start's result (spec §2.10): path identifies
-	// which definition's in-flight guard to release.
-	wfStartMsg struct {
-		path string
-		err  error
-	}
-
-	// wfActionMsg is the shared result type for advance/finish/abandon/
-	// retry (spec §2.6/§2.7/§2.9/§2.12) — all four are CAS-guarded or
-	// otherwise idempotent store writes, all release the per-run-id
-	// in-flight guard the same way. runName is the target run's Name,
-	// captured at command-fire time — used only to label a STALE result's
-	// errStr (see the wfActionMsg case), since a stale result must not touch
-	// a.wfTarget to read it back off.
-	wfActionMsg struct {
-		kind    wfActionKind
-		runID   int64
-		runName string
-		err     error
-	}
-
-	// fanResult is one project's outcome within a fan-out launch group (spec
-	// §2.2). Err non-nil means Launch itself failed (Name may be empty);
-	// Err nil and Untagged true means the session launched fine but its
-	// SetTags("fan:"+group) call failed — spec §2.2's binding rule: "a
-	// SetTags failure is COUNTED in the result as launched, untagged" —
-	// NEVER silently dropped.
-	fanResult struct {
-		Project  string
-		Name     string
-		Err      error
-		Untagged bool
-	}
-
-	// fanResultMsg is the result of a fan-out launch group (spec §2.2/§2.3):
-	// group is the minted 6-hex groupID, results is one entry per selected
-	// project, in selection order.
-	fanResultMsg struct {
-		group   string
-		results []fanResult
-	}
-
 	// wallCaptureResult is one session's CapturePane outcome within a
 	// wallMsg (spec §3.3/§3.4): err true means CapturePane itself failed
 	// (peek precedent — the cell keeps rendering, as "(pane unavailable)",
@@ -512,7 +315,7 @@ type (
 func NewApp(deps Deps) *App {
 	ti := textinput.New()
 	ti.Placeholder = "tags (comma separated)"
-	return &App{deps: deps, form: newLauncherForm(deps.Repos), fanForm: newFanoutForm(deps.Repos), tag: ti}
+	return &App{deps: deps, form: newLauncherForm(deps.Repos), tag: ti}
 }
 
 func (a *App) Init() tea.Cmd { return tea.Batch(a.pollCmd(), tickAfter()) }
@@ -748,86 +551,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.detailHint = "already live — attach from the dashboard"
 		}
 		return a, nil
-	case wfLoadedMsg:
-		if m.err != nil {
-			a.errStr = m.err.Error()
-		}
-		a.wfRuns = m.runs
-		a.wfDefs = m.defs
-		a.wfLoadErrs = m.loadErrs
-		if n := len(a.wfRuns) + len(a.wfDefs); a.wfCursor >= n {
-			a.wfCursor = max(0, n-1)
-		}
-		return a, nil
-	case wfPreviewMsg:
-		// stale: confirm was cancelled, or a different run's confirm has
-		// since been opened (same discipline as peekMsg/summaryMsg).
-		if a.view != viewWFConfirm || m.runID != a.wfTarget.ID {
-			return a, nil
-		}
-		a.wfPreviewLoading = false
-		if m.err != nil {
-			a.wfPreviewErr = m.err.Error()
-			return a, nil
-		}
-		a.wfPreview = m.preview
-		return a, nil
-	case wfStartMsg:
-		delete(a.wfStartInFlight, m.path)
-		if m.err != nil {
-			a.errStr = m.err.Error()
-			return a, nil
-		}
-		// "run appears, stay in view" (spec §4): reload RUNS/WORKFLOWS so
-		// the new run shows up, rather than hand-splicing a synthetic row.
-		return a, a.wfLoadCmd()
-	case wfActionMsg:
-		a.clearWFInFlight(m.runID) // own-runID guard release: correct regardless of staleness
-		// Staleness gate (same discipline as wfPreviewMsg above, spec
-		// regression fix): this result belongs to the CURRENTLY open confirm
-		// only if that confirm's view matches the kind AND its captured
-		// wfTarget is still this run. Reachable bug this closes: run A's
-		// advance confirm is cancelled (esc) while its advance is still in
-		// flight, run B's confirm is then opened, and A's delayed result
-		// (e.g. ErrContinueDead) arrives — it must NOT arm B's 'f' recovery
-		// or otherwise touch B's open confirm. A stale result only clears its
-		// own in-flight guard (above) and surfaces a run-name-qualified
-		// errStr; it never mutates a.view/wfContinueDead.
-		fresh := m.runID == a.wfTarget.ID &&
-			((m.kind == wfActionAbandon && a.view == viewWFConfirmAbandon) ||
-				((m.kind == wfActionAdvance || m.kind == wfActionFinish) && a.view == viewWFConfirm))
-		if !fresh {
-			if m.err != nil {
-				a.errStr = fmt.Sprintf("run %s#%d: %s", m.runName, m.runID, m.err.Error())
-			}
-			return a, a.wfLoadCmd()
-		}
-		if m.err == nil {
-			a.view = viewWorkflows
-			return a, a.wfLoadCmd()
-		}
-		if m.kind == wfActionAdvance && errors.Is(m.err, workflow.ErrContinueDead) {
-			// spec §2.8: stay in the confirm, arm the one-shot 'f' recovery
-			// (demote this advance to fork) instead of surfacing a dead end.
-			a.wfContinueDead = true
-			return a, nil
-		}
-		a.errStr = m.err.Error()
-		a.view = viewWorkflows
-		return a, a.wfLoadCmd()
-	case fanResultMsg:
-		// spec §2.3: the view STAYS on the fan-out form until this msg
-		// lands, then transitions to viewDash with the summary in fanHint
-		// (a dedicated persistent field, not errStr — see the type's doc
-		// comment). The in-flight guard is cleared unconditionally: this is
-		// the only msg that ever sets it, so there's nothing to gate.
-		a.fanInFlight = false
-		a.view = viewDash
-		a.fanHint = formatFanHint(m.group, m.results)
-		// spec §2.3: "the result msg also fires pollCmd" — so the newly
-		// launched (and now-tagged) sessions appear on the dashboard
-		// immediately, not after the next 1.5s tick.
-		return a, a.pollCmd()
 	case wallMsg:
 		// stale: a newer capture cmd has since been fired (gen mismatch), or
 		// the wall isn't even open anymore — discard the WHOLE message (spec
@@ -1016,29 +739,11 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case viewDetail:
 		return a.updateDetailKeys(msg)
 
-	case viewWorkflows:
-		return a.updateWorkflowsKeys(msg)
-
-	case viewWFConfirm:
-		return a.updateWFConfirmKeys(msg)
-
-	case viewWFConfirmAbandon:
-		return a.updateWFAbandonKeys(msg)
-
-	case viewFanout:
-		return a.updateFanoutKeys(msg)
-
 	case viewWall:
 		return a.updateWallKeys(msg)
 	}
 
 	// viewDash
-	// fanHint is cleared on the next dashboard keypress, whichever key it
-	// is (spec §2.3: "cleared on next dashboard keypress, NOT on polls") —
-	// polls never reach here (they arrive as snapMsg/tickMsg, handled
-	// entirely in Update, above), so this only ever fires on a real
-	// keystroke while viewDash is showing.
-	a.fanHint = ""
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return a, tea.Quit
@@ -1052,10 +757,6 @@ func (a *App) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "n":
 		return a, a.openLauncher()
-	case "N":
-		return a, a.openFanout()
-	case "w":
-		return a, a.openWorkflows()
 	case "W":
 		return a, a.openWall()
 	case "x":
@@ -1180,7 +881,7 @@ func (a *App) updateSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // field 0, panel unfocused, no includes/warning) and kicks off an immediate
 // (non-debounced — this is a view-open, not a keystroke burst) panel query
 // for the default-selected project's recent sessions, same "fresh state +
-// immediate refresh cmd" shape as openSearch/openWorkflows.
+// immediate refresh cmd" shape as openSearch.
 // The repo list is project-scoped on open (§6.3, launcher target picker): the
 // form is rebuilt from scratch here every time, so scoping it at open is
 // enough — a project hidden while the launcher is already up is caught the
@@ -1613,610 +1314,7 @@ func (a *App) searchQueryCmd(query string) tea.Cmd {
 	}
 }
 
-// --- Task 3: workflows view (`w`) ---------------------------------------
-
-// openWorkflows resets the workflows view to a fresh, empty state (spec §4)
-// and kicks off the initial load — same "fresh state + immediate refresh
-// cmd" shape as openSearch.
-func (a *App) openWorkflows() tea.Cmd {
-	a.view = viewWorkflows
-	a.wfCursor = 0
-	a.errStr = ""
-	a.wfHint = ""
-	a.wfRuns = nil
-	a.wfDefs = nil
-	a.wfLoadErrs = nil
-	return a.wfLoadCmd()
-}
-
-// wfLoadCmd loads both workflows-view sections (spec §4/§2.1): WORKFLOWS via
-// workflow.LoadAll(WorkflowsDir, Repos) — the registry Definitions §3
-// validates each step-1 "project" label against — and RUNS via Runner.Store.ActiveRuns,
-// each resolved into a wfRunRow up front (buildWFRunRow). Both deps are
-// nil-safe: a nil Runner (or nil Runner.Store) yields an empty RUNS section
-// rather than panicking, matching Deps' nil-safety contract elsewhere.
-func (a *App) wfLoadCmd() tea.Cmd {
-	dir := a.deps.WorkflowsDir
-	repos := a.deps.Repos
-	runner := a.deps.Runner
-	return func() tea.Msg {
-		defs, loadErrs := workflow.LoadAll(dir, repos)
-		var rows []wfRunRow
-		if runner != nil && runner.Store != nil {
-			runs, err := runner.Store.ActiveRuns()
-			if err != nil {
-				return wfLoadedMsg{defs: defs, loadErrs: loadErrs, err: err}
-			}
-			for _, run := range runs {
-				rows = append(rows, buildWFRunRow(runner, run))
-			}
-		}
-		return wfLoadedMsg{runs: rows, defs: defs, loadErrs: loadErrs}
-	}
-}
-
-// buildWFRunRow resolves the display/action facts for one active run (spec
-// §2.5/§2.12): parses its def_json snapshot (a corrupt snapshot sets defErr
-// rather than panicking — the run still renders, dim-red, abandonable) and
-// resolves its current step's session BY IDENTITY (never the pinned tmux
-// name alone — spec §2.5) via ResolveStepSession, which itself tolerates an
-// empty/dead pin (ok=false — the Launch-failed-after-CAS accepted failure
-// mode).
-func buildWFRunRow(runner *workflow.Runner, run store.RunRow) wfRunRow {
-	w := wfRunRow{run: run}
-	var def workflow.Definition
-	if err := json.Unmarshal([]byte(run.DefJSON), &def); err != nil ||
-		len(def.Steps) == 0 || run.StepIdx < 0 || int(run.StepIdx) >= len(def.Steps) {
-		w.defErr = true
-	} else {
-		w.stepLabel = fmt.Sprintf("step %d/%d %s", run.StepIdx+1, len(def.Steps), def.Steps[run.StepIdx].Label)
-	}
-	if row, ok := runner.ResolveStepSession(run); ok {
-		w.resolved = row
-		w.resolvedOK = true
-		w.live = isLiveRow(row)
-	}
-	return w
-}
-
-// wfSelected returns the entry under wfCursor in the shared RUNS++WORKFLOWS
-// cursor space, or ok=false when nothing is selectable (empty/out of range —
-// same shape as selected() above).
-func (a *App) wfSelected() (wfEntry, bool) {
-	n := len(a.wfRuns) + len(a.wfDefs)
-	if a.wfCursor < 0 || a.wfCursor >= n {
-		return wfEntry{}, false
-	}
-	if a.wfCursor < len(a.wfRuns) {
-		return wfEntry{kind: wfEntryRun, run: a.wfRuns[a.wfCursor]}, true
-	}
-	return wfEntry{kind: wfEntryDef, def: a.wfDefs[a.wfCursor-len(a.wfRuns)]}, true
-}
-
-// markInFlight/clearWFInFlight guard per-run-id actions (spec §2.6 in-flight
-// guard, the detailSummarizing precedent) against a double press firing a
-// second launch/CAS while the first is still resolving.
-func (a *App) markInFlight(id int64) {
-	if a.wfInFlight == nil {
-		a.wfInFlight = map[int64]bool{}
-	}
-	a.wfInFlight[id] = true
-}
-
-func (a *App) clearWFInFlight(id int64) {
-	delete(a.wfInFlight, id)
-}
-
-// updateWorkflowsKeys handles keys while viewWorkflows is open (spec §4):
-// ↓/↑ move across BOTH sections, ↵ starts a definition or attaches a
-// resolved-live run, n opens the advance confirm (or retries a pending
-// seed directly), x opens the abandon confirm, esc back to the dashboard.
-func (a *App) updateWorkflowsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "ctrl+c" {
-		return a, tea.Quit
-	}
-	switch msg.String() {
-	case "q":
-		return a, tea.Quit
-	case "esc":
-		a.view = viewDash
-		return a, nil
-	case "j", "down":
-		if n := len(a.wfRuns) + len(a.wfDefs); a.wfCursor < n-1 {
-			a.wfCursor++
-		}
-		return a, nil
-	case "k", "up":
-		if a.wfCursor > 0 {
-			a.wfCursor--
-		}
-		return a, nil
-	case "enter":
-		a.wfHint = ""
-		return a.wfActivate()
-	case "n":
-		a.wfHint = ""
-		return a.wfPressN()
-	case "x":
-		a.wfHint = ""
-		return a.wfPressX()
-	}
-	return a, nil
-}
-
-// wfActivate handles ↵ (spec §4): a definition row starts a new run (guarded
-// per definition path against a double-launch); a run row attaches ONLY
-// when its current step resolved live — otherwise the dead-attach hint
-// (spec §2.8), never a raw tmux error.
-func (a *App) wfActivate() (tea.Model, tea.Cmd) {
-	e, ok := a.wfSelected()
-	if !ok {
-		return a, nil
-	}
-	switch e.kind {
-	case wfEntryDef:
-		if a.deps.Runner == nil || a.wfStartInFlight[e.def.Path] {
-			return a, nil
-		}
-		if a.wfStartInFlight == nil {
-			a.wfStartInFlight = map[string]bool{}
-		}
-		a.wfStartInFlight[e.def.Path] = true
-		w, h := a.width, a.height
-		return a, a.wfStartCmd(e.def, w, h)
-	case wfEntryRun:
-		if e.run.resolvedOK && e.run.live {
-			if a.deps.Tmux == nil {
-				return a, nil
-			}
-			cmd := a.deps.Tmux.AttachCmd(e.run.resolved.Name)
-			return a, tea.ExecProcess(cmd, func(err error) tea.Msg { return attachedMsg{err} })
-		}
-		a.wfHint = "step session ended — n advance (f fork) · x abandon"
-		return a, nil
-	}
-	return a, nil
-}
-
-// wfPressN handles 'n' on a run row (spec §2.9/§2.11): a run with a
-// pending_seed retries delivery directly (guarded — this fires the action
-// immediately, no confirm step); otherwise it opens the advance confirm and
-// fetches its Preview (a tea.Cmd — Preview reads a transcript file, never
-// inline in Update). Opening the confirm itself is NOT guarded/marked
-// in-flight: fetching a preview launches nothing, and once the confirm is
-// open a second 'n' press routes to updateWFConfirmKeys (which reads 'n' as
-// cancel, not "reopen") — so the double-press race this guards against is
-// entirely at the 'y'/'f' press, handled there.
-func (a *App) wfPressN() (tea.Model, tea.Cmd) {
-	e, ok := a.wfSelected()
-	if !ok || e.kind != wfEntryRun || a.deps.Runner == nil {
-		return a, nil
-	}
-	run := e.run.run
-	if run.PendingSeed != "" {
-		if a.wfInFlight[run.ID] {
-			return a, nil
-		}
-		a.markInFlight(run.ID)
-		return a, a.retryCmd(run)
-	}
-	a.wfTarget = run
-	a.wfPreview = workflow.StepPreview{}
-	a.wfPreviewLoading = true
-	a.wfPreviewErr = ""
-	a.wfContinueDead = false
-	a.view = viewWFConfirm
-	return a, a.previewCmd(run)
-}
-
-// wfPressX opens the abandon confirm for the selected run row (spec §2.12).
-func (a *App) wfPressX() (tea.Model, tea.Cmd) {
-	e, ok := a.wfSelected()
-	if !ok || e.kind != wfEntryRun || a.deps.Runner == nil {
-		return a, nil
-	}
-	run := e.run.run
-	if a.wfInFlight[run.ID] {
-		return a, nil
-	}
-	a.wfTarget = run
-	a.view = viewWFConfirmAbandon
-	return a, nil
-}
-
-// updateWFConfirmKeys handles keys while viewWFConfirm is open (spec §2.6/
-// §2.8/§2.11): 'y' fires the advance/finish (re-verified against a fresh
-// read first — see advanceCmd/finishCmd), guarded per run id against a
-// double press firing two launches before the first result returns; 'f' is
-// the one-shot fork-demotion recovery, only accepted once wfContinueDead is
-// armed, guarded the same way; 'n'/'esc' cancel (nothing is in-flight yet at
-// that point — see wfPressN's doc comment — so there is nothing to
-// release).
-func (a *App) updateWFConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "ctrl+c" {
-		return a, tea.Quit
-	}
-	switch msg.String() {
-	case "q":
-		return a, tea.Quit
-	case "esc", "n":
-		a.view = viewWorkflows
-		return a, nil
-	case "y":
-		a.wfHint = ""
-		if a.wfPreviewLoading || a.wfPreviewErr != "" || a.wfContinueDead || a.deps.Runner == nil {
-			return a, nil // not (yet/anymore) a valid confirm state
-		}
-		target := a.wfTarget
-		if a.wfInFlight[target.ID] {
-			return a, nil // double-press guard: an advance/finish is already in flight
-		}
-		a.markInFlight(target.ID)
-		if a.wfPreview.Finish {
-			return a, a.finishCmd(target)
-		}
-		w, h := a.width, a.height
-		return a, a.advanceCmd(target, false, w, h)
-	case "f":
-		a.wfHint = ""
-		if !a.wfContinueDead || a.deps.Runner == nil {
-			return a, nil
-		}
-		target := a.wfTarget
-		if a.wfInFlight[target.ID] {
-			return a, nil // double-press guard, same as 'y' above
-		}
-		a.wfContinueDead = false
-		a.markInFlight(target.ID)
-		w, h := a.width, a.height
-		return a, a.advanceCmd(target, true, w, h)
-	}
-	return a, nil
-}
-
-// updateWFAbandonKeys handles keys while viewWFConfirmAbandon is open.
-func (a *App) updateWFAbandonKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "ctrl+c" {
-		return a, tea.Quit
-	}
-	switch msg.String() {
-	case "q":
-		return a, tea.Quit
-	case "n", "esc":
-		a.view = viewWorkflows
-		return a, nil
-	case "y":
-		// Stays on viewWFConfirmAbandon until the wfActionMsg result lands
-		// (same discipline as updateWFConfirmKeys' advance/finish 'y'
-		// above) rather than switching to viewWorkflows here: the Update
-		// staleness gate (spec regression fix) requires a.view still be
-		// viewWFConfirmAbandon AND m.kind==wfActionAbandon for the result
-		// to be treated as "fresh" — flipping the view early made that
-		// branch unreachable and every abandon result take the stale path
-		// instead (still correct end state, but via the wrong branch and
-		// with an unintended run-name-qualified error string).
-		if a.deps.Runner == nil {
-			return a, nil
-		}
-		target := a.wfTarget
-		if a.wfInFlight[target.ID] {
-			return a, nil
-		}
-		a.markInFlight(target.ID)
-		return a, a.abandonCmd(target)
-	}
-	return a, nil
-}
-
-// previewCmd fetches Runner.Preview(target) for the advance confirm dialog
-// (spec §2.11: substitution runs at confirm-OPEN time).
-func (a *App) previewCmd(target store.RunRow) tea.Cmd {
-	runner := a.deps.Runner
-	if runner == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		p, err := runner.Preview(target)
-		return wfPreviewMsg{runID: target.ID, preview: p, err: err}
-	}
-}
-
-// advanceCmd fires Runner.Advance for target (spec §2.6/§2.8). Per the
-// spec's "the confirm re-verifies the captured step_idx against a fresh
-// read before firing": it re-reads the run FIRST and refuses to advance at
-// all — surfacing the same ErrRunAdvancedElsewhere the CAS itself would —
-// if the row is no longer 'running' or its step_idx has moved since the
-// confirm opened (the preview the user is looking at would otherwise be
-// stale). Only once that check passes does it call Advance with the FRESH
-// row (which still has its own CAS as the final word against any race in
-// between).
-func (a *App) advanceCmd(target store.RunRow, forceFork bool, w, h int) tea.Cmd {
-	runner := a.deps.Runner
-	if runner == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		fresh, ok, err := runner.Store.GetRun(target.ID)
-		if err != nil {
-			return wfActionMsg{kind: wfActionAdvance, runID: target.ID, runName: target.Name, err: err}
-		}
-		if !ok || fresh.Status != "running" || fresh.StepIdx != target.StepIdx {
-			return wfActionMsg{kind: wfActionAdvance, runID: target.ID, runName: target.Name, err: workflow.ErrRunAdvancedElsewhere}
-		}
-		err = runner.Advance(fresh, forceFork, w, h, time.Now())
-		return wfActionMsg{kind: wfActionAdvance, runID: target.ID, runName: target.Name, err: err}
-	}
-}
-
-// finishCmd marks target done (spec §2.7: terminal-step confirm, no launch,
-// no append) via Runner.Finish, which itself CAS-conditions the actual write
-// on run.StepIdx/status='running' (FinishRunCAS) — this fresh-read is a
-// re-verification for a prompt error message, not the sole gate; the write
-// is guarded again, independently, at the point it happens.
-func (a *App) finishCmd(target store.RunRow) tea.Cmd {
-	runner := a.deps.Runner
-	if runner == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		fresh, ok, err := runner.Store.GetRun(target.ID)
-		if err != nil {
-			return wfActionMsg{kind: wfActionFinish, runID: target.ID, runName: target.Name, err: err}
-		}
-		if !ok || fresh.Status != "running" || fresh.StepIdx != target.StepIdx {
-			return wfActionMsg{kind: wfActionFinish, runID: target.ID, runName: target.Name, err: workflow.ErrRunAdvancedElsewhere}
-		}
-		err = runner.Finish(fresh, time.Now())
-		return wfActionMsg{kind: wfActionFinish, runID: target.ID, runName: target.Name, err: err}
-	}
-}
-
-// abandonCmd marks target abandoned (spec §2.12: abandon ≠ kill — the
-// step's session is left running untouched).
-func (a *App) abandonCmd(target store.RunRow) tea.Cmd {
-	runner := a.deps.Runner
-	if runner == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		err := runner.Abandon(target, time.Now())
-		return wfActionMsg{kind: wfActionAbandon, runID: target.ID, runName: target.Name, err: err}
-	}
-}
-
-// retryCmd re-attempts a run's pending_seed delivery (spec §2.9), re-reading
-// the run first so a slow retry acts on current state.
-func (a *App) retryCmd(target store.RunRow) tea.Cmd {
-	runner := a.deps.Runner
-	if runner == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		fresh, ok, err := runner.Store.GetRun(target.ID)
-		if err != nil {
-			return wfActionMsg{kind: wfActionRetry, runID: target.ID, runName: target.Name, err: err}
-		}
-		if !ok {
-			return wfActionMsg{kind: wfActionRetry, runID: target.ID, runName: target.Name, err: errors.New("workflow: run not found")}
-		}
-		err = runner.RetryPendingSeed(fresh)
-		return wfActionMsg{kind: wfActionRetry, runID: target.ID, runName: target.Name, err: err}
-	}
-}
-
-// wfStartCmd launches a brand-new run of def (spec §2.10).
-func (a *App) wfStartCmd(def workflow.Definition, w, h int) tea.Cmd {
-	runner := a.deps.Runner
-	if runner == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		_, err := runner.Start(def, w, h, time.Now())
-		return wfStartMsg{path: def.Path, err: err}
-	}
-}
-
 // --- Fan-out (`N`) -------------------------------------------------------
-
-// openFanout resets the fan-out form to a fresh state (spec §2.1: empty
-// checklist, model/mode/seed defaults, focus on the checklist) — same
-// "fresh state on open" shape as openLauncher/openSearch/openWorkflows. No
-// RELATED panel query here (spec §2.5: absent in fan-out mode) — fanInFlight
-// is also reset defensively, though the only path that sets it (fanLaunch)
-// always gets cleared again by fanResultMsg before the view could return
-// here.
-func (a *App) openFanout() tea.Cmd {
-	// Same project scoping as openLauncher: the fan-out checklist is a launch
-	// surface, and a hidden repo must not be reachable from it.
-	a.fanForm = newFanoutForm(a.visibleRepos())
-	a.fanForm.setFocus(0)
-	a.fanInFlight = false
-	a.view = viewFanout
-	return nil
-}
-
-// updateFanoutKeys handles keys while viewFanout is open (spec §2.1,
-// VERBATIM): esc always returns to the dashboard; ↵ launches from ANY
-// focus (fanLaunch handles the empty-selection no-op and the in-flight
-// guard); every other key (tab/shift-tab, ↓/↑, ←/→, space, seed typing) is
-// the form's own concern — delegated to fanoutForm.update unchanged, since
-// fan-out (unlike the launcher) has no RELATED panel to additionally
-// dispatch against.
-//
-// Belt-and-braces freeze (critical review finding, fix #2 of 2 — see
-// fanLaunchItem's doc comment for fix #1): while fanInFlight is true, the
-// form is FROZEN — every key no-ops except esc and ctrl+c. fanLaunch already
-// snapshots the recipe synchronously before the launch cmd is even returned,
-// so this freeze doesn't prevent a data race by itself (there isn't one left
-// to prevent); it exists so a stray keystroke mid-launch can never even reach
-// fanForm's mutable state, and so a second ↵ is refused here rather than
-// relying solely on fanLaunch's own a.fanInFlight guard.
-//
-// esc-while-in-flight is deliberately ALLOWED (decision, documented here
-// since it's not obvious): it returns the view to the dashboard immediately,
-// but the in-flight launch keeps running in the background — fanResultMsg
-// still lands and still sets fanHint (Update's fanResultMsg case doesn't
-// check what view is showing) once it completes. The user backing out of the
-// fan-out screen early doesn't cancel the launch or lose the result summary.
-func (a *App) updateFanoutKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "ctrl+c" {
-		return a, tea.Quit
-	}
-	if a.fanInFlight {
-		if msg.Type == tea.KeyEsc {
-			a.view = viewDash
-		}
-		return a, nil
-	}
-	switch msg.Type {
-	case tea.KeyEsc:
-		a.view = viewDash
-		return a, nil
-	case tea.KeyEnter:
-		return a.fanLaunch()
-	}
-	cmd := a.fanForm.update(msg)
-	return a, cmd
-}
-
-// fanLaunchItem is a VALUE SNAPSHOT of one project's launch recipe (critical
-// review fix #1 of 2): captured synchronously, field by field, in fanLaunch
-// — on Update's own goroutine, before the tea.Cmd closure is even built or
-// returned. The bug this replaces: the cmd used to capture
-// a.fanForm.recipeFor, a bound METHOD VALUE over the live *fanoutForm — since
-// the form stays open and interactive after ↵ (spec §2.3 "stay until
-// result"), the cmd's goroutine and any subsequent keystroke were reading/
-// mutating the same fanForm fields unsynchronized, and a keystroke landing
-// mid-launch (model/mode/seed change) could split the "uniform recipe across
-// the group" invariant — different projects in the same group launching with
-// different settings. fanLaunchCmd/fanLaunchCmdWith now close over only these
-// []fanLaunchItem values — zero references into fanForm — so nothing the
-// form does after ↵ can affect an in-flight launch. (fix #2, the form-freeze,
-// is belt-and-braces on top of this: see updateFanoutKeys.)
-type fanLaunchItem struct {
-	Repo   registry.Repo
-	Recipe session.Recipe
-}
-
-// fanLaunch handles ↵ (spec §2.1/§2.2/§2.3 I2): a double-↵ while a launch
-// group is already in flight is a no-op; an empty selection is a no-op with
-// an inline hint on the still-open form; otherwise it mints the group and
-// fires the sequential launch+tag command, staying on viewFanout until
-// fanResultMsg lands (Update's fanResultMsg case does the view transition).
-func (a *App) fanLaunch() (tea.Model, tea.Cmd) {
-	if a.fanInFlight {
-		return a, nil
-	}
-	repos := a.fanForm.selectedRepos()
-	if len(repos) == 0 {
-		a.fanForm.hint = "select at least one project"
-		return a, nil
-	}
-	if a.deps.Launcher == nil {
-		return a, nil
-	}
-	// Snapshot every recipe NOW, synchronously — see fanLaunchItem's doc
-	// comment for why this is the critical fix.
-	items := make([]fanLaunchItem, len(repos))
-	for i, r := range repos {
-		items[i] = fanLaunchItem{Repo: r, Recipe: a.fanForm.recipeFor(r)}
-	}
-	a.fanInFlight = true
-	w, h := a.width, a.height
-	return a, a.fanLaunchCmd(items, w, h)
-}
-
-// newGroupID mints the 6-hex fan-out group id (spec §2.2).
-func newGroupID() string {
-	b := make([]byte, 3)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// fanLaunchFn abstracts the launch step (spec §2.2's Launcher.Launch call)
-// so fanLaunchCmdWith's sequential/partial-failure/continuation logic can be
-// exercised with a controlled stub in tests — disclosed reason: reliably
-// forcing session.Launcher.Launch itself to fail for exactly one of several
-// selected projects (e.g. an "invalid cwd" project) is NOT reproducible live
-// here (verified empirically: tmux 3.7b's `new-session -c <bad dir>` always
-// exits 0 and falls back to another cwd rather than erroring — see
-// TestFanoutPartialFailureCountedFailedOthersSucceed's doc comment), and
-// session IDs are internal, random UUIDs the ui package cannot predict to
-// engineer a real tmux duplicate-session-name collision either. Faking this
-// one seam (kept ui-package-internal; zero non-ui changes) is the disclosed
-// alternative the spec itself allows for the sibling untagged-accounting
-// case. The production path (fanLaunchCmd below) always passes
-// Launcher.Launch unchanged — a real Launch call, never faked outside tests.
-type fanLaunchFn func(r session.Recipe, w, h int, now time.Time) (string, error)
-
-// fanLaunchCmd builds the one async tea.Cmd that launches every selected
-// project SEQUENTIALLY (spec §2.2: measured ~36ms for 5 — cheap enough for
-// one shot, no per-project concurrency needed) via the two-step workflow
-// precedent: Launcher.Launch(recipe) then Store.SetTags(name, "fan:"+group).
-// A SetTags failure does NOT fail the project — spec §2.2's binding rule is
-// that it's counted in the result as launched-but-untagged, never dropped.
-// items is the []fanLaunchItem VALUE snapshot fanLaunch built synchronously —
-// see its doc comment; this cmd closes over items only, never over fanForm.
-func (a *App) fanLaunchCmd(items []fanLaunchItem, w, h int) tea.Cmd {
-	return a.fanLaunchCmdWith(a.deps.Launcher.Launch, items, w, h)
-}
-
-// fanLaunchCmdWith is fanLaunchCmd's actual implementation, parameterized
-// over the launch step (see fanLaunchFn's doc comment above for why).
-func (a *App) fanLaunchCmdWith(launch fanLaunchFn, items []fanLaunchItem, w, h int) tea.Cmd {
-	st := a.deps.Launcher.Store
-	group := newGroupID()
-	return func() tea.Msg {
-		results := make([]fanResult, 0, len(items))
-		for _, item := range items {
-			name, err := launch(item.Recipe, w, h, time.Now())
-			if err != nil {
-				results = append(results, fanResult{Project: item.Repo.Label, Name: name, Err: err})
-				continue
-			}
-			res := fanResult{Project: item.Repo.Label, Name: name}
-			if tagErr := st.SetTags(name, "fan:"+group); tagErr != nil {
-				res.Untagged = true
-			}
-			results = append(results, res)
-		}
-		return fanResultMsg{group: group, results: results}
-	}
-}
-
-// formatFanHint renders the fanHint summary (spec §2.3, exact shape):
-// "fan #<group>: <launched>/<total> launched · failed: <project> (<err>) ·
-// <project> launched untagged" — one clause per failed/untagged result, in
-// launch order; a fully-clean group renders with no trailing clauses at all.
-func formatFanHint(group string, results []fanResult) string {
-	launched := 0
-	for _, r := range results {
-		if r.Err == nil {
-			launched++
-		}
-	}
-	hint := fmt.Sprintf("fan #%s: %d/%d launched", group, launched, len(results))
-	for _, r := range results {
-		switch {
-		case r.Err != nil:
-			hint += fmt.Sprintf(" · failed: %s (%s)", r.Project, r.Err.Error())
-		case r.Untagged:
-			hint += fmt.Sprintf(" · %s launched untagged", r.Project)
-		}
-	}
-	return hint
-}
-
-// viewFanout renders the fan-out frame (spec §2.1): the form's own body
-// (checklist + shared model/mode/seed) wrapped in the standard frame, with a
-// keybar naming the checklist's own dialect (space toggle) alongside the
-// shared field-nav/launch/cancel keys.
-func (a *App) viewFanout(w int) string {
-	inner := w - 4
-	body := a.fanForm.view(inner)
-	return frame(w, "fan-out", "", body,
-		"tab/↓↑ move · space toggle · ←/→ value · ↵ launch · esc cancel")
-}
 
 func (a *App) selected() (uiRow, bool) {
 	if a.cursor < 0 || a.cursor >= len(a.rows) {
@@ -2277,14 +1375,6 @@ func (a *App) View() string {
 		return a.viewSearch(w)
 	case viewDetail:
 		return a.renderDetail(w)
-	case viewWorkflows:
-		return a.renderWorkflows(w)
-	case viewWFConfirm:
-		return a.renderWFConfirm(w)
-	case viewWFConfirmAbandon:
-		return a.renderWFAbandon(w)
-	case viewFanout:
-		return a.viewFanout(w)
 	case viewWall:
 		return a.renderWall(w)
 	}
@@ -2322,13 +1412,6 @@ func (a *App) View() string {
 		}
 		body = append(body, "", strings.Repeat(" ", pad)+styHelp.Render("no sessions — press n to launch one"), "")
 	}
-	if a.fanHint != "" {
-		// spec §2.3: fanHint is the dedicated persistent field — rendered
-		// like errStr/wfHint below, but NEVER wiped by a snapMsg (see the
-		// snapMsg case in Update, which only clears errStr); cleared only
-		// by the next dashboard keypress (see updateKeys' viewDash branch).
-		body = append(body, "", styHelp.Render(truncPlain(a.fanHint, inner)))
-	}
 	if a.errStr != "" {
 		body = append(body, "", styErr.Render(truncPlain("! "+a.errStr, inner)))
 	}
@@ -2347,7 +1430,7 @@ func (a *App) View() string {
 
 	counts := fmt.Sprintf("%d live · %d needs you", live, needs)
 	keybar := "↵ attach · space peek · n new · x kill/dismiss · t tag · r reopen · q quit"
-	suffix := " · X clear · / search · w workflows · N fan-out · W wall"
+	suffix := " · X clear · / search · W wall"
 	if inner > lipgloss.Width(keybar)+lipgloss.Width(suffix)+2 {
 		keybar += suffix
 	}
@@ -2394,12 +1477,6 @@ func sectionRule(label string, inner int, alert bool) string {
 // when a session's seed prompt failed to deliver — see renderRow.
 const seedFailedSuffix = " · seed failed"
 
-// fanMarkerSuffix is appended (dim/chrome, same precedent as
-// seedFailedSuffix) to the activity cell for any row whose Tags contain a
-// "fan:" group tag (spec §2.4, the "honest" group affordance: no dedicated
-// group view in v1, just this marker + the tag editor + fanHint).
-const fanMarkerSuffix = " · fan"
-
 // renderRow: cursor(2) icon(1)+1 project(12)+1 activity(flex)+1 ctx(4)+1 model·mode(13)+1 age(4)
 func (a *App) renderRow(i int, r uiRow, inner int) string {
 	actW := inner - 41
@@ -2429,9 +1506,6 @@ func (a *App) renderRow(i int, r uiRow, inner int) string {
 func (a *App) renderActivityCell(r uiRow, actW int) string {
 	base := activityText(r)
 	suffix := ""
-	if strings.Contains(r.row.Tags, "fan:") {
-		suffix += fanMarkerSuffix
-	}
 	if r.row.SeedStatus == "failed" {
 		suffix += seedFailedSuffix
 	}
@@ -2650,7 +1724,7 @@ func (a *App) renderHit(i int, h store.SearchHit, inner int) []string {
 // is ambiguous whenever the real leaf directory name itself contains a '-'
 // (e.g. a project literally named "my-app" encodes to "...-my-app" and this
 // yields just "app") — acceptable for a compact search-result label; the
-// detail view (Task 3) shows the full cwd/project_dir untruncated.
+// detail view shows the full cwd/project_dir untruncated.
 func projectLabel(h store.SearchHit) string {
 	if h.Cwd != "" {
 		return filepath.Base(h.Cwd)
@@ -2770,134 +1844,8 @@ func filesSummary(files string) string {
 	return out
 }
 
-// --- Task 3: workflows view rendering -----------------------------------
-
-// renderWorkflows renders the two-section RUNS/WORKFLOWS frame (spec §4).
-func (a *App) renderWorkflows(w int) string {
-	inner := w - 4
-	var body []string
-	cursorLine := 0
-	body = append(body, "")
-
-	body = append(body, sectionRule("RUNS", inner, false))
-	if len(a.wfRuns) == 0 {
-		body = append(body, styHelp.Render(truncPlain("no active runs", inner)))
-	} else {
-		for i, e := range a.wfRuns {
-			if i == a.wfCursor {
-				cursorLine = len(body)
-			}
-			body = append(body, a.renderWFRunLine(i, e, inner))
-		}
-	}
-
-	body = append(body, "", sectionRule("WORKFLOWS", inner, false))
-	if len(a.wfDefs) == 0 && len(a.wfLoadErrs) == 0 {
-		body = append(body, styHelp.Render(truncPlain("no workflow definitions found", inner)))
-	} else {
-		for j, d := range a.wfDefs {
-			idx := len(a.wfRuns) + j
-			if idx == a.wfCursor {
-				cursorLine = len(body)
-			}
-			body = append(body, a.renderWFDefLine(idx, d, inner))
-		}
-		for _, le := range a.wfLoadErrs {
-			body = append(body, renderWFLoadErr(le, inner))
-		}
-	}
-
-	if a.wfHint != "" {
-		body = append(body, "", styHelp.Render(truncPlain(a.wfHint, inner)))
-	}
-	if a.errStr != "" {
-		body = append(body, "", styErr.Render(truncPlain("! "+a.errStr, inner)))
-	}
-	if a.height > 2 {
-		body = windowBody(body, cursorLine, a.height-2)
-	}
-	return frame(w, "workflows", "", body, "↵ start/attach · n advance · x abandon · esc dash · q quit")
-}
-
-// renderWFRunLine renders one RUNS row (spec §4): "name#id · step N/M label
-// · <glyph> <status word>" plus the pending/failed seed markers. The whole
-// line is composed as PLAIN text and truncated BEFORE any styling is
-// applied (truncate-before-style invariant), then the fully-truncated line
-// gets exactly one style: cursor accent when selected, dim-red when the
-// run's def_json failed to parse (spec §2.12), otherwise unstyled.
-func (a *App) renderWFRunLine(i int, e wfRunRow, inner int) string {
-	cursor := "  "
-	if i == a.wfCursor {
-		cursor = styCursor.Render("▸ ")
-	}
-	label := e.stepLabel
-	if e.defErr {
-		label = "corrupt run definition"
-	}
-	glyph, word := "✗", "dead"
-	if e.resolvedOK {
-		glyph, word = statusGlyphWord(e.resolved.LastStatus)
-	}
-	text := fmt.Sprintf("%s#%d · %s · %s %s", e.run.Name, e.run.ID, label, glyph, word)
-	if e.run.PendingSeed != "" {
-		text += " · seed pending"
-	}
-	if e.resolvedOK && e.resolved.SeedStatus == "failed" {
-		text += " · seed FAILED"
-	}
-	avail := inner - 2
-	if avail < 0 {
-		avail = 0
-	}
-	text = truncPlain(text, avail)
-	switch {
-	case i == a.wfCursor:
-		text = styCursor.Render(text)
-	case e.defErr:
-		text = styNeedsYou.Render(text)
-	}
-	return cursor + text
-}
-
-// renderWFDefLine renders one WORKFLOWS row: "name · N steps · project"
-// (project = filepath.Base(step 1's resolved path) — Step.Project holds a
-// registry-resolved absolute path post-LoadAll, never a bare label).
-func (a *App) renderWFDefLine(idx int, d workflow.Definition, inner int) string {
-	cursor := "  "
-	if idx == a.wfCursor {
-		cursor = styCursor.Render("▸ ")
-	}
-	proj := ""
-	if len(d.Steps) > 0 {
-		proj = filepath.Base(d.Steps[0].Project)
-	}
-	text := fmt.Sprintf("%s · %d step%s · %s", d.Name, len(d.Steps), plural(len(d.Steps)), proj)
-	avail := inner - 2
-	if avail < 0 {
-		avail = 0
-	}
-	text = truncPlain(text, avail)
-	if idx == a.wfCursor {
-		text = styCursor.Render(text)
-	}
-	return cursor + text
-}
-
-// renderWFLoadErr renders one malformed-definition line, dim-red (spec
-// §2.1: "malformed files listed dim-red with their error"), never
-// selectable (no cursor marker — LoadErrors aren't part of the cursor
-// space).
-func renderWFLoadErr(e workflow.LoadError, inner int) string {
-	avail := inner - 2
-	if avail < 0 {
-		avail = 0
-	}
-	text := truncPlain(filepath.Base(e.Path)+": "+e.Err, avail)
-	return "  " + styNeedsYou.Render(text)
-}
-
 // statusGlyphWord maps a store row's last_status to a plain (unstyled)
-// glyph+word pair for renderWFRunLine — the same states statusIcon()
+// glyph+word pair for the wall — the same states statusIcon()
 // recognizes, but returned as bare text so the caller can truncate the
 // composed line before applying any style (truncate-before-style
 // invariant), rather than embedding a pre-styled glyph mid-line.
@@ -2922,74 +1870,4 @@ func statusGlyphWord(status string) (string, string) {
 	default:
 		return "·", "unknown"
 	}
-}
-
-func plural(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
-}
-
-// renderWFConfirm renders the advance/finish confirm dialog (spec §2.11):
-// substitution snippet (~60 chars) + relation wording (continue reads
-// "sends into current session"), the finish variant, the unavailable
-// warning, and the dead-continue recovery state (offering 'f').
-func (a *App) renderWFConfirm(w int) string {
-	inner := w - 4
-	name := a.wfTarget.Name
-	var body []string
-	body = append(body, "")
-
-	switch {
-	case a.wfPreviewLoading:
-		body = append(body, truncPlain("computing preview for "+name+"…", inner))
-	case a.wfPreviewErr != "":
-		body = append(body, styErr.Render(truncPlain("! "+a.wfPreviewErr, inner)))
-	case a.wfContinueDead:
-		body = append(body, truncPlain("step session ended — cannot continue", inner))
-		body = append(body, styHelp.Render(truncPlain("f fork from transcript instead · esc cancel", inner)))
-	case a.wfPreview.Finish:
-		body = append(body, truncPlain(fmt.Sprintf("finish run %s?", name), inner))
-	default:
-		p := a.wfPreview
-		nextN := a.wfTarget.StepIdx + 2 // 1-based display of the NEXT step
-		var verb string
-		if p.Relation == "continue" {
-			verb = fmt.Sprintf("advance to step %d %s (continue) — sends into current session", nextN, p.Label)
-		} else {
-			verb = fmt.Sprintf("advance to step %d %s (%s)", nextN, p.Label, p.Relation)
-		}
-		line := verb + fmt.Sprintf(" · seed: %q", truncPlain(p.Seed, 60))
-		body = append(body, truncPlain(line, inner))
-		if p.Unavailable {
-			body = append(body, styHelp.Render(truncPlain("⚠ some template values unavailable", inner)))
-		}
-	}
-	body = append(body, "")
-
-	if a.errStr != "" {
-		body = append(body, styErr.Render(truncPlain("! "+a.errStr, inner)))
-	}
-
-	keybar := "y confirm · n/esc cancel"
-	switch {
-	case a.wfContinueDead:
-		keybar = "f fork instead · esc cancel"
-	case a.wfPreviewErr != "":
-		keybar = "esc cancel"
-	}
-	return frame(w, "advance "+name, "", body, keybar)
-}
-
-// renderWFAbandon renders the abandon confirm dialog (spec §2.12).
-func (a *App) renderWFAbandon(w int) string {
-	inner := w - 4
-	r := a.wfTarget
-	label := styNeedsYou.Render(fmt.Sprintf("%s#%d", r.Name, r.ID))
-	body := []string{"", "  abandon " + label + " ?", ""}
-	if a.errStr != "" {
-		body = append(body, styErr.Render(truncPlain("! "+a.errStr, inner)))
-	}
-	return frame(w, "abandon run", "", body, "y confirm · n/esc cancel")
 }

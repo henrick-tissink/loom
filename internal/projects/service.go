@@ -28,9 +28,9 @@ type Store interface {
 
 // Service owns discovery + DB reconciliation and is queried READ-THROUGH.
 // loom.db is the runtime source of truth for launch targets: registry.Discover
-// used to run once at startup into a by-value slice that buildRecipe, Fanout
-// and workflow.LoadAll all validated against, so a project created in-app was
-// listed but not launchable, and hide/rename/reassign never reached it.
+// used to run once at startup into a by-value slice that buildRecipe validated
+// against, so a project created in-app was listed but not launchable, and
+// hide/rename/reassign never reached it.
 type Service struct {
 	st Store
 
@@ -76,8 +76,8 @@ func (s *Service) Reconcile(ps []registry.Project) error {
 			switch {
 			case errors.Is(err, store.ErrLabelTaken):
 				// Skip the insert and warn. Aborting would make discovery
-				// fatal, and overwriting would silently steal a label a saved
-				// workflow definition already resolves through.
+				// fatal, and overwriting would silently steal a label the
+				// launcher already resolves through.
 				s.warn("repo %q skipped: label %q already in use", m.Path, m.Label)
 			case err != nil:
 				s.warn("repo %q not registered: %v", m.Path, err)
@@ -180,11 +180,10 @@ const (
 // Target is one launchable directory.
 //
 // Label and ProjectName are deliberately two fields, not one. Label is the
-// STABLE identifier saved workflow definitions on disk resolve through, so §2
-// binds it to the directory basename — a root target's label is the root's
-// basename, never projects.name, because name is user-editable and a rename
-// must not invalidate a workflow. ProjectName is the mutable display name and
-// is what a picker or rail header should show.
+// STABLE identifier §2 binds to the directory basename — a root target's label
+// is the root's basename, never projects.name, because name is user-editable.
+// ProjectName is the mutable display name and is what a picker or rail header
+// should show.
 type Target struct {
 	Kind        TargetKind
 	Path        string // absolute; the set's key

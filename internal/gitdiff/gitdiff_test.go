@@ -184,3 +184,12 @@ func TestDiffCapture_nonASCIIPathsUnquoted(t *testing.T) {
 		t.Fatalf("Files = %q, want the raw path", got.Files)
 	}
 }
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
