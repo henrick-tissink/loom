@@ -215,8 +215,8 @@ func (a *App) ListRecent() []FinishedDTO {
 		}
 	}
 	trs, _ := a.st.GetTranscripts(ids)
-	summaryFor := func(id string) string { return trs[id].LLMSummary }
-	out = recentToDTOs(rows, summaryFor, a.attributor(res))
+	trFor := func(id string) store.Transcript { return trs[id] }
+	out = recentToDTOs(rows, trFor, a.attributor(res))
 	if len(out) > recentLimit {
 		out = out[:recentLimit]
 	}
@@ -311,6 +311,33 @@ func (a *App) DismissSession(name string) error {
 		return fmt.Errorf("store unavailable")
 	}
 	return a.st.DeleteSession(name)
+}
+
+// FreshSession starts a NEW claude session with a live session's launch
+// shape (cwd, add-dirs, model, mode) and no seed, and returns its tmux name.
+// It is the hand-over for a session that has outgrown its context window:
+// the operator's SessionStart hook re-injects the newest checkpoint written
+// in that cwd within 24 h, so the new session picks up from the checkpoint
+// the old one wrote. The old session is left running for the user to read
+// and kill; nothing here touches it.
+func (a *App) FreshSession(name string) (string, error) {
+	if a.launcher == nil || a.st == nil {
+		return "", fmt.Errorf("launcher unavailable")
+	}
+	row, ok, err := a.st.Get(name)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("session %q not found", name)
+	}
+	if row.Cwd == "" {
+		return "", fmt.Errorf("session has no recorded directory")
+	}
+	return a.launcher.Launch(session.Recipe{
+		ProjectLabel: row.ProjectLabel, Cwd: row.Cwd, Model: row.Model, Mode: row.Mode,
+		AddDirs: session.DecodeAddDirs(row.AddDirs),
+	}, launchCols, launchRows, a.now())
 }
 
 // ResumeSession relaunches a finished session via `claude --resume` and returns

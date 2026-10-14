@@ -35,6 +35,9 @@ type Entry struct {
 	WaitingFor  string
 	Name        string
 	UpdatedAt   int64 // unix milliseconds
+	// StatusUpdatedAt is when Status last changed (unix milliseconds): for a
+	// waiting pane, how long it has been waiting.
+	StatusUpdatedAt int64
 }
 
 // Dir is the registry directory under a claude config dir.
@@ -94,12 +97,14 @@ func readFile(path string) (Entry, bool) {
 		WaitingFor string `json:"waitingFor"`
 		Name       string `json:"name"`
 		UpdatedAt  int64  `json:"updatedAt"`
+		StatusAt   int64  `json:"statusUpdatedAt"`
 	}
 	if err := json.Unmarshal(raw, &f); err != nil || f.SessionID == "" {
 		return Entry{}, false
 	}
 	e := Entry{PID: f.PID, SessionID: f.SessionID, Cwd: f.Cwd, TmuxTarget: f.Tmux,
-		Status: f.Status, WaitingFor: f.WaitingFor, Name: f.Name, UpdatedAt: f.UpdatedAt}
+		Status: f.Status, WaitingFor: f.WaitingFor, Name: f.Name, UpdatedAt: f.UpdatedAt,
+		StatusUpdatedAt: f.StatusAt}
 	if i := strings.IndexByte(f.Tmux, ':'); i > 0 {
 		e.TmuxSession = f.Tmux[:i]
 	} else {

@@ -105,8 +105,8 @@ func TestSidechainAiTitleNotCaptured(t *testing.T) {
 
 func TestCtxTokensFromLastUsage(t *testing.T) {
 	c := feed(t, lineUserPrompt, lineAsstUsage)
-	if c.CtxTokens() != 80612 { // 12+100+80000+500
-		t.Fatalf("CtxTokens = %d, want 80612", c.CtxTokens())
+	if c.CtxTokens() != 80112 { // 12+100+80000; output tokens are not context
+		t.Fatalf("CtxTokens = %d, want 80112", c.CtxTokens())
 	}
 	if c.State() != StateNeedsYou {
 		t.Fatalf("state = %v", c.State())
@@ -115,7 +115,7 @@ func TestCtxTokensFromLastUsage(t *testing.T) {
 
 func TestUsageAbsentLeavesCtx(t *testing.T) {
 	c := feed(t, lineUserPrompt, lineAsstUsage, lineToolResult, lineAsstToolUse)
-	if c.CtxTokens() != 80612 { // later assistant WITHOUT usage keeps prior value
+	if c.CtxTokens() != 80112 { // later assistant WITHOUT usage keeps prior value
 		t.Fatalf("CtxTokens = %d", c.CtxTokens())
 	}
 }

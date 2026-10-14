@@ -75,6 +75,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.loom/settings.json` | GUI (rw, atomic) | editor, notifications, auto-summarize, terminal theme |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status |
+| `~/.claude/state/{tasks,checkpoints}/<sid>.md` | the operator's hooks (Loom: read-only) | a session's pinned finish line and its hand-over checkpoint |
 | `~/.claude.json` | Claude (Loom: read-only) | per-project trust flags |
 | `$LOOM_WORKSPACE` (default `~/Sauce`) | user | project discovery root |
 
@@ -107,6 +108,7 @@ frontend.
 | `session` | Launch recipe + the launch/resume sequence | Owns tmux naming, argv construction, the ready/trust gate, seed delivery, multi-repo `--add-dir`. |
 | `transcript` | Locate + interpret Claude's JSONL | Path encoding, incremental `Reader`, turn-boundary `Classifier`. |
 | `ccsessions` | Read Claude's own session registry | The only way to learn a pane's *current* session id after `/clear` or an in-pane resume. |
+| `taskfile` | Read the hooks' task file and checkpoint | Finish line (status, Done-when ticks, outcome) and hand-over age per session; stat-cached per poll. |
 | `status` | Fuse transcript state with tmux liveness | The reconcile loop. The only writer of live-session status. |
 | `store` | SQLite: schema, sessions, projects, memory index | Migrations are transactional & re-entrant. |
 | `memory` | Index / extract / summarize | Reads the whole Claude archive; the only package that calls out to an LLM. |

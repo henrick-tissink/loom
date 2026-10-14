@@ -168,6 +168,43 @@ function waitingSuffix(s) {
   return ` <span class="tage">${esc(s.waitingFor)}</span>`;
 }
 
+// taskPillHtml is the finish line from the session's task file: Done-when
+// ticks for a delivery task, a word for a consultation, nothing when the
+// session never pinned one — which is itself information. It is what tells
+// "asked a question mid-task" (2/6) apart from "finished, waiting for you to
+// read the hand-back" (4/4) without opening the pane.
+function taskPillHtml(s) {
+  if (!s.taskStatus) return "";
+  const tip = s.taskOutcome ? ` title="${esc(s.taskOutcome)}"` : "";
+  if (s.taskStatus === "consultation") return `<span class="tpill tpill-consult"${tip}>consult</span>`;
+  const complete = s.taskStatus === "done" || (s.taskTotal > 0 && s.taskDone >= s.taskTotal);
+  const label = s.taskTotal > 0 ? `${s.taskDone}/${s.taskTotal}` : s.taskStatus;
+  return `<span class="tpill${complete ? " tpill-ok" : ""}"${tip}>${esc(label)}</span>`;
+}
+
+// askLineHtml is the question a needs-you row is waiting on, with how long
+// it has waited — so the queue reads as questions, not as ten identical
+// "needs you" rows, and the reply modal is not typed blind.
+function askLineHtml(s) {
+  if (s.status !== "needs_you") return "";
+  const age = s.since ? fmtAge(Math.max(0, Math.floor(Date.now() / 1000) - s.since)) : "";
+  if (!s.ask && !age) return "";
+  return `<span class="task-ask">${age ? `<span class="tage">${age}</span> ` : ""}${esc(sumPreview(s.ask || ""))}</span>`;
+}
+
+// budgetChipHtml marks a session past the context budget and says whether a
+// hand-over checkpoint exists and how old it is: "can this one be handed
+// over safely" is answered in the cockpit instead of inside the pane. The
+// SessionStart hook re-injects a cwd's checkpoint only within 24 h, so the
+// age is the point.
+function budgetChipHtml(s) {
+  if (!s.ctxTokens || s.ctxTokens < CTX_WINDOW) return "";
+  const ck = s.checkpointAt ? `ckpt ${fmtAge(Math.max(0, Math.floor(Date.now() / 1000) - s.checkpointAt))}` : "no checkpoint";
+  const tip = s.nextStep ? ` title="Next step: ${esc(s.nextStep)}"` : "";
+  return `<span class="tchip tchip-over"${tip}>over budget · ${esc(ck)}</span>`;
+}
+function overBudget(s) { return !!s.ctxTokens && s.ctxTokens >= CTX_WINDOW; }
+
 // armAction turns a button into a two-step confirm (the killButton idiom) for a
 // bulk/destructive action: first click arms and relabels, second click fires;
 // it disarms itself after 2.5s.
@@ -294,10 +331,16 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}</span>${ctxGaugeHtml(s.ctxTokens)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${taskPillHtml(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
+  if (overBudget(s)) {
+    acts.appendChild(actionBtn('<path d="M12 5v14M5 12h14"/>', "Fresh session from checkpoint (same directory; this one stays open)", async () => {
+      try { const nn = await window.go.main.App.FreshSession(s.name); if (nn) selectSession(nn); poll(); }
+      catch (e) { console.error("fresh", e); }
+    }));
+  }
   acts.appendChild(killButton(s.name));
   li.addEventListener("click", () => selectSession(s.name));
   threadsEl.appendChild(li);
@@ -312,6 +355,9 @@ function appendFinishedRow(s) {
   let sumLine = "";
   if (busy) sumLine = `<span class="tsum tsum-busy">Summarizing…</span>`;
   else if (s.summary) sumLine = `<span class="tsum" title="${esc(s.summary)}">${esc(sumPreview(s.summary))}</span>`;
+  // No LLM summary (the common case: it costs quota and is opt-in) → the
+  // outcome the indexer extracted, so a finished row reads as what it ended with.
+  else if (s.outcome) sumLine = `<span class="tsum" title="${esc(s.outcome)}">${esc(sumPreview(s.outcome))}</span>`;
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span>${sumLine}</span>` +
@@ -523,11 +569,20 @@ function renderThreadsPane() {
   threadsEl.replaceChildren();
 
   if (selProject === ATTENTION) {
-    const queue = latestSessions.filter((s) => s.status === "needs_you");
+    // Freshest ask first: the one you were just working with is at the top,
+    // and anything that has waited a day or more sinks under Stale rather
+    // than sitting between live questions as if it were one. `since` only
+    // changes on a new ask, so rows do not shuffle between polls.
+    const now = Math.floor(Date.now() / 1000);
+    const queue = latestSessions.filter((s) => s.status === "needs_you").slice()
+      .sort((a, b) => (b.since || 0) - (a.since || 0));
+    const stale = queue.filter((s) => s.since && now - s.since >= 86400);
+    const fresh = queue.filter((s) => !stale.includes(s));
     threadsHeadEl.innerHTML =
       `<div class="th-head"><span class="th-title"><span class="attn-dot"></span><span>Needs you</span></span></div>` +
-      `<div class="th-sub"><span>${queue.length} across all projects</span></div>`;
-    for (const s of queue) appendLiveRow(s, s.projectName || "");
+      `<div class="th-sub"><span>${queue.length} across all projects${stale.length ? ` · ${stale.length} stale` : ""}</span></div>`;
+    for (const s of fresh) appendLiveRow(s, s.projectName || "");
+    if (stale.length) { appendGroup("Stale · a day or more"); for (const s of stale) appendLiveRow(s, s.projectName || ""); }
     if (!queue.length) threadsEl.innerHTML = `<div class="th-empty">Nothing needs you right now.<br><span>Walk away — loom pulls you back.</span></div>`;
     return;
   }
@@ -1118,6 +1173,7 @@ function openReply(name) {
   backdrop.innerHTML = `
     <div class="modal reply-modal" role="dialog" aria-label="Quick reply">
       <h2>Reply to ${esc(label)}</h2>
+      ${s && s.ask ? `<p class="reply-ask">${esc(s.ask)}</p>` : ""}
       <input id="reply-input" class="search-input" type="text" placeholder="Type a message — Enter sends it to the session…" autocomplete="off" spellcheck="false" />
       <div class="modal-actions">
         <button class="btn-ghost" id="reply-cancel">Cancel</button>

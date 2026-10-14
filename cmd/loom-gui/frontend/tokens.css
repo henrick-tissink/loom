@@ -322,6 +322,25 @@ body {
 .ctxbar.ctx-warn i { background: #E0A24A; }
 .ctxbar.ctx-danger i { background: #C5604C; }
 
+/* ---- finish line, ask, budget chip (rail) ---- */
+.tpill {
+  display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 6px;
+  font-size: 10px; font-variant-numeric: tabular-nums; vertical-align: 1px;
+  color: var(--text-dim); background: var(--sel); border: 1px solid var(--edge);
+}
+.tpill-ok { color: #2F7A4F; background: rgba(66,160,103,.12); border-color: rgba(66,160,103,.35); }
+.tpill-consult { color: var(--text-faint); font-style: italic; }
+.task-ask {
+  display: block; margin-top: 3px; font-size: 11px; color: var(--text-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tchip { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 6px; font-size: 10px; }
+.tchip-over { color: #8C3A2B; background: rgba(197,96,76,.12); border: 1px solid rgba(197,96,76,.35); }
+.reply-ask {
+  margin: 0; font-size: 12px; color: var(--text-dim); line-height: 1.45;
+  max-height: 7em; overflow: auto; white-space: pre-wrap; word-break: break-word;
+}
+
 /* ---- stage-header diff button ---- */
 .sh-btn {
   --wails-draggable: no-drag; margin-left: auto;

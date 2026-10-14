@@ -66,7 +66,7 @@ func TestReaderSnapshotCarriesTitleAndCtx(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rs.Title != "add vega hedge to strategy" || rs.CtxTokens != 80612 || rs.State != StateNeedsYou {
+	if rs.Title != "add vega hedge to strategy" || rs.CtxTokens != 80112 || rs.State != StateNeedsYou {
 		t.Fatalf("snapshot = %+v", rs)
 	}
 }

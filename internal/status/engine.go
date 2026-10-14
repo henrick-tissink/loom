@@ -9,6 +9,7 @@ import (
 	"github.com/henricktissink/loom/internal/ccsessions"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/store"
+	"github.com/henricktissink/loom/internal/taskfile"
 	"github.com/henricktissink/loom/internal/tmux"
 	"github.com/henricktissink/loom/internal/transcript"
 )
@@ -31,6 +32,17 @@ type Row struct {
 	// WaitingFor is what the pane waits on according to claude's registry
 	// ("dialog open"), or "shell"; "" when the registry has nothing to add.
 	WaitingFor string
+	// Ask is the text claude last ended a turn with and Since when the
+	// session started waiting (unix seconds; 0 = unknown). Both are set only
+	// while Status is NeedsYou.
+	Ask   string
+	Since int64
+	// Task is the finish line the session pinned in its task file, if any
+	// (the operator's hooks write it; see internal/taskfile).
+	Task    taskfile.Task
+	HasTask bool
+	// Checkpoint is the session's last hand-over note, if any.
+	Checkpoint taskfile.Checkpoint
 }
 
 type Snapshot struct {
@@ -62,6 +74,7 @@ type Engine struct {
 	st      *store.Store
 	ccd     string
 	readers map[string]*transcript.Reader
+	tasks   *taskfile.Cache
 
 	// mu serializes Poll end-to-end. Defense in depth against finding 1: the
 	// UI must never fire two concurrent Poll goroutines against the same
@@ -84,7 +97,8 @@ type Engine struct {
 
 func NewEngine(tm *tmux.Client, st *store.Store, claudeConfigDir string) *Engine {
 	return &Engine{tm: tm, st: st, ccd: claudeConfigDir,
-		readers: map[string]*transcript.Reader{}}
+		readers: map[string]*transcript.Reader{},
+		tasks:   taskfile.NewCache(taskfile.Dir(claudeConfigDir))}
 }
 
 func (e *Engine) Poll(now time.Time) (Snapshot, error) {
@@ -213,9 +227,20 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 			_ = e.st.SetStatus(r.Name, string(st))
 			r.LastStatus = string(st)
 		}
-		live = append(live, Row{SessionRow: r, Status: st, LastTool: rs.LastTool,
+		row := Row{SessionRow: r, Status: st, LastTool: rs.LastTool,
 			Activity: activity[r.Name], Title: r.Title, CtxTokens: rs.CtxTokens,
-			WaitingFor: waitingFor})
+			WaitingFor: waitingFor}
+		if st == NeedsYou {
+			// the wait is measured from the ask; a registry "waiting" (a
+			// dialog) is timed by the registry, which is what flipped it.
+			row.Ask, row.Since = rs.Ask, rs.AskAt
+			if hasEnt && ent.Status == "waiting" && ent.StatusUpdatedAt > 0 {
+				row.Since = ent.StatusUpdatedAt / 1000
+			}
+		}
+		row.Task, row.HasTask = e.tasks.Task(r.ClaudeSessionID)
+		row.Checkpoint, _ = e.tasks.Checkpoint(r.ClaudeSessionID)
+		live = append(live, row)
 	}
 
 	recent, err := e.st.Recent(10)

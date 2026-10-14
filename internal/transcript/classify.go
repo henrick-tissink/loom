@@ -1,6 +1,9 @@
 package transcript
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 type State int
 
@@ -28,6 +31,7 @@ type record struct {
 	Type        string `json:"type"`
 	IsSidechain bool   `json:"isSidechain"`
 	AiTitle     string `json:"aiTitle"`
+	Timestamp   string `json:"timestamp"` // RFC 3339, written on every turn record
 	Message     *struct {
 		Content json.RawMessage `json:"content"`
 		Usage   *usage          `json:"usage"`
@@ -52,7 +56,12 @@ type usage struct {
 type block struct {
 	Type string `json:"type"`
 	Name string `json:"name"`
+	Text string `json:"text"`
 }
+
+// askLimit bounds the captured question: the rail shows one line of it and
+// the reply modal a few, so the rest of a long answer is dead weight.
+const askLimit = 300
 
 // Classifier folds JSONL lines into the session's turn-boundary state.
 // It NEVER classifies on sidecar records (mode, permission-mode, last-prompt,
@@ -63,6 +72,12 @@ type Classifier struct {
 	lastTool  string
 	title     string
 	ctxTokens int64
+	// ask is the text claude last ended a turn with — the question or
+	// hand-back the user is being waited on for — and askAt when it was
+	// written. Both are set only on the needs-you transition, so a row's
+	// wait age is measured from the ask, not from the last tool call.
+	ask   string
+	askAt int64
 }
 
 func (c *Classifier) Feed(line []byte) {
@@ -84,7 +99,11 @@ func (c *Classifier) Feed(line []byte) {
 	case "assistant":
 		if r.Message != nil && r.Message.Usage != nil {
 			u := r.Message.Usage
-			c.ctxTokens = u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens + u.OutputTokens
+			// input + cache creation + cache read is the context the turn was
+			// sent with; output is not part of the window the next turn pays
+			// for. This is also the operator's ctx_budget hook's formula, so
+			// the gauge and the hook's nudge agree.
+			c.ctxTokens = u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 		}
 		if name, ok := findBlock(blocks, "tool_use"); ok {
 			c.lastTool = name
@@ -107,6 +126,8 @@ func (c *Classifier) Feed(line []byte) {
 		_, hasText := findBlock(blocks, "text")
 		if hasText && sr != "tool_use" && sr != "pause_turn" {
 			c.state = StateNeedsYou
+			c.ask = lastText(blocks)
+			c.askAt = parseTS(r.Timestamp)
 			return
 		}
 		c.state = StateRunning // thinking mid-turn, or a text preamble before a tool
@@ -147,7 +168,37 @@ func findBlock(bs []block, typ string) (name string, ok bool) {
 	return "", false
 }
 
+// lastText is the final text block's content, cut to askLimit runes. The
+// last block rather than the first: a turn that explains and then asks puts
+// the question at the end.
+func lastText(bs []block) string {
+	for i := len(bs) - 1; i >= 0; i-- {
+		if bs[i].Type != "text" {
+			continue
+		}
+		rs := []rune(bs[i].Text)
+		if len(rs) > askLimit {
+			return string(rs[:askLimit]) + "…"
+		}
+		return bs[i].Text
+	}
+	return ""
+}
+
+func parseTS(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
+}
+
 func (c *Classifier) State() State     { return c.state }
 func (c *Classifier) LastTool() string { return c.lastTool }
 func (c *Classifier) Title() string    { return c.title }
 func (c *Classifier) CtxTokens() int64 { return c.ctxTokens }
+func (c *Classifier) Ask() string      { return c.ask }
+func (c *Classifier) AskAt() int64     { return c.askAt }

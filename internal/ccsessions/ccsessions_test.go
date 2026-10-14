@@ -28,7 +28,7 @@ func TestByTmuxSessionPicksFreshestLiveEntry(t *testing.T) {
 
 	// two live entries for the same pane: the newer updatedAt wins
 	writeEntry(t, dir, "100.json", `{"pid":100,"sessionId":"s-old","tmux":"loom-A:@1.%1","status":"idle","updatedAt":10}`)
-	writeEntry(t, dir, "101.json", `{"pid":101,"sessionId":"s-new","cwd":"/w","tmux":"loom-A:@1.%1","status":"waiting","waitingFor":"dialog open","name":"a-1","updatedAt":20}`)
+	writeEntry(t, dir, "101.json", `{"pid":101,"sessionId":"s-new","cwd":"/w","tmux":"loom-A:@1.%1","status":"waiting","waitingFor":"dialog open","name":"a-1","updatedAt":20,"statusUpdatedAt":15}`)
 	// dead process: ignored even though it is the only entry for its pane
 	writeEntry(t, dir, "999.json", `{"pid":999,"sessionId":"s-dead","tmux":"loom-B:@2.%2","updatedAt":30}`)
 	// not under tmux: nothing to key on
@@ -46,7 +46,7 @@ func TestByTmuxSessionPicksFreshestLiveEntry(t *testing.T) {
 		t.Fatalf("want loom-A, got %v", got)
 	}
 	if e.SessionID != "s-new" || e.PID != 101 || e.Cwd != "/w" || e.TmuxTarget != "loom-A:@1.%1" ||
-		e.Status != "waiting" || e.WaitingFor != "dialog open" || e.Name != "a-1" || e.UpdatedAt != 20 {
+		e.Status != "waiting" || e.WaitingFor != "dialog open" || e.Name != "a-1" || e.UpdatedAt != 20 || e.StatusUpdatedAt != 15 {
 		t.Fatalf("unexpected entry %+v", e)
 	}
 }

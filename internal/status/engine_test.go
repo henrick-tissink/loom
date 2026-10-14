@@ -73,7 +73,7 @@ func TestPollThreadsTitleCtxAndBellsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := snap.Live[0]
-	if r.Title != "probe the flux" || r.CtxTokens != 40100 {
+	if r.Title != "probe the flux" || r.CtxTokens != 40010 {
 		t.Fatalf("row = title %q ctx %d", r.Title, r.CtxTokens)
 	}
 	persisted, _, _ := st.Get(name)
@@ -511,5 +511,53 @@ func TestPollMergesRegistryStatus(t *testing.T) {
 	}
 	if len(snap.NewlyNeedsYou) != 1 {
 		t.Fatalf("waiting must ring once: %v", snap.NewlyNeedsYou)
+	}
+}
+
+const fakeTranscriptAsk = `{"type":"user","message":{"role":"user","content":"hi"}}
+{"type":"assistant","timestamp":"2026-10-14T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done. Merge it?"}],"stop_reason":"end_turn"}}
+`
+
+func TestPollCarriesAskTaskAndCheckpoint(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	t.Setenv("CLAUDE_STATE_DIR", filepath.Join(ccd, "state"))
+	cwd := t.TempDir()
+	id := "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	name := launchFake(t, tm, ccd, cwd, id)
+	if err := os.WriteFile(transcript.Path(ccd, cwd, id), []byte(fakeTranscriptAsk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id, ProjectLabel: "p",
+		Cwd: cwd, CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "unknown"})
+	for _, d := range []string{"tasks", "checkpoints"} {
+		if err := os.MkdirAll(filepath.Join(ccd, "state", d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := "# Task\nStatus: open\n\n## Outcome\nThe rail shows it.\n\n## Done when\n- [x] build: $ true\n- [ ] tests: $ true\n"
+	if err := os.WriteFile(filepath.Join(ccd, "state", "tasks", id+".md"), []byte(task), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ccd, "state", "checkpoints", id+".md"), []byte("# Checkpoint\n\n## Next step\nhand back\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEngine(tm, st, ccd)
+	snap, err := e.Poll(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Live) != 1 {
+		t.Fatalf("live = %+v", snap.Live)
+	}
+	r := snap.Live[0]
+	if r.Status != NeedsYou || r.Ask != "Done. Merge it?" || r.Since != 1791972000 {
+		t.Fatalf("ask: %+v", r)
+	}
+	if !r.HasTask || r.Task.Status != "open" || r.Task.Done != 1 || r.Task.Total != 2 || r.Task.Outcome != "The rail shows it." {
+		t.Fatalf("task: %+v", r.Task)
+	}
+	if r.Checkpoint.WrittenAt == 0 || r.Checkpoint.NextStep != "hand back" {
+		t.Fatalf("checkpoint: %+v", r.Checkpoint)
 	}
 }

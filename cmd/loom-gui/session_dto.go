@@ -22,6 +22,21 @@ type SessionDTO struct {
 	LastTool    string `json:"lastTool"`   // tool the session is currently running, if any
 	Activity    int64  `json:"activity"`   // unix seconds of last tmux activity; 0 = unknown (for idle-age)
 	WaitingFor  string `json:"waitingFor"` // what claude's registry says the pane waits on ("dialog open"), or ""
+	// Ask is the text claude last ended a turn with and Since when the wait
+	// began (unix seconds; 0 = unknown). Set only while Status is needs_you.
+	Ask   string `json:"ask"`
+	Since int64  `json:"since"`
+	// The finish line from the session's task file (the operator's hooks
+	// write it): TaskStatus is "" when there is no task file, else
+	// open | done | consultation; TaskDone/TaskTotal count Done-when checks.
+	TaskStatus  string `json:"taskStatus"`
+	TaskDone    int    `json:"taskDone"`
+	TaskTotal   int    `json:"taskTotal"`
+	TaskOutcome string `json:"taskOutcome"`
+	// CheckpointAt is when the session last wrote a hand-over checkpoint
+	// (unix seconds; 0 = never) and NextStep its one-line next step.
+	CheckpointAt int64  `json:"checkpointAt"`
+	NextStep     string `json:"nextStep"`
 }
 
 // snapshotToDTOs flattens a status.Snapshot's live rows into SessionDTOs,
@@ -37,19 +52,34 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 		}
 		att, _ := at.Attribute(r.SessionRow)
 		out = append(out, SessionDTO{
-			Name:        r.Name,
-			Project:     r.ProjectLabel,
-			ProjectRoot: att.Root,
-			ProjectName: att.Name,
-			Title:       r.Title,
-			Status:      string(r.Status),
-			CtxTokens:   r.CtxTokens,
-			LastTool:    r.LastTool,
-			Activity:    r.Activity,
-			WaitingFor:  r.WaitingFor,
+			Name:         r.Name,
+			Project:      r.ProjectLabel,
+			ProjectRoot:  att.Root,
+			ProjectName:  att.Name,
+			Title:        r.Title,
+			Status:       string(r.Status),
+			CtxTokens:    r.CtxTokens,
+			LastTool:     r.LastTool,
+			Activity:     r.Activity,
+			WaitingFor:   r.WaitingFor,
+			Ask:          r.Ask,
+			Since:        r.Since,
+			TaskStatus:   taskStatus(r),
+			TaskDone:     r.Task.Done,
+			TaskTotal:    r.Task.Total,
+			TaskOutcome:  r.Task.Outcome,
+			CheckpointAt: r.Checkpoint.WrittenAt,
+			NextStep:     r.Checkpoint.NextStep,
 		})
 	}
 	return out
+}
+
+func taskStatus(r status.Row) string {
+	if !r.HasTask {
+		return ""
+	}
+	return r.Task.Status
 }
 
 // FinishedDTO is the flat view of a finished (ended) session for the rail's
@@ -63,14 +93,18 @@ type FinishedDTO struct {
 	Status      string `json:"status"` // done | error
 	EndedAt     int64  `json:"endedAt"`
 	Summary     string `json:"summary"` // stored LLM summary, or "" if none yet
+	// Outcome is the last conclusion the indexer extracted from the
+	// transcript — what the session ended with, without an LLM call.
+	Outcome string `json:"outcome"`
 }
 
 // recentToDTOs maps store rows to FinishedDTOs, skipping still-live rows
-// (EndedAt < 0) and deriving done/error from the exit code. summaryFor (may be
-// nil) supplies each row's stored LLM summary by claude session id. Non-nil
-// slice. res (may be nil) applies §6's visibility predicate — the Finished
-// list is leak surface 2; the caller over-fetches and trims after this.
-func recentToDTOs(rows []store.SessionRow, summaryFor func(string) string, at *rowAttributor) []FinishedDTO {
+// (EndedAt < 0) and deriving done/error from the exit code. trFor (may be
+// nil) supplies each row's indexed transcript by claude session id, for the
+// stored LLM summary and the extracted outcome. Non-nil slice. res (may be
+// nil) applies §6's visibility predicate — the Finished list is leak surface
+// 2; the caller over-fetches and trims after this.
+func recentToDTOs(rows []store.SessionRow, trFor func(string) store.Transcript, at *rowAttributor) []FinishedDTO {
 	out := make([]FinishedDTO, 0, len(rows))
 	for _, r := range rows {
 		if r.EndedAt < 0 {
@@ -83,15 +117,15 @@ func recentToDTOs(rows []store.SessionRow, summaryFor func(string) string, at *r
 		if r.ExitCode > 0 {
 			st = "error"
 		}
-		summary := ""
-		if summaryFor != nil {
-			summary = summaryFor(r.ClaudeSessionID)
+		var tr store.Transcript
+		if trFor != nil {
+			tr = trFor(r.ClaudeSessionID)
 		}
 		att, _ := at.Attribute(r)
 		out = append(out, FinishedDTO{
 			Name: r.Name, Project: r.ProjectLabel, Title: r.Title,
 			ProjectRoot: att.Root, ProjectName: att.Name,
-			Status: st, EndedAt: r.EndedAt, Summary: summary,
+			Status: st, EndedAt: r.EndedAt, Summary: tr.LLMSummary, Outcome: tr.Outcome,
 		})
 	}
 	return out
