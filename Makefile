@@ -6,6 +6,16 @@
 
 GOBIN   := $(shell go env GOPATH)/bin
 WAILS   := $(GOBIN)/wails
+
+# npm normally comes from nvm, which only loads in interactive shells, so
+# `make gui` from a script or an agent found no npm. Resolve its bin dir the
+# way nvm would: PATH if it is already there, else the `default` alias's
+# version under ~/.nvm, else the newest installed node.
+NPM_DIR := $(shell if command -v npm >/dev/null 2>&1; then dirname "$$(command -v npm)"; else \
+	v=$$(cat "$$HOME/.nvm/alias/default" 2>/dev/null); \
+	d=$$(ls -d "$$HOME"/.nvm/versions/node/v$${v\#v}*/bin 2>/dev/null | sort -V | tail -1); \
+	[ -n "$$d" ] || d=$$(ls -d "$$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1); \
+	echo "$$d"; fi)
 GUI_DIR := cmd/loom-gui
 APP     := $(GUI_DIR)/build/bin/loom.app
 
@@ -17,7 +27,7 @@ $(WAILS):
 
 # Build the loom GUI app bundle.
 gui: $(WAILS)
-	cd $(GUI_DIR) && PATH="$(GOBIN):$$PATH" $(WAILS) build
+	cd $(GUI_DIR) && PATH="$(GOBIN):$(NPM_DIR):$$PATH" $(WAILS) build
 
 # Build, then install into /Applications so it's a normal Dock/Spotlight app.
 gui-install: gui
