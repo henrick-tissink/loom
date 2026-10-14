@@ -43,3 +43,30 @@ func Fuse(t transcript.State, paneActive bool) Status {
 		return Unknown
 	}
 }
+
+// Merge overlays Claude Code's own view of a pane (its sessions registry,
+// see internal/ccsessions) on the fused status. The transcript classifier
+// stays primary: the registry's "idle" covers both "turn ended, waiting for
+// you" and "never prompted", so it only resolves Unknown. "busy" is
+// authoritative the other way — a parent waiting on subagents has an ended
+// turn in its own transcript (the classifier never reads subagents/*.jsonl)
+// and read as needs_you for hours — and "waiting" names the thing the user
+// must answer ("dialog open"), which is worth more than the bare status.
+// "shell" (the user dropped to a shell inside claude) keeps the fused status
+// and is surfaced as the label. An unknown or empty word changes nothing.
+func Merge(fused Status, regStatus, waitingFor string) (Status, string) {
+	switch regStatus {
+	case "busy":
+		return Running, ""
+	case "waiting":
+		return NeedsYou, waitingFor
+	case "idle":
+		if fused == Unknown {
+			return Idle, ""
+		}
+		return fused, ""
+	case "shell":
+		return fused, "shell"
+	}
+	return fused, ""
+}

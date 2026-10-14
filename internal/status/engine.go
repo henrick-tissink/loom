@@ -28,6 +28,9 @@ type Row struct {
 	Activity  int64 // unix seconds of last tmux session activity; 0 = unknown
 	Title     string
 	CtxTokens int64
+	// WaitingFor is what the pane waits on according to claude's registry
+	// ("dialog open"), or "shell"; "" when the registry has nothing to add.
+	WaitingFor string
 }
 
 type Snapshot struct {
@@ -181,7 +184,8 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 	var live []Row
 	var newly []string
 	for _, r := range liveRows {
-		if ent, ok := reg[r.Name]; ok && ent.SessionID != r.ClaudeSessionID {
+		ent, hasEnt := reg[r.Name]
+		if hasEnt && ent.SessionID != r.ClaudeSessionID {
 			// rebind: the pane's claude now runs a different session id, so
 			// the transcript this row was tailing is abandoned and its status
 			// would freeze forever. Follow the registry, persist it (resume,
@@ -206,6 +210,10 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 		}
 		paneActive := now.Unix()-activity[r.Name] <= int64(activeWindow/time.Second)
 		st := Fuse(rs.State, paneActive)
+		waitingFor := ""
+		if hasEnt {
+			st, waitingFor = Merge(st, ent.Status, ent.WaitingFor)
+		}
 		if st == NeedsYou && r.LastStatus != string(NeedsYou) {
 			newly = append(newly, r.Name)
 		}
@@ -214,7 +222,8 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 			r.LastStatus = string(st)
 		}
 		live = append(live, Row{SessionRow: r, Status: st, LastTool: rs.LastTool,
-			Activity: activity[r.Name], Title: r.Title, CtxTokens: rs.CtxTokens})
+			Activity: activity[r.Name], Title: r.Title, CtxTokens: rs.CtxTokens,
+			WaitingFor: waitingFor})
 	}
 
 	recent, err := e.st.Recent(10)

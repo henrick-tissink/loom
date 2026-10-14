@@ -27,3 +27,29 @@ func TestFuse(t *testing.T) {
 		}
 	}
 }
+
+func TestMerge(t *testing.T) {
+	cases := []struct {
+		fused      Status
+		reg, wf    string
+		want       Status
+		wantReason string
+	}{
+		{NeedsYou, "busy", "", Running, ""}, // parent waiting on subagents
+		{Unknown, "busy", "", Running, ""},
+		{Running, "waiting", "dialog open", NeedsYou, "dialog open"},
+		{Idle, "waiting", "", NeedsYou, ""},
+		{Unknown, "idle", "", Idle, ""}, // never prompted: no transcript yet
+		{NeedsYou, "idle", "", NeedsYou, ""},
+		{Running, "idle", "", Running, ""},
+		{NeedsYou, "shell", "", NeedsYou, "shell"},
+		{NeedsYou, "", "", NeedsYou, ""},
+		{Running, "weird", "x", Running, ""},
+	}
+	for _, c := range cases {
+		got, reason := Merge(c.fused, c.reg, c.wf)
+		if got != c.want || reason != c.wantReason {
+			t.Errorf("Merge(%v, %q, %q) = %v, %q; want %v, %q", c.fused, c.reg, c.wf, got, reason, c.want, c.wantReason)
+		}
+	}
+}

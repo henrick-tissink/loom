@@ -17,10 +17,11 @@ type SessionDTO struct {
 	ProjectRoot string `json:"projectRoot"`
 	ProjectName string `json:"projectName"`
 	Title       string `json:"title"`
-	Status      string `json:"status"`    // running | needs_you | idle | done | error | unknown
-	CtxTokens   int64  `json:"ctxTokens"` // approx context tokens in the last turn; 0 = unknown
-	LastTool    string `json:"lastTool"`  // tool the session is currently running, if any
-	Activity    int64  `json:"activity"`  // unix seconds of last tmux activity; 0 = unknown (for idle-age)
+	Status      string `json:"status"`     // running | needs_you | idle | done | error | unknown
+	CtxTokens   int64  `json:"ctxTokens"`  // approx context tokens in the last turn; 0 = unknown
+	LastTool    string `json:"lastTool"`   // tool the session is currently running, if any
+	Activity    int64  `json:"activity"`   // unix seconds of last tmux activity; 0 = unknown (for idle-age)
+	WaitingFor  string `json:"waitingFor"` // what claude's registry says the pane waits on ("dialog open"), or ""
 }
 
 // snapshotToDTOs flattens a status.Snapshot's live rows into SessionDTOs,
@@ -45,6 +46,7 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 			CtxTokens:   r.CtxTokens,
 			LastTool:    r.LastTool,
 			Activity:    r.Activity,
+			WaitingFor:  r.WaitingFor,
 		})
 	}
 	return out

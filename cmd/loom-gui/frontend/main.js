@@ -160,6 +160,14 @@ function idleSuffix(s) {
   return ` <span class="tage">${fmtAge(age)}</span>`;
 }
 
+// waitingSuffix names what the pane waits on when claude's own registry says
+// so ("dialog open", "shell"); a bare needs-you tells you less than the thing
+// you have to answer.
+function waitingSuffix(s) {
+  if (!s.waitingFor) return "";
+  return ` <span class="tage">${esc(s.waitingFor)}</span>`;
+}
+
 // armAction turns a button into a two-step confirm (the killButton idiom) for a
 // bulk/destructive action: first click arms and relabels, second click fires;
 // it disarms itself after 2.5s.
@@ -287,7 +295,7 @@ function appendLiveRow(s, projLabel) {
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}</span>${ctxGaugeHtml(s.ctxTokens)}</span>` +
-    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
+    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
   acts.appendChild(killButton(s.name));
@@ -1706,7 +1714,7 @@ function buildPaletteItems() {
   for (const s of latestSessions) {
     items.push({
       label: displayName(s),
-      hint: `${s.project} · ${statusWord(s.status)}`,
+      hint: `${s.project} · ${statusWord(s.status)}${s.waitingFor ? " · " + s.waitingFor : ""}`,
       run: () => selectSession(s.name),
     });
   }

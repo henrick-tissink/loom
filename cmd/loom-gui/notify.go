@@ -71,6 +71,9 @@ func needsYouLabels(snap status.Snapshot, res *projects.Resolver) (labels []stri
 			if r.Title != "" {
 				label += " · " + r.Title
 			}
+			if r.WaitingFor != "" {
+				label += " (" + r.WaitingFor + ")"
+			}
 			labels = append(labels, label)
 			break
 		}

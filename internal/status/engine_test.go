@@ -464,3 +464,52 @@ func TestPollRebindsClaudeSessionIDFromRegistry(t *testing.T) {
 		t.Fatalf("rebind not stable: %q", row.ClaudeSessionID)
 	}
 }
+
+// TestPollMergesRegistryStatus: claude's own registry says the pane is busy
+// (a parent waiting on subagents), so the transcript's ended turn must not
+// read as needs_you; "waiting" names what the user has to answer.
+func TestPollMergesRegistryStatus(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	id := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	name := launchFake(t, tm, ccd, cwd, id)
+	st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id, ProjectLabel: "p",
+		Cwd: cwd, CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "unknown"})
+	regDir := filepath.Join(ccd, "sessions")
+	if err := os.MkdirAll(regDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(status, waitingFor string) {
+		body := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"tmux":%q,"status":%q,"waitingFor":%q,"updatedAt":1}`,
+			os.Getpid(), id, name+":@1.%1", status, waitingFor)
+		if err := os.WriteFile(filepath.Join(regDir, "1.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := NewEngine(tm, st, ccd)
+	now := time.Now().Add(time.Hour)
+
+	write("busy", "")
+	snap, err := e.Poll(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Live) != 1 || snap.Live[0].Status != Running || snap.Live[0].WaitingFor != "" {
+		t.Fatalf("busy: got %+v", snap.Live)
+	}
+	if len(snap.NewlyNeedsYou) != 0 {
+		t.Fatalf("busy must not ring the bell: %v", snap.NewlyNeedsYou)
+	}
+
+	write("waiting", "dialog open")
+	snap, err = e.Poll(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Live[0].Status != NeedsYou || snap.Live[0].WaitingFor != "dialog open" {
+		t.Fatalf("waiting: got %+v", snap.Live[0])
+	}
+	if len(snap.NewlyNeedsYou) != 1 {
+		t.Fatalf("waiting must ring once: %v", snap.NewlyNeedsYou)
+	}
+}
