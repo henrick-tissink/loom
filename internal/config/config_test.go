@@ -20,9 +20,6 @@ func TestLoadDefaults(t *testing.T) {
 	if c.DBPath() != filepath.Join(home, ".loom", "loom.db") {
 		t.Errorf("DBPath = %q", c.DBPath())
 	}
-	if c.ClaudeJSONPath() != filepath.Join(home, ".claude.json") {
-		t.Errorf("ClaudeJSONPath = %q", c.ClaudeJSONPath())
-	}
 	if _, err := os.Stat(filepath.Join(home, ".loom")); err != nil {
 		t.Errorf(".loom dir not created: %v", err)
 	}
@@ -64,16 +61,5 @@ func TestLoadWorkspaceDefaultsToSauce(t *testing.T) {
 	}
 	if c.WorkspaceRoot != filepath.Join(home, "Sauce") {
 		t.Errorf("WorkspaceRoot = %q", c.WorkspaceRoot)
-	}
-}
-
-func TestInsideTmux(t *testing.T) {
-	t.Setenv("TMUX", "/tmp/x,1,0")
-	if !InsideTmux() {
-		t.Error("expected true when TMUX set")
-	}
-	t.Setenv("TMUX", "")
-	if InsideTmux() {
-		t.Error("expected false when TMUX empty")
 	}
 }

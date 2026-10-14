@@ -1,61 +1,28 @@
 package main
 
 import (
-	"path/filepath"
+	"strings"
 	"testing"
-
-	"github.com/henricktissink/loom/internal/projects"
-	"github.com/henricktissink/loom/internal/store"
+	"time"
 )
 
-// launchRepos is the TUI's whole launch surface, so what it drops and what
-// label it carries are both load-bearing: the label is what saved workflow
-// definitions resolve through (§2), and a missing path reaches tmux, which
-// silently starts the session in $HOME instead of failing (§12).
-func TestLaunchRepos(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	for _, p := range []store.Project{
-		// Named unlike its directory on purpose: the label must follow the
-		// directory, so a rename cannot invalidate a workflow on disk.
-		{Root: "/w/innostream", Name: "Innostream Rebuild", Origin: "discovered", CreatedAt: 1, UpdatedAt: 1},
-		{Root: "/w/gone", Name: "Gone", Origin: "created", Missing: true, CreatedAt: 1, UpdatedAt: 1},
-	} {
-		if err := st.UpsertProject(p); err != nil {
-			t.Fatal(err)
+func TestRunUsage(t *testing.T) {
+	for _, args := range [][]string{nil, {"bogus"}, {"attach"}, {"kill"}, {"search"}} {
+		err := run(args)
+		if err == nil || !strings.Contains(err.Error(), "usage:") {
+			t.Errorf("run(%v) = %v, want a usage error", args, err)
 		}
 	}
-	if err := st.UpsertProjectRepo(store.ProjectRepo{
-		Path: "/w/innostream/ballista", ProjectRoot: "/w/innostream",
-		Label: "innostream/ballista", AddedAt: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
+}
 
-	got := launchRepos(projects.New(st))
-	labels := map[string]string{}
-	for _, r := range got {
-		labels[r.Path] = r.Label
+func TestSnippetAndAge(t *testing.T) {
+	if got := snippet("a \x01hit\x02\n  b"); got != "a [hit] b" {
+		t.Errorf("snippet = %q", got)
 	}
-	if len(got) != 2 {
-		t.Fatalf("repos = %+v, want the root and its repo (missing project dropped)", got)
-	}
-	if labels["/w/innostream"] != "innostream" {
-		t.Errorf("root label = %q, want the directory basename", labels["/w/innostream"])
-	}
-	if labels["/w/innostream/ballista"] != "innostream/ballista" {
-		t.Errorf("repo label = %q", labels["/w/innostream/ballista"])
-	}
-	if _, ok := labels["/w/gone"]; ok {
-		t.Error("a missing project must not be offered as a launch target")
-	}
-	// The reserved Ungrouped row is seeded by the migration and is not a
-	// directory; it must never reach a picker.
-	if _, ok := labels[store.UngroupedRoot]; ok {
-		t.Error("Ungrouped is not launchable")
+	now := time.Unix(1_000_000, 0)
+	for created, want := range map[int64]string{0: "?", 1_000_000 - 90: "2m", 1_000_000 - 3600*3 - 60*5: "3h05m", 1_000_000 - 86400*2: "2d"} {
+		if got := age(now, created); got != want {
+			t.Errorf("age(%d) = %q, want %q", created, got, want)
+		}
 	}
 }

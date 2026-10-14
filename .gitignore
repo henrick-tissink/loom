@@ -13,3 +13,4 @@ cmd/loom-gui/frontend/dist/*
 !cmd/loom-gui/frontend/dist/.gitkeep
 cmd/loom-gui/frontend/wailsjs/
 cmd/loom-gui/frontend/package.json.md5
+/loom-gui

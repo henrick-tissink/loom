@@ -68,7 +68,6 @@ type Launcher struct {
 	Tmux            *tmux.Client
 	Store           *store.Store
 	ClaudeConfigDir string
-	ClaudeJSONPath  string
 	ReadyMarker     string
 	TrustMarker     string
 	ReadyTimeout    time.Duration // default 60s

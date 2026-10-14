@@ -38,25 +38,31 @@ Five earlier arcs (multi-step chains, same-prompt launches across many
 projects, a per-project agent with its own notes, task graphs run in
 worktrees, and a study deck built from transcripts) were cut from the tree.
 Their last state is reachable at the git tag `parked-arcs`; their tables
-remain in the schema (§6.4) so an existing `loom.db` opens unchanged.
+remain in the schema (§6.4) so an existing `loom.db` opens unchanged. The
+Bubble Tea TUI and the launcher's recall panel followed on 2026-10-14: the GUI
+is the one frontend, and `cmd/loom` is a thin command line over the same
+engine.
 
 ---
 
 ## 2. Process & deployment shape
 
-Two binaries over one shared engine:
+One frontend and one command line over a shared engine:
 
 ```
-cmd/loom      →  Bubble Tea TUI  (internal/ui)      ─┐
+cmd/loom-gui  →  Wails v2 + xterm.js (frontend/)    ─┐
                                                      ├─→  internal/{status,session,store,memory,projects,tmux,…}
-cmd/loom-gui  →  Wails v2 + xterm.js (frontend/)    ─┘
+cmd/loom      →  `loom ls|attach|kill|search`       ─┘
 ```
 
-Both `main()`s do the same wiring: check binaries → load config → ensure tmux
-server → open store (migrate) → discover and reconcile projects → start the
-indexer goroutine → build `Launcher`, `Engine`, `Summarizer` → run the
-frontend. The GUI adds `hydratePATH()`/`hydrateLocale()` first, because a
-Finder-launched bundle inherits neither a usable `PATH` nor a locale.
+The GUI's `main()` does the wiring: `hydratePATH()`/`hydrateLocale()` first
+(a Finder-launched bundle inherits neither a usable `PATH` nor a locale) →
+check binaries → load config → ensure tmux server → open store (migrate) →
+discover and reconcile projects → start the indexer goroutine → build
+`Launcher`, `Engine`, `Summarizer` → run the frontend. The CLI opens the same
+store and runs one engine poll per `ls` (so it prints exactly what the GUI
+shows, retirements included), hands the terminal to `tmux attach` for
+`attach`, and reads the FTS index for `search`. It launches nothing.
 
 **Two Loom instances against one DB is a supported state** — hence WAL,
 `busy_timeout`, and the single-connection discipline in §6.
@@ -82,17 +88,17 @@ Dependency direction is strictly downward; nothing in `internal/` imports a
 frontend.
 
 ```
-   cmd/loom (TUI)                    cmd/loom-gui (Wails)
+   cmd/loom (CLI)                    cmd/loom-gui (Wails)
         │                                    │
-   internal/ui ────────────────┬─────────────┤
-        │                      │             │
+        └──────────────────────┬─────────────┤
+                               │             │
    internal/status ────────────┤     internal/{gitdiff,cleanup}
         │        │             │
    internal/session   internal/transcript   internal/memory
         │                │                     │
    internal/tmux   internal/ccsessions   internal/store ── internal/projects
                                                │
-                              internal/registry, trust, config
+                              internal/registry, config
 ```
 
 | Package | Responsibility | Notes |
@@ -103,16 +109,14 @@ frontend.
 | `ccsessions` | Read Claude's own session registry | The only way to learn a pane's *current* session id after `/clear` or an in-pane resume. |
 | `status` | Fuse transcript state with tmux liveness | The reconcile loop. The only writer of live-session status. |
 | `store` | SQLite: schema, sessions, projects, memory index | Migrations are transactional & re-entrant. |
-| `memory` | Index / extract / recall / summarize | Reads the whole Claude archive; the only package that calls out to an LLM. |
+| `memory` | Index / extract / summarize | Reads the whole Claude archive; the only package that calls out to an LLM. |
 | `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
-| `trust` | Read Claude's trust flags | Purely defensive — never answers a trust dialog. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
-| `ui` | Bubble Tea app: 9 views, one model | The TUI's whole state machine. |
 
-Test mass is deliberate: roughly **13k test lines vs 11k source lines.**
+Test mass is deliberate: roughly **8k test lines vs 7.5k source lines.**
 
 ---
 
@@ -182,9 +186,8 @@ Seed outcome is never silently dropped: `seed_status` is written `sent` or
 
 ### 4.4 Attach
 
-- **TUI:** hands off the terminal to `tmux attach-session` (`TMUX`/`TMUX_PANE`
-  stripped so it works from inside the user's own tmux). Polling pauses while
-  attached — hence "no bells while attached".
+- **CLI:** `loom attach <name>` hands the terminal to `tmux attach-session`
+  (`TMUX`/`TMUX_PANE` stripped so it works from inside the user's own tmux).
 - **GUI:** `ptyRegistry` runs the same `tmux attach` command under a PTY
   (`creack/pty`), streams output base64-encoded over Wails events
   (`pty:data:<name>`), and pipes keystrokes back. The registry is idempotent,
@@ -252,7 +255,7 @@ One pass, mutex-serialized end to end:
    compute `NewlyNeedsYou` **before** persisting the new status — which is
    what makes the notification naturally once-only.
 
-TUI polls every 1.5s; the GUI polls via `ListSessions()` from JS.
+The GUI polls every 1.5s via `ListSessions()` from JS; `loom ls` polls once.
 
 ---
 
@@ -332,10 +335,10 @@ outer aggregate, which makes `snippet()` legal. The bare `h.snip` alongside
 bare `min()`, other bare columns come from that same row. So each session
 yields its single best-ranked snippet.
 
-Two entry points share it: `SearchSessions` (sanitized free text — every term
-quoted, trailing `*` on the last for as-you-type prefix matching) and
-`SearchSessionsRaw` (recall supplies its own expression). Both swallow FTS
-syntax errors into "zero results" rather than surfacing an error.
+The one entry point takes sanitized free text — every term quoted, trailing
+`*` on the last for as-you-type prefix matching — and
+(`SearchSessions`) swallows FTS syntax errors into "zero results" rather than
+surfacing an error.
 
 ### 6.4 Parked tables
 
@@ -365,8 +368,7 @@ knowing:
 | `sendPendingSeed` re-read | double-delivering a seed when a 60s gate wait races a manual retry |
 | `Indexer.sweepMu` | overlapping sweeps contending over rowid ranges |
 | `ptyRegistry` double-attach check | two PTYs on one session; killed children are reaped |
-| captured `actionTarget` in the TUI | rows reorder every 1.5s poll — kill/tag must act on the row captured at confirm-open |
-| debounce generation counters | a stale search/recall result overwriting a newer one |
+| debounce generation counters | a stale search result overwriting a newer one |
 | `cmd.WaitDelay` in the summarizer | an orphaned grandchild wedging `Wait()` forever |
 | `lastRes` fallback in the GUI resolver | a transient DB error un-hiding a project mid-screen-share |
 
@@ -406,38 +408,15 @@ on a read error, so a transient DB hiccup cannot reveal a hidden client.
 
 ---
 
-## 9. Recall — memory pulled in, never injected
+## 9. The recall marker
 
-The launcher's RELATED panel is a **manual pull**. Nothing is ever
-automatically injected into a prompt.
-
-`buildRecallQuery` deliberately does *not* reuse `sanitizeFTSQuery`, whose
-implicit-AND + trailing-`*` shape returns zero hits for natural-sentence
-seeds. Instead: tokenize on non-alphanumerics → drop tokens under 4 chars and
-a stopword list → dedupe → quote → **OR**-join, no trailing `*`. Fewer than 2
-surviving terms ⇒ empty expression ⇒ fall back to same-project recency.
-
-Then the **≥2-matched-term gate**, counted client-side against the *snippet
-and title only*. Excluding the `ask` field is the empirically important part:
-asks are often multi-KB pasted blobs where generic vocabulary ("implement",
-"settings", "mode") scatters by coincidence and clears the gate for
-unrelated sessions. A snippet is a ~12-token window centered on a real match,
-so co-occurrence there means something. Survivors rank same-project first,
-then matched terms, then bm25 order.
-
-**The echo-chamber guard.** Included entries are appended to the seed as
-*visible, literal* text:
-
-```
-<your seed> ── Related prior work [project·title]: outcome
-```
-
-That marker (`memory.RecallMarker`) is recognized by Loom's own extractor,
-which cuts user text at its first occurrence before computing docs, ask, or
-the ask-fallback. Pulled-in context can therefore never re-index as the new
-session's own words — recall cannot compound across generations. A seed
-starting with `/` refuses includes entirely (a slash command's argument line
-is no place to glue outcome text).
+The launcher's recall panel (a manual pull of related past sessions into the
+seed) was cut with the TUI. What remains is its echo-chamber guard: seeds it
+appended carry the ` ── Related prior work [` marker (`memory.RecallMarker`),
+and the extractor still cuts user text at its first occurrence before
+computing docs, ask, or the ask-fallback, so transcripts seeded that way never
+index the pulled-in context as the session's own words. The last recall
+implementation is at the git tag `parked-arcs`.
 
 ---
 
@@ -463,27 +442,22 @@ frames it as data to summarize, never instructions to follow.
 Payload budget (40k chars): all user docs first, then assistant docs sampled
 at an even stride to fill the remainder; agent docs excluded; head+tail 3:1
 fallback if user docs alone overflow; UTF-8-safe cuts everywhere. Nothing is
-stored on failure. It is user-triggered (`s`) in the TUI; the GUI adds an
-opt-in background auto-summarize that does **one at a time, once per session
-per process**, and skips hidden projects without marking them tried.
+stored on failure. It is user-triggered from a session's detail; the GUI adds
+an opt-in background auto-summarize that does **one at a time, once per
+session per process**, and skips hidden projects without marking them tried.
 
 ---
 
 ## 11. The two frontends
 
-### 11.1 TUI (`internal/ui`) — Bubble Tea
+### 11.1 CLI (`cmd/loom`)
 
-One `App` model, 9 views (`viewDash`, `viewLauncher`, `viewConfirmKill`,
-`viewConfirmClear`, `viewTag`, `viewPeek`, `viewSearch`, `viewDetail`,
-`viewWall`), one `Update` switch. Recurring discipline throughout:
-
-- **Captured targets.** Anything a confirm acts on is captured at open time,
-  because rows reorder under the cursor on every poll.
-- **Generation counters.** Every debounced/async result carries the seq it was
-  issued with; stale ones are discarded.
-- **Nil-safe `Deps`.** `Store`, `Summarizer`, `Projects`, `IndexerStatus` may
-  all be nil — every path no-ops instead of panicking, so dashboard-only tests
-  use a bare `Deps{}`.
+`loom ls | attach <name> | kill <name> | search <query>`. One file, no
+state: `ls` builds an `Engine` over the shared store and runs a single `Poll`,
+`attach` execs `tmux.AttachCmd`, `kill` is `tmux.KillSession` (the GUI's next
+poll retires the row), `search` is `store.SearchSessions`. It exists so a
+shell or a script can see and reach sessions without the app; it does not
+launch sessions, and there is no plan for it to.
 
 ### 11.2 GUI (`cmd/loom-gui`) — Wails v2 + xterm.js
 
@@ -530,9 +504,9 @@ frontend.
 1. **Never own what you can observe.** Sessions live in tmux; transcripts
    belong to Claude. Loom holds only derived state, and can rebuild it.
 2. **Degrade the label, never the session.** Every inference path — status
-   fusion, extraction, recall — has a defined "unknown" outcome that lets work
+   fusion, extraction — has a defined "unknown" outcome that lets work
    continue.
-3. **Nothing silently auto-injects.** Recall requires an explicit `space`.
+3. **Nothing silently auto-injects.** Seeds are what the user typed.
    Summaries cost quota, so they're opt-in.
 4. **Failures must be visible.** `seed_status`, `file_missing`,
    `· seed FAILED`, `(pane unavailable)` — the codebase consistently prefers a
@@ -547,9 +521,7 @@ frontend.
 
 ## 13. Known limits (v1)
 
-Recall is lexical only (no embeddings — the interface is upgradeable). The
-wall is read-only, colorless, left-edge-only, and only captures the visible
-page. macOS-only in practice (Dock badge, `osascript`, `open`). Index
+Search is lexical only (no embeddings). macOS-only in practice (Dock badge, `osascript`, `open`). Index
 freshness is bounded by the 10-minute sweep. Scrollback inside a session is
 tmux copy-mode, not native scroll — the one deliberate deviation from raw
 `claude`. Claude's session registry is undocumented; the reader is tolerant,
@@ -568,9 +540,9 @@ going to be one.** Loom is a cockpit for a human who is present.
 | Why does a row say "running"? | `internal/transcript/classify.go` + `internal/status/status.go` |
 | Why did a row disappear / come back / change id? | `internal/status/engine.go`, `internal/ccsessions/ccsessions.go` |
 | What's in the DB? | `internal/store/store.go` (migrations), `memory.go`, `projects.go` |
-| How is search built? | `internal/store/memory.go` (`searchSQL`), `internal/memory/recall.go` |
+| How is search built? | `internal/store/memory.go` (`searchSQL`) |
 | What gets indexed, and what's filtered out? | `internal/memory/extract.go` |
-| Who can see what? | `internal/projects/resolver.go`, `cmd/loom-gui/session_dto.go`, `internal/ui/visibility.go` |
+| Who can see what? | `internal/projects/resolver.go`, `cmd/loom-gui/session_dto.go` |
 | Design specs & plans (historical record) | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
 | Empirical findings about Claude's CLI | `docs/spikes/` |
 | The parked arcs | `git show parked-arcs` |

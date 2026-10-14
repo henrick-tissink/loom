@@ -155,22 +155,6 @@ func (s *Store) SetProjectCollapsed(root string, collapsed bool) error {
 	return err
 }
 
-// SetProjectNotesDir records where the orchestrator's notes live (orchestrator
-// spec §3). Two writers: the first spawn, materializing the default under
-// ~/.loom, and the user's explicit *Move notes…* gesture. It is a plain setter
-// rather than a CAS because both writers are user-initiated and the loser of a
-// race has simply moved the notes twice — the files themselves are copied, not
-// moved, and the old location is left in place, so no content is at risk.
-//
-// RepointProject deliberately does NOT rewrite this: the notes are Loom's
-// pointer to a directory the user (or Loom) chose, and a directory rename of
-// the project root says nothing about where the brain lives. That is the whole
-// reason the path is stored rather than derived.
-func (s *Store) SetProjectNotesDir(root, dir string, now int64) error {
-	_, err := s.db.Exec("UPDATE projects SET notes_dir=?, updated_at=? WHERE root=?", dir, now, root)
-	return err
-}
-
 func (s *Store) SetProjectMissing(root string, missing bool, now int64) error {
 	_, err := s.db.Exec("UPDATE projects SET missing=?, updated_at=? WHERE root=?", missing, now, root)
 	return err

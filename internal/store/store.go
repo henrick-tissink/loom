@@ -16,26 +16,9 @@ type Store struct{ db *sql.DB }
 // Open applies the mandatory concurrency pragmas (spec §5): WAL for
 // cross-process safety, busy_timeout against SQLITE_BUSY, and a single
 // connection so one process never self-contends.
-func Open(path string) (*Store, error) { return OpenWithDriver("sqlite", path) }
-
-// OpenWithDriver is Open over a caller-supplied database/sql driver name.
-//
-// It exists for one reason, and it is worth stating so nobody mistakes it for
-// configuration: some bindings promise a QUERY COUNT rather than a value —
-// orchestrator §13 binds "ListProjectDetails issues one orchestrator query for
-// N projects (no N+1)" — and a promise about how many statements ran cannot be
-// asserted from outside the driver. A test registers a counting driver that
-// wraps modernc's and passes its name here.
-//
-// The rejected alternative was a counter on Store itself, incremented in every
-// query path: that is production code carrying a test's apparatus through every
-// call site, and it would drift out of date the first time someone added a
-// query without the increment. This adds nothing to the hot path.
-//
-// Production calls Open. Nothing else should call this.
-func OpenWithDriver(driverName, path string) (*Store, error) {
+func Open(path string) (*Store, error) {
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
-	db, err := sql.Open(driverName, dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -656,17 +639,6 @@ func (s *Store) Upsert(r SessionRow) error {
 	return err
 }
 
-// SetSessionDelegation links a session row to the delegation task it is the
-// child of, as "<runID>:<taskID>" (migration v13). Separate from Upsert
-// because the linkage is written AFTER the launch — Launcher.Launch mints the
-// session id itself, so the task↔session binding cannot be part of the row's
-// first write, and the delegation spec §13.3 discloses that window rather than
-// pretending it closed it.
-func (s *Store) SetSessionDelegation(name, delegation string) error {
-	_, err := s.db.Exec("UPDATE sessions SET delegation=? WHERE name=?", delegation, name)
-	return err
-}
-
 func (s *Store) SetStatus(name, status string) error {
 	_, err := s.db.Exec("UPDATE sessions SET last_status=? WHERE name=?", status, name)
 	return err
@@ -697,52 +669,6 @@ func (s *Store) MarkEnded(name, status string, exitCode, endedAt int64) error {
 func (s *Store) SetClaudeSessionID(name, id string) error {
 	_, err := s.db.Exec("UPDATE sessions SET claude_session_id=? WHERE name=?", id, name)
 	return err
-}
-
-func (s *Store) SetTags(name, tags string) error {
-	_, err := s.db.Exec("UPDATE sessions SET tags=? WHERE name=?", tags, name)
-	return err
-}
-
-// SessionTag is one (claude session id, tags) pair — the only two columns a
-// tag-membership question needs.
-type SessionTag struct {
-	ClaudeSessionID string
-	Tags            string
-}
-
-// TaggedSessions returns every session row that carries any tag at all and has
-// a claude session id, live or finished, in one query.
-//
-// It replaces the Live() ∪ Recent(CountEnded()) reconstruction the orchestrator
-// echo-chamber guard used to do: three round-trips, two of them full-table, both
-// materializing every column of every session row in the install to look at one
-// field. This is one scan of two columns over the (usually small) tagged subset.
-//
-// It deliberately returns the RAW tags string rather than filtering by tag here.
-// Tags are a free-form field (`orch`, `fan:<group>`, `wf:<id>`) with no schema,
-// and membership is a TOKEN test, not a substring test — a `tags LIKE '%orch%'`
-// filter would silently swallow a user's own "orchid" or "reorch" tag and drop
-// their real sessions out of every brief with nothing anywhere saying why. No
-// SQLite index can express a token test over a free-form column, so pushing the
-// predicate down would buy nothing and cost correctness. The tokenizer stays in
-// the one package that owns the convention, and this stays a narrow read.
-func (s *Store) TaggedSessions() ([]SessionTag, error) {
-	rows, err := s.db.Query(
-		"SELECT claude_session_id, tags FROM sessions WHERE tags != '' AND claude_session_id != ''")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SessionTag
-	for rows.Next() {
-		var t SessionTag
-		if err := rows.Scan(&t.ClaudeSessionID, &t.Tags); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
 }
 
 func (s *Store) Get(name string) (SessionRow, bool, error) {

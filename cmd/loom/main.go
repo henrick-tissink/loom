@@ -1,126 +1,158 @@
-// Loom — a terminal control center for claude sessions.
+// loom is the command line over the same engine the GUI uses: list the live
+// claude sessions with their fused status, attach to one, kill one, or search
+// the indexed session history. It is a thin view, not a second frontend.
+//
+//	loom ls              live sessions: name, project, status, age, title
+//	loom attach <name>   hand this terminal to the session's tmux pane
+//	loom kill <name>     kill the session (the GUI retires its row on its next poll)
+//	loom search <query>  full-text search over indexed session history
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+	"text/tabwriter"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/henricktissink/loom/internal/config"
-	"github.com/henricktissink/loom/internal/memory"
-	"github.com/henricktissink/loom/internal/projects"
-	"github.com/henricktissink/loom/internal/registry"
-	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
-	"github.com/henricktissink/loom/internal/ui"
 )
 
+const usage = `usage: loom ls | attach <name> | kill <name> | search <query>`
+
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "loom:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	if err := config.CheckBinaries(); err != nil {
-		return err
+func run(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("%s", usage)
 	}
+	switch args[0] {
+	case "ls":
+		return ls()
+	case "attach":
+		if len(args) != 2 {
+			return fmt.Errorf("%s", usage)
+		}
+		return attach(args[1])
+	case "kill":
+		if len(args) != 2 {
+			return fmt.Errorf("%s", usage)
+		}
+		return tmux.New().KillSession(args[1])
+	case "search":
+		if len(args) < 2 {
+			return fmt.Errorf("%s", usage)
+		}
+		return search(strings.Join(args[1:], " "))
+	default:
+		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
+	}
+}
+
+func openStore() (*config.Config, *store.Store, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return err
-	}
-	tm := tmux.New()
-	if err := tm.EnsureServer(); err != nil {
-		return err
+		return nil, nil, err
 	}
 	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, st, nil
+}
+
+// ls runs one engine poll — the same reconcile pass the GUI runs every
+// 1.5 s — so what it prints is what the GUI shows, including the registry
+// merge and the rows it retires.
+func ls() error {
+	cfg, st, err := openStore()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-
-	// loom.db is the runtime source of truth for launch targets (§7), so a
-	// failed workspace scan is no longer fatal — it used to abort startup.
-	// Everything already reconciled into the store stays launchable, which is
-	// strictly better than refusing to start because one directory became
-	// unreadable. This matches cmd/loom-gui/main.go; both binaries reconcile
-	// into the same DB, and reconciliation never clobbers user-set state.
-	projectSvc := projects.New(st)
-	discovered, derr := registry.Discover(cfg.WorkspaceRoot, cfg.ClaudeConfigDir)
-	if derr != nil {
-		fmt.Fprintf(os.Stderr, "loom: discover repos in %s: %v\n", cfg.WorkspaceRoot, derr)
-	}
-	if rerr := projectSvc.Reconcile(discovered); rerr != nil {
-		fmt.Fprintln(os.Stderr, "loom: reconcile projects:", rerr)
-	}
-	// The TUI still consumes a flat repo list, but it now comes from the DB's
-	// target set rather than the scan: a project created in the GUI is a real
-	// launch target here, and registry.Discover alone cannot conjure one.
-	repos := launchRepos(projectSvc)
-
-	ix := memory.NewIndexer(st, cfg.ClaudeConfigDir)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go ix.Run(ctx, 10*time.Minute)
-
-	launcher := &session.Launcher{
-		Tmux: tm, Store: st,
-		ClaudeConfigDir: cfg.ClaudeConfigDir,
-		ClaudeJSONPath:  cfg.ClaudeJSONPath(),
-		ReadyMarker:     session.DefaultReadyMarker,
-		TrustMarker:     session.DefaultTrustMarker,
-		ReadyTimeout:    60 * time.Second,
-		PollEvery:       500 * time.Millisecond,
-	}
-
-	deps := ui.Deps{
-		Engine:        status.NewEngine(tm, st, cfg.ClaudeConfigDir),
-		Launcher:      launcher,
-		Repos:         repos,
-		Tmux:          tm,
-		InsideTmux:    config.InsideTmux(),
-		Store:         st,
-		IndexerStatus: ix.Status,
-		Summarizer: &memory.Summarizer{
-			Store:   st,
-			Binary:  "claude",
-			WorkDir: cfg.LoomDir,
-		},
-		Projects: projectSvc,
-	}
-	p := tea.NewProgram(ui.NewApp(deps), tea.WithAltScreen())
-	_, err = p.Run()
-	return err
-}
-
-// launchRepos flattens the project service's target set into the flat repo
-// list the TUI's launcher validates against. Target.Label is used verbatim:
-// it is the stable directory-derived identifier, never the user-editable
-// project name.
-//
-// Missing targets are dropped here rather than dimmed — the TUI has no
-// non-launchable row, and offering a path that no longer exists ends in tmux
-// silently starting the session in $HOME (§12).
-//
-// A failure degrades to an empty list rather than aborting startup: the rail,
-// search and history all still work without a launch surface.
-func launchRepos(svc *projects.Service) []registry.Repo {
-	ts, err := svc.LaunchTargets()
+	now := time.Now()
+	snap, err := status.NewEngine(tmux.New(), st, cfg.ClaudeConfigDir).Poll(now)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "loom: launch targets:", err)
+		return err
+	}
+	if len(snap.Live) == 0 {
+		fmt.Println("no live sessions")
 		return nil
 	}
-	out := make([]registry.Repo, 0, len(ts))
-	for _, t := range ts {
-		if t.Missing {
-			continue
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tPROJECT\tSTATUS\tAGE\tTITLE")
+	for _, r := range snap.Live {
+		stat := string(r.Status)
+		if r.WaitingFor != "" {
+			stat += " (" + r.WaitingFor + ")"
 		}
-		out = append(out, registry.Repo{Label: t.Label, Path: t.Path})
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Name, r.ProjectLabel, stat,
+			age(now, r.CreatedAt), r.Title)
 	}
-	return out
+	return w.Flush()
+}
+
+func attach(name string) error {
+	tm := tmux.New()
+	if !tm.HasSession(name) {
+		return fmt.Errorf("no live session %q (try `loom ls`)", name)
+	}
+	cmd := tm.AttachCmd(name)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
+func search(query string) error {
+	_, st, err := openStore()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	hits, err := st.SearchSessions(query, 25)
+	if err != nil {
+		return err
+	}
+	if len(hits) == 0 {
+		fmt.Println("no matches")
+		return nil
+	}
+	for _, h := range hits {
+		when := time.Unix(h.LastTS, 0).Format("2006-01-02")
+		title := h.Title
+		if title == "" {
+			title = h.Ask
+		}
+		fmt.Printf("%s  %s  %s\n    %s\n    %s\n", when, h.SessionID, filepath.Base(h.Cwd), title, snippet(h.Snippet))
+	}
+	return nil
+}
+
+// snippet flattens an FTS snippet to one line; \x01/\x02 wrap matched terms.
+func snippet(s string) string {
+	s = strings.NewReplacer("\x01", "[", "\x02", "]", "\n", " ", "\r", " ").Replace(s)
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func age(now time.Time, createdAt int64) string {
+	if createdAt <= 0 {
+		return "?"
+	}
+	d := now.Sub(time.Unix(createdAt, 0)).Round(time.Minute)
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }

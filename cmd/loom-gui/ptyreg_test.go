@@ -38,6 +38,19 @@ func (c *captureEmitter) waitFor(prefix string, d time.Duration) bool {
 	return false
 }
 
+func (r *ptyRegistry) has(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.ptys[name]
+	return ok
+}
+
+func (r *ptyRegistry) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.ptys)
+}
+
 func TestPTYRegistry_attachIdempotentAndClose(t *testing.T) {
 	em := &captureEmitter{}
 	reg := newPTYRegistry(func(string) *exec.Cmd { return exec.Command("sleep", "5") }, em.emit)

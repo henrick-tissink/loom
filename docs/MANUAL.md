@@ -1,5 +1,13 @@
 # The Loom Manual
 
+> **Status (2026-10-14):** the key-driven terminal UI this manual describes was
+> retired; the Loom app (`make gui-install`) is the frontend, and `loom` on the
+> command line is now `loom ls | attach <name> | kill <name> | search <query>`.
+> The mental model, "inside a session", "under the hood" and troubleshooting
+> sections still hold. The keybindings do not; the app exposes the same
+> actions as buttons and a command palette. The RELATED (recall) panel no
+> longer exists.
+
 Loom is a terminal control center for [Claude Code](https://claude.com/claude-code): launch, monitor, remember, and chain real `claude` sessions across your whole workspace. This manual covers everything the cockpit does and how to fly it.
 
 ---
@@ -74,16 +82,6 @@ On first launch the indexer sweeps your entire archive in the background (~10s f
 | **seed** | optional first prompt — plain text or a `/slash-command` |
 
 `tab`/`shift-tab` move fields · `↵` launches · `esc` cancels. The seed is delivered only once Claude's input box is actually ready (and never fired into a first-run trust dialog).
-
-### The RELATED panel (recall)
-
-As you pick a project and type a seed, related past sessions appear below the form — recent work from that project, plus cross-project matches on your seed words.
-
-- `↓` from the seed field enters the panel; `↑` from the top returns to the form
-- `space` toggles an entry **into your seed** (✓, max 3) — its distilled outcome is appended at launch as explicit context: `── Related prior work [project·title]: outcome…`
-- `↵` on an entry opens its full detail view to read first (`esc` returns, everything intact)
-- Included context is marked so it never re-indexes as the new session's own words (no echo chamber)
-- Changing project clears the includes; a `/slash-command` seed can't take includes (you'll see a warning)
 
 ## 5. Inside a session
 

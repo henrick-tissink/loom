@@ -34,19 +34,6 @@ func newPTYRegistry(start func(name string) *exec.Cmd, emit emitFunc) *ptyRegist
 	return &ptyRegistry{ptys: map[string]*ptyHandle{}, start: start, emit: emit}
 }
 
-func (r *ptyRegistry) has(name string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	_, ok := r.ptys[name]
-	return ok
-}
-
-func (r *ptyRegistry) count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.ptys)
-}
-
 // attach starts the command under a PTY and begins streaming. Idempotent: a
 // second attach for an already-registered name is a no-op.
 func (r *ptyRegistry) attach(name string) error {

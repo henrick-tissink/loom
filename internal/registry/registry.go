@@ -138,17 +138,6 @@ func ChildRepos(root string) []string {
 	return out
 }
 
-// Repos flattens discovery output to the launchable working trees, for the
-// surfaces that still take a flat list.
-func Repos(ps []Project) []Repo {
-	var out []Repo
-	for _, p := range ps {
-		out = append(out, p.Repos...)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
-	return out
-}
-
 // project builds a Project and applies spec §2's label rule: "project/repo",
 // except for a repo that IS its project's root, which keeps the bare basename
 // ("loom", not "loom/loom"). The test is the path rule §5 blesses rather than

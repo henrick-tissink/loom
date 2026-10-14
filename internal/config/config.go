@@ -12,7 +12,6 @@ type Config struct {
 	ClaudeConfigDir string // $CLAUDE_CONFIG_DIR or $HOME/.claude
 	LoomDir         string // $HOME/.loom
 	WorkspaceRoot   string // $LOOM_WORKSPACE or $HOME/Sauce
-	Home            string
 }
 
 func Load() (*Config, error) {
@@ -32,7 +31,6 @@ func Load() (*Config, error) {
 		ClaudeConfigDir: ccd,
 		LoomDir:         filepath.Join(home, ".loom"),
 		WorkspaceRoot:   ws,
-		Home:            home,
 	}
 	if err := os.MkdirAll(c.LoomDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create %s: %w", c.LoomDir, err)
@@ -40,8 +38,7 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-func (c *Config) DBPath() string         { return filepath.Join(c.LoomDir, "loom.db") }
-func (c *Config) ClaudeJSONPath() string { return filepath.Join(c.Home, ".claude.json") }
+func (c *Config) DBPath() string { return filepath.Join(c.LoomDir, "loom.db") }
 
 // CheckBinaries verifies tmux and claude are on PATH.
 func CheckBinaries() error {
@@ -52,5 +49,3 @@ func CheckBinaries() error {
 	}
 	return nil
 }
-
-func InsideTmux() bool { return os.Getenv("TMUX") != "" }

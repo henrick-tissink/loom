@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"testing"
 
 	"github.com/henricktissink/loom/internal/transcript"
@@ -269,32 +268,6 @@ func TestDiscoverIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestRepos(t *testing.T) {
-	root, ccd := fixture{
-		dirs:        []string{"solo/.git", "group/b/.git", "group/a/.git", "clauded"},
-		transcripts: []string{"clauded"},
-	}.build(t)
-	ps, err := Discover(root, ccd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rs := Repos(ps)
-	var labels []string
-	for _, r := range rs {
-		labels = append(labels, r.Label)
-	}
-	want := []string{"group/a", "group/b", "solo"} // the zero-repo project contributes none
-	if !reflect.DeepEqual(labels, want) {
-		t.Fatalf("Repos labels = %v, want %v", labels, want)
-	}
-	if !sort.StringsAreSorted(labels) {
-		t.Fatalf("Repos not sorted by label: %v", labels)
-	}
-	if rs[2].Path != filepath.Join(root, "solo") {
-		t.Fatalf("Path = %q", rs[2].Path)
-	}
-}
-
 // TestChildRepos pins the create-project prefill (§8): §3's rule-2 arm applied
 // to one picked root, sharing Discover's dotfile/symlink/isRepo rules so the
 // checklist and the scanner cannot drift apart.
@@ -386,7 +359,11 @@ func TestDiscoverRestoresVerifiedInvisibleSet(t *testing.T) {
 	if len(ps) != 2 {
 		t.Fatalf("Discover = %v, want 2 projects", shape(root, ps))
 	}
-	if got := len(Repos(ps)); got != 16 {
+	got := 0
+	for _, p := range ps {
+		got += len(p.Repos)
+	}
+	if got != 16 {
 		t.Fatalf("restored %d repos, want 16 (leikur is a symlink and must not count): %v", got, shape(root, ps))
 	}
 	for _, p := range ps {

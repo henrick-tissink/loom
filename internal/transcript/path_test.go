@@ -1,10 +1,8 @@
 package transcript
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestProjectDirName(t *testing.T) {
@@ -25,37 +23,5 @@ func TestPath(t *testing.T) {
 	want := filepath.Join("/home/u/.claude", "projects", "-w-proj", "abc-123.jsonl")
 	if got != want {
 		t.Errorf("Path = %q, want %q", got, want)
-	}
-}
-
-func TestNewestSince(t *testing.T) {
-	ccd := t.TempDir()
-	dir := filepath.Join(ccd, "projects", "-w-proj")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	write := func(name string, mod time.Time) {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(p, mod, mod); err != nil {
-			t.Fatal(err)
-		}
-	}
-	now := time.Now()
-	write("old.jsonl", now.Add(-time.Hour))
-	write("new.jsonl", now.Add(time.Minute))
-	id, err := NewestSince(ccd, "/w/proj", now)
-	if err != nil || id != "new" {
-		t.Fatalf("NewestSince = %q, %v (want new)", id, err)
-	}
-	id, err = NewestSince(ccd, "/w/proj", now.Add(2*time.Minute))
-	if err != nil || id != "" {
-		t.Fatalf("NewestSince (none) = %q, %v (want empty)", id, err)
-	}
-	id, err = NewestSince(ccd, "/no/such", now)
-	if err != nil || id != "" {
-		t.Fatalf("NewestSince (missing dir) = %q, %v (want empty, nil)", id, err)
 	}
 }

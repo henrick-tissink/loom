@@ -74,7 +74,6 @@ func testLauncher(t *testing.T) (*Launcher, string) {
 	l := &Launcher{
 		Tmux: tm, Store: st,
 		ClaudeConfigDir: t.TempDir(),
-		ClaudeJSONPath:  filepath.Join(t.TempDir(), ".claude.json"),
 		ReadyMarker:     DefaultReadyMarker,
 		TrustMarker:     DefaultTrustMarker,
 		ReadyTimeout:    10 * time.Second,

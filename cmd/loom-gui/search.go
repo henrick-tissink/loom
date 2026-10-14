@@ -106,7 +106,23 @@ func (a *App) ResumeSearchHit(sessionID, cwd string) (string, error) {
 		// rather than the intended project — refuse instead of resuming wrong.
 		return "", fmt.Errorf("session has no recorded directory")
 	}
-	return a.launcher.Resume(resumeRow(a.st, sessionID, cwd), 120, 32, a.now())
+	row := resumeRow(a.st, sessionID, cwd)
+	if a.isLive(row) {
+		// The conversation is still running in a loom pane: resuming it would
+		// start a second claude on the same session id. Hand back the live row
+		// so the caller selects it instead.
+		return row.Name, nil
+	}
+	return a.launcher.Resume(row, 120, 32, a.now())
+}
+
+// isLive reports whether row is a loom session that is still running: its
+// store row is not retired and tmux still has its session.
+func (a *App) isLive(row store.SessionRow) bool {
+	if row.Name == "" || row.EndedAt >= 0 || a.tm == nil {
+		return false
+	}
+	return a.tm.HasSession(row.Name)
 }
 
 // resumeRow picks the row a search-resume launches from. The real loom row

@@ -109,63 +109,6 @@ func TestDiffWorkingTree_unbornHEAD(t *testing.T) {
 	}
 }
 
-// Base-relative mode is what the merge gate reads: what this branch did since
-// it forked, and nothing the base's own line did afterwards.
-func TestDiffSinceBase(t *testing.T) {
-	dir := initRepo(t)
-	write(t, dir, "shared.txt", "v1\n")
-	base := commit(t, dir, "base content")
-
-	run(t, dir, "checkout", "-q", "-b", "loom/run/task")
-	write(t, dir, "child.txt", "child\n")
-	commit(t, dir, "child work")
-
-	// The base's line moves on after the fork. A two-dot diff would attribute
-	// this, inverted, to the child.
-	run(t, dir, "checkout", "-q", "main")
-	write(t, dir, "elsewhere.txt", "moved on\n")
-	commit(t, dir, "unrelated work on main")
-	run(t, dir, "checkout", "-q", "loom/run/task")
-
-	got := SinceBase(dir, base, "loom/run/task")
-	if got.Error != "" {
-		t.Fatalf("unexpected error: %+v", got)
-	}
-	if len(got.Files) != 1 || got.Files[0] != "child.txt" {
-		t.Fatalf("Files = %v, want [child.txt] only", got.Files)
-	}
-	if strings.Contains(got.Patch, "elsewhere.txt") {
-		t.Errorf("base-relative diff leaked the base line's own work:\n%s", got.Patch)
-	}
-	if !got.Dirty || got.Stat == "" {
-		t.Errorf("committed branch work must show: %+v", got)
-	}
-
-	// Empty Ref means HEAD, which is the same branch here.
-	if h := SinceBase(dir, base, ""); len(h.Files) != 1 || h.Files[0] != "child.txt" {
-		t.Errorf("empty ref should mean HEAD, got %+v", h)
-	}
-
-	// Working-tree mode over the same repo sees nothing: everything is
-	// committed. That is exactly why the merge gate cannot use it.
-	if w := WorkingTree(dir); w.Dirty {
-		t.Errorf("working-tree mode should be clean here: %+v", w)
-	}
-}
-
-// An unresolvable base must be LOUD. Rendering "no changes" at a merge gate
-// because the sha was wrong is the silent failure this codebase refuses.
-func TestDiffSinceBase_badBase(t *testing.T) {
-	dir := initRepo(t)
-	got := SinceBase(dir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD")
-	if got.Error == "" {
-		t.Fatalf("an unknown base must report an error, got %+v", got)
-	}
-	if got.Dirty || len(got.Files) > 0 {
-		t.Fatalf("failed capture must carry nothing: %+v", got)
-	}
-}
-
 // git quotes non-ASCII paths by default; a quoted path matches no declared
 // glob and would show up as a phantom divergence.
 func TestDiffCapture_nonASCIIPathsUnquoted(t *testing.T) {
@@ -177,10 +120,8 @@ func TestDiffCapture_nonASCIIPathsUnquoted(t *testing.T) {
 	}
 
 	commit(t, dir, "add unicode")
-	base := run(t, dir, "rev-parse", "HEAD~0")
 	write(t, dir, "internal/café/ünïcode.go", "package x\n\n// more\n")
-	commit(t, dir, "touch unicode")
-	if got := SinceBase(dir, base+"~1", "HEAD"); !contains(got.Files, "internal/café/ünïcode.go") {
+	if got := WorkingTree(dir); !contains(got.Files, "internal/café/ünïcode.go") {
 		t.Fatalf("Files = %q, want the raw path", got.Files)
 	}
 }

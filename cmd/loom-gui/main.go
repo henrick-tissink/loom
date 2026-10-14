@@ -70,7 +70,6 @@ func run() error {
 	launcher := &session.Launcher{
 		Tmux: tm, Store: st,
 		ClaudeConfigDir: cfg.ClaudeConfigDir,
-		ClaudeJSONPath:  cfg.ClaudeJSONPath(),
 		ReadyMarker:     session.DefaultReadyMarker,
 		TrustMarker:     session.DefaultTrustMarker,
 		ReadyTimeout:    60 * time.Second,

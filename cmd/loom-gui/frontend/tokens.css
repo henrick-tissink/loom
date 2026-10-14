@@ -70,15 +70,15 @@ body {
    so they read as icons rather than empty boxes competing with New. A soft tint
    lights on hover. Tight 3px gap groups the three; the readout's left margin
    sets them apart from it. */
-#search-btn, #prefs-btn, #wf-btn {
+#search-btn, #prefs-btn {
   --wails-draggable: no-drag;
   display: inline-flex; align-items: center; justify-content: center;
   width: 30px; height: 28px; color: var(--text-dim);
   background: transparent; border: 1px solid transparent; border-radius: 8px; cursor: pointer;
   transition: color 0.12s ease, background 0.12s ease;
 }
-#search-btn:hover, #prefs-btn:hover, #wf-btn:hover { color: var(--text); background: var(--sel); }
-#search-btn svg, #prefs-btn svg, #wf-btn svg { width: 15px; height: 15px; }
+#search-btn:hover, #prefs-btn:hover { color: var(--text); background: var(--sel); }
+#search-btn svg, #prefs-btn svg { width: 15px; height: 15px; }
 
 /* preferences */
 .prefs-modal { width: 440px; }
@@ -374,7 +374,6 @@ body {
 .d-meta { color: var(--text-faint); }
 
 /* ---- rail: project sections (§8) ---- */
-.rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #new-project {
   font-family: var(--font-ui); font-size: 10px; letter-spacing: 0.04em; text-transform: none;
   color: var(--text-dim); background: transparent; border: 1px solid var(--edge);
@@ -429,8 +428,6 @@ body {
 .po-bhead { display: flex; align-items: center; gap: 10px; }
 .po-block h3 { margin: 0; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-faint); font-weight: 700; }
 .po-bhead .sh-btn { margin-left: auto; }
-.po-bhead-acts { display: flex; gap: 6px; margin-left: auto; }
-.po-bhead-acts .sh-btn { margin-left: 0; }
 .po-sub { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); margin-top: 6px;
   display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .po-subact { font: inherit; font-size: 10.5px; letter-spacing: 0; text-transform: none; cursor: pointer;
@@ -516,8 +513,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 
 /* Smooth the interactive chrome's hover/press so nothing snaps. */
-#search-btn, #prefs-btn, #wf-btn, .sh-btn, #new-session,
-.modal-actions button, .sresult, .pitem, .wf-item, .du-file, .field select, .btn-ghost, .btn-launch {
+#search-btn, #prefs-btn, .sh-btn, #new-session,
+.modal-actions button, .sresult, .pitem, .du-file, .field select, .btn-ghost, .btn-launch {
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease,
     box-shadow 0.14s ease, transform 0.1s ease;
 }
