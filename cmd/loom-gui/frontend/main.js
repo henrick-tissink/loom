@@ -23,7 +23,8 @@ let manualCollapsed = false;
 let navInit = false;
 const PP_KEY = "loom.projects.collapsed";
 const SEL_KEY = "loom.projects.selected";
-try { manualCollapsed = localStorage.getItem(PP_KEY) === "1"; } catch { /* storage off */ }
+// Dock by default (Islands): the named list is an explicit expand.
+try { const v = localStorage.getItem(PP_KEY); manualCollapsed = v == null ? true : v === "1"; } catch { manualCollapsed = true; }
 try { const v = localStorage.getItem(SEL_KEY); if (v) selProject = v; } catch { /* storage off */ }
 let latestSessions = [];
 let latestRecent = [];
@@ -35,7 +36,7 @@ let latestProjects = [];
 // so the 1.5s poll can refresh the overview's session lists without stomping
 // on a rename the user is mid-way through typing.
 let stageView = { kind: "none" };
-let termThemeMode = "light"; // "light" | "dark", from preferences
+let termThemeMode = "dark"; // "dark" | "light", from preferences (themes the whole chrome)
 
 // bound resolves a Wails-bound method by name, or null. Two callers need this:
 // the bindings injected after module-eval (GetPrefs already did this dance),
@@ -50,7 +51,7 @@ function bound(name) {
 // Reflect the terminal theme on the DOM (the #terminal pane background) and,
 // live, on any open terminal.
 function applyTermTheme(mode) {
-  termThemeMode = mode === "dark" ? "dark" : "light";
+  termThemeMode = mode === "light" ? "light" : "dark";
   document.documentElement.setAttribute("data-term-theme", termThemeMode);
   if (term) term.options.theme = xtermThemeFor(termThemeMode);
 }
@@ -62,14 +63,22 @@ if (_getPrefs) {
   _getPrefs().then((p) => applyTermTheme(p && p.terminalTheme)).catch(() => {});
 }
 
+// The capsule at the top of the threads island: how many need you and how
+// long the oldest has waited. Hidden while the queue itself is on screen.
 function renderAttention(sessions) {
-  const n = sessions.filter((s) => s.status === "needs_you").length;
+  const q = sessions.filter((s) => s.status === "needs_you");
+  const n = q.length;
+  attnEl.classList.toggle("here", selProject === ATTENTION);
   if (n > 0) {
-    attnEl.innerHTML = `<span class="attn-dot"></span>${n} ${n === 1 ? "needs" : "need"} you`;
+    const now = Math.floor(Date.now() / 1000);
+    const oldest = q.reduce((m, s) => (s.since && (!m || s.since < m) ? s.since : m), 0);
+    const sub = oldest ? `Oldest has waited ${fmtAge(Math.max(0, now - oldest))}` : "Open the queue";
+    attnEl.innerHTML = `<span class="attn-dot"></span><span class="attn-body"><span>${n} ${n === 1 ? "needs" : "need"} you</span><span class="attn-sub">${sub}</span></span><span class="attn-key">↵ reply</span>`;
   } else {
     attnEl.textContent = "";
   }
 }
+attnEl.addEventListener("click", () => openAttention());
 
 // The titlebar reserves 92px on the left for the macOS traffic-light buttons.
 // Those buttons vanish in fullscreen, so drop the inset when fullscreen.
@@ -486,7 +495,7 @@ function applyCollapse() {
   const body = document.getElementById("body");
   if (body) body.classList.toggle("pp-collapsed", on);
   const btn = document.getElementById("pp-collapse");
-  if (btn) { btn.textContent = on ? "›" : "‹"; btn.title = on ? "Expand projects" : "Collapse projects"; }
+  if (btn) { btn.textContent = on ? "›" : "‹"; btn.title = on ? "Expand projects" : "Collapse projects"; btn.setAttribute("aria-label", btn.title); }
   renderProjectsPane();
 }
 
@@ -574,6 +583,8 @@ function renderProjectsPane() {
 // ---- threads pane (2026-07-24 three-pane nav) ----
 
 function renderThreadsPane() {
+  // The attention capsule is redundant while the queue itself is on screen.
+  attnEl.classList.toggle("here", selProject === ATTENTION);
   if (!threadsHeadEl || !threadsEl) return;
   threadsEl.replaceChildren();
 
@@ -660,14 +671,31 @@ function renderStageHeader(name) {
   const label = s ? displayName(s) : name;
   const color = statusColor(status);
   el.className = "stage-head";
+  // Chips restate what the row shows (finish line, budget) so the header is
+  // a readout on its own; the actions are Diff, Fresh session (only when the
+  // session is over budget) and Reply, the primary one.
+  const wait = s && s.status === "needs_you" && s.since ? ` · ${fmtAge(Math.max(0, Math.floor(Date.now() / 1000) - s.since))}` : "";
+  const task = s && s.taskStatus ? `<span class="sh-chip">task ${s.taskStatus === "consultation" ? "consult" : s.taskTotal > 0 ? `${s.taskDone}/${s.taskTotal}` : esc(s.taskStatus)}</span>` : "";
+  const ctx = s && s.ctxTokens ? `<span class="sh-chip${overBudget(s) ? " over" : ""}">${Math.round(s.ctxTokens / 1000)}k${overBudget(s) ? " · over budget" : ""}</span>` : "";
   el.innerHTML =
     `<span class="sh-name">${esc(label)}</span>` +
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(project)}</span>` : "") +
-    `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}</span></span>` +
+    `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}${wait}</span></span>` +
+    task + ctx +
     (s && s.external ? "" :
-      `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>`);
+      `<span class="sh-acts">` +
+      `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>` +
+      (s && overBudget(s) ? `<button class="sh-btn" id="sh-fresh" title="Fresh session from checkpoint (same directory; this one stays open)">Fresh session</button>` : "") +
+      `<button class="sh-btn sh-primary" id="sh-reply" title="Quick reply (R)">Reply</button></span>`);
   const diffBtn = el.querySelector("#sh-diff");
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
+  const replyBtn = el.querySelector("#sh-reply");
+  if (replyBtn) replyBtn.addEventListener("click", () => openReply(name));
+  const freshBtn = el.querySelector("#sh-fresh");
+  if (freshBtn) freshBtn.addEventListener("click", async () => {
+    try { const nn = await window.go.main.App.FreshSession(name); if (nn) selectSession(nn); poll(); }
+    catch (e) { console.error("fresh", e); }
+  });
 }
 
 // ---- hide/solo chip (§6.4) ----
@@ -1132,10 +1160,10 @@ window.addEventListener("resize", applyCollapse);
 // ---- preferences ----
 async function openPrefs() {
   if (document.querySelector(".modal-backdrop")) return;
-  let prefs = { editor: "", notifications: true, autoSummarize: false, terminalTheme: "light" };
+  let prefs = { editor: "", notifications: true, autoSummarize: false, terminalTheme: "dark" };
   try { prefs = await window.go.main.App.GetPrefs(); } catch (e) { console.error("prefs", e); }
   const editors = [["", "Auto-detect"], ["cursor", "Cursor"], ["code", "VS Code"], ["zed", "Zed"]];
-  const themes = [["light", "Light (Blush)"], ["dark", "Dark"]];
+  const themes = [["dark", "Dark"], ["light", "Light"]];
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
@@ -1146,8 +1174,8 @@ async function openPrefs() {
         <select id="pf-editor">${editors.map(([v, l]) => `<option value="${v}"${v === prefs.editor ? " selected" : ""}>${l}</option>`).join("")}</select>
       </div>
       <div class="field">
-        <label for="pf-term">Terminal theme</label>
-        <select id="pf-term">${themes.map(([v, l]) => `<option value="${v}"${v === (prefs.terminalTheme || "light") ? " selected" : ""}>${l}</option>`).join("")}</select>
+        <label for="pf-term">Theme (chrome, terminal and Claude)</label>
+        <select id="pf-term">${themes.map(([v, l]) => `<option value="${v}"${v === (prefs.terminalTheme || "dark") ? " selected" : ""}>${l}</option>`).join("")}</select>
       </div>
       <label class="pf-check"><input type="checkbox" id="pf-notif"${prefs.notifications ? " checked" : ""} /><span>Native notification when a session needs you</span></label>
       <label class="pf-check"><input type="checkbox" id="pf-autosum"${prefs.autoSummarize ? " checked" : ""} /><span>Auto-summarize finished sessions <em>(uses a little Claude quota)</em></span></label>

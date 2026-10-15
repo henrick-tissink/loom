@@ -1,14 +1,15 @@
-// loom palette — "Blush": warm rose, light. Single source for the status
-// colors (rail threads + status words) and the terminal theme. Chrome neutrals
-// live in tokens.css :root.
+// loom palette — "Islands": peach on warm plum, dark first. The status colours
+// are CSS tokens (tokens.css defines --st-* for light and dark), so the rail's
+// inline colours follow the theme; this module hands out the var() references.
+// The terminal themes below need literal hex: xterm paints its own canvas.
 
 export const palette = {
-  needs_you: "#C56A4A",
-  running: "#3E9A80",
-  idle: "#8A8FC0",
-  done: "#6FAE66",
-  error: "#C64C40",
-  unknown: "#A99CA2",
+  needs_you: "var(--st-needs_you)",
+  running: "var(--st-running)",
+  idle: "var(--st-idle)",
+  done: "var(--st-done)",
+  error: "var(--st-error)",
+  unknown: "var(--st-unknown)",
 };
 
 export function statusColor(status) {
@@ -35,13 +36,13 @@ export const xtermThemeLight = {
   brightCyan: "#3E93A0", brightWhite: "#50454B",
 };
 
-// Warm-dark terminal (a dark cousin of Blush) — soft plum base, peach cursor,
-// ANSI colors lifted for contrast on the dark ground.
+// Dark terminal — the inset ground of the stage island (deeper than the island
+// itself), peach cursor, ANSI colors lifted for contrast on the dark ground.
 export const xtermThemeDark = {
-  background: "#241E22",
+  background: "#1A1417",
   foreground: "#E7DADE",
   cursor: "#EE9E86",
-  cursorAccent: "#241E22",
+  cursorAccent: "#1A1417",
   selectionBackground: "rgba(238,158,134,0.28)",
   black: "#3A3238", red: "#E8897A", green: "#7FC79E", yellow: "#D8B36A",
   blue: "#8FB0E0", magenta: "#C39AD8", cyan: "#6FC0CC", white: "#E7DADE",
@@ -55,4 +56,4 @@ export function xtermThemeFor(mode) {
 }
 
 // Terminal-pane background (the padding area around xterm) per theme.
-export const terminalBg = { light: "#FCF7F5", dark: "#241E22" };
+export const terminalBg = { light: "#FCF7F5", dark: "#1A1417" };

@@ -16,11 +16,11 @@ type Settings struct {
 	Editor        string `json:"editor"`        // "" = auto-detect; else "cursor" | "code" | "zed"
 	Notifications bool   `json:"notifications"` // fire native needs-you notifications
 	AutoSummarize bool   `json:"autoSummarize"` // background-summarize finished sessions (uses claude quota)
-	TerminalTheme string `json:"terminalTheme"` // "light" (default) | "dark"
+	TerminalTheme string `json:"terminalTheme"` // "dark" (default) | "light"; themes the chrome, the terminal and Claude
 }
 
 func defaultSettings() Settings {
-	return Settings{Editor: "", Notifications: true, AutoSummarize: false, TerminalTheme: "light"}
+	return Settings{Editor: "", Notifications: true, AutoSummarize: false, TerminalTheme: "dark"}
 }
 
 // settingsStore is a concurrency-safe, file-backed view of Settings.
@@ -83,8 +83,8 @@ func normalize(v Settings) Settings {
 	default:
 		v.Editor = ""
 	}
-	if v.TerminalTheme != "dark" {
-		v.TerminalTheme = "light"
+	if v.TerminalTheme != "light" {
+		v.TerminalTheme = "dark"
 	}
 	return v
 }

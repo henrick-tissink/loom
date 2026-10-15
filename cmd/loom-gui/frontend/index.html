@@ -3,41 +3,52 @@
   <head>
     <meta charset="utf-8" />
     <title>loom</title>
+    <!-- Islands type: Manrope for the chrome, JetBrains Mono for names, paths
+         and the terminal. Remote fonts, so offline the stacks in tokens.css
+         fall back to system-ui / ui-monospace without a layout change. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" />
   </head>
   <body>
+    <!-- A thin drag strip on the ground. The islands below are the UI. -->
     <header id="titlebar">
       <span class="wordmark">
         <span class="wave"><i></i><i></i><i></i><i></i><i></i></span>
         <span class="mk">loom</span>
       </span>
       <div class="tb-right">
-        <button id="prefs-btn" title="Preferences">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 2.6 7a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 2.6V1a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9c.1.6.7 1.1 1.4 1.1H23a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-        </button>
-        <button id="search-btn" title="Search history (/)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-        </button>
         <!-- Hide/solo chip (§6.4). Permanent rather than a toast: a restart
              mid-demo that silently revealed a project is the worse failure. -->
         <button id="hidechip" class="hidechip" title="Hiding is in force"></button>
-        <span id="attn" class="attn"></span>
-        <button id="new-session" title="New session">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-          New
-        </button>
       </div>
     </header>
     <main id="body">
+      <!-- Projects: an icon dock by default; expands to a named list. -->
       <aside id="projects-pane">
         <div class="pp-head">
           <span class="pp-title">Projects</span>
           <button id="new-project" title="New project">+ New</button>
-          <button id="pp-collapse" title="Collapse projects">‹</button>
         </div>
         <ul id="projects"></ul>
+        <div class="pp-foot">
+          <button id="new-session" title="New session" aria-label="New session">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button id="search-btn" title="Search history (/)" aria-label="Search history">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          </button>
+          <button id="prefs-btn" title="Preferences" aria-label="Preferences">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>
+          </button>
+          <button id="pp-collapse" title="Expand projects" aria-label="Expand projects">›</button>
+        </div>
       </aside>
       <aside id="threads-pane">
         <div id="threads-head"></div>
+        <!-- Attention capsule: how many need you and how long the oldest has
+             waited. A readout that is also the way into the queue. -->
+        <button id="attn" class="attn"></button>
         <ul id="threads"></ul>
       </aside>
       <section id="stage"><div id="stage-empty">Select a session, or press + New</div></section>

@@ -72,7 +72,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | Path | Owner | Role |
 |---|---|---|
 | `~/.loom/loom.db` | Loom (rw) | sessions, projects, transcripts index, FTS |
-| `~/.loom/settings.json` | GUI (rw, atomic) | editor, notifications, auto-summarize, terminal theme |
+| `~/.loom/settings.json` | GUI (rw, atomic) | editor, notifications, auto-summarize, theme (dark default) |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status |
 | `~/.claude/state/{tasks,checkpoints}/<sid>.md` | the operator's hooks (Loom: read-only) | a session's pinned finish line and its hand-over checkpoint |
@@ -499,9 +499,11 @@ Native touches, each with a real reason:
 - Settings persist atomically (temp + rename), loaded over a defaults base so
   an old file with missing keys keeps sane values.
 
-Frontend is dependency-light: vanilla ES modules + xterm.js, a "Blush" palette
-in `theme.js`/`tokens.css`, light/dark terminal themes mirrored into Claude via
-`--settings`, Unicode v11 width addon so emoji measure 2 cells like tmux and
+Frontend is dependency-light: vanilla ES modules + xterm.js, the "Islands"
+look (peach on warm plum, dark first; borderless islands on a ground, an icon
+dock for projects) as tokens in `tokens.css` with status colours as `--st-*`
+variables that `theme.js` hands out, one theme preference for chrome, terminal
+and Claude (mirrored into Claude via `--settings`), Unicode v11 width addon so emoji measure 2 cells like tmux and
 Claude's own TUI. Vite empties `dist/` on every build and rewrites
 `dist/.gitkeep`, so `//go:embed all:frontend/dist` never bakes a stale chunk
 into the binary and still compiles on a checkout that has not built the
