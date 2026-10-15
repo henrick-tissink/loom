@@ -74,6 +74,13 @@ The app is the frontend:
     ./loom attach <name>    # hand this terminal to the session's tmux pane
     ./loom kill <name>
     ./loom search <query>   # full-text search over indexed session history
+    ./loom doctor           # how this machine's Agent Discipline install compares to the bundle loom carries
+    ./loom setup            # install or upgrade the discipline layer (plan, gate, apply; asks first)
+    ./loom uninstall        # remove exactly what setup installed
+    ./loom discipline …     # status | diff <file> | keep <file> | reset <file> | restore <backup>
+
+`setup`, `uninstall` and the `discipline` writes refuse inside a Claude Code
+session or without a terminal: only a person installs. See `docs/DISCIPLINE.md`.
 
 To get `loom` on your PATH:
 

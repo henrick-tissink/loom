@@ -76,7 +76,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status |
 | `~/.claude/state/{tasks,checkpoints}/<sid>.md` | the operator's hooks (Loom: read-only) | a session's pinned finish line and its hand-over checkpoint |
-| `~/.claude/discipline/r<N>/`, `~/.claude/hooks/enforce`, `~/.local/bin/deadline`, `~/.claude/settings.json` hook entries, `~/.claude/CLAUDE.md` | the Agent Discipline bundle. Today Loom only **reads** them (`loom doctor`); phase 2 of `docs/DISCIPLINE.md` makes `internal/discipline` the one writer, by explicit human action | hooks, rules, helpers; see `docs/DISCIPLINE.md` |
+| `~/.claude/discipline/r<N>/`, `~/.claude/hooks/enforce`, `~/.local/bin/deadline`, `~/.claude/settings.json` hook entries, `~/.claude/CLAUDE.md` | the Agent Discipline bundle. `internal/discipline` is the one writer (`loom setup`, `uninstall`, `discipline keep|reset|restore`), by explicit human action only: every writing command refuses inside a Claude session or without a terminal. The doctor reads. Receipt, ledger and backups live under `~/.loom/{discipline,backups}` | hooks, rules, helpers; see `docs/DISCIPLINE.md` |
 | `~/.claude.json` | Claude (Loom: read-only) | per-project trust flags |
 | `$LOOM_WORKSPACE` (default `~/Sauce`) | user | project discovery root |
 
@@ -126,7 +126,8 @@ conversation a loom row already tails is not shown twice.
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
-| `discipline` | The embedded Agent Discipline bundle (rules, hooks, suites, helpers), its generated manifest, the on-machine layout, and the read-only doctor | Source of truth for the handbook from rev 3 on. Phase 1 writes nothing outside the repo. Plan: `docs/DISCIPLINE.md`. |
+| `discipline` | The embedded Agent Discipline bundle (rules, hooks, suites, helpers), its generated manifest, the on-machine layout, the read-only doctor, and the installer: plan → stage + gate → commit, uninstall from the receipt, keep/reset of local edits | Source of truth for the handbook from rev 3 on. Revisions are immutable once in the manifest history. Only a human installs (`RefuseIfAgent`). Plan: `docs/DISCIPLINE.md`. |
+| `jsonedit` | Order-preserving JSON editing for `settings.json` | Keeps every key and byte loom does not own; atomic write through symlinks (temp + fsync + rename in the real file's directory). |
 
 Test mass is deliberate: roughly **8k test lines vs 7.5k source lines.**
 

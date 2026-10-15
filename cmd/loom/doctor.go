@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/henricktissink/loom/internal/discipline"
 )
@@ -31,16 +30,10 @@ func doctor(args []string) error {
 			return fmt.Errorf("usage: loom doctor [--json] [--deep] [--strict]")
 		}
 	}
-	home, err := os.UserHomeDir()
+	l, err := layoutFromEnv()
 	if err != nil {
 		return err
 	}
-	// Not config.Load(): that creates ~/.loom, and the doctor writes nothing.
-	ccd := os.Getenv("CLAUDE_CONFIG_DIR")
-	if ccd == "" {
-		ccd = filepath.Join(home, ".claude")
-	}
-	l := discipline.NewLayout(ccd, home, os.Getenv("CLAUDE_STATE_DIR"))
 	rep := discipline.Doctor(context.Background(), l, discipline.DefaultEnv(), discipline.Options{Deep: deep})
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)

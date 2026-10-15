@@ -745,6 +745,8 @@ func (r *Report) state(l Layout, env Env) {
 	}
 	if _, err := os.Stat(filepath.Join(l.LegacyLogDir(), "decisions.jsonl")); err == nil {
 		r.State.LegacyLog = true
+	}
+	if r.State.LegacyLog && r.Rev.Layout != LayoutRev {
 		r.Layout.LogDir = l.LegacyLogDir()
 	} else {
 		r.Layout.LogDir = l.LogDir()

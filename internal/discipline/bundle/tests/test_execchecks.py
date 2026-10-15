@@ -110,10 +110,11 @@ task("e6", ["slow: $ sleep 10"])
 t0 = time.time(); rc, out, _ = stop("e6")
 check("timed-out command -> block with 124", out.get("decision") == "block" and "exited 124" in out.get("reason", "")
       and time.time() - t0 < 9, f"out={out} dt={time.time()-t0:.1f}")
-task("e6b", [f"pipe: $ sleep 30 | cat; echo done >> {os.path.join(WORK, 'pipe')}"])
+SLEEP = f"sleep 30.{os.getpid()}"  # unique to this run: pgrep searches the whole machine
+task("e6b", [f"pipe: $ {SLEEP} | cat; echo done >> {os.path.join(WORK, 'pipe')}"])
 rc, out, _ = stop("e6b")
 for _ in range(20):  # the killed children are reaped asynchronously; allow up to 2s
-    ps = subprocess.run(["pgrep", "-x", "-f", "sleep 30"], capture_output=True, text=True).stdout.strip()  # exact cmdline: the sleep itself
+    ps = subprocess.run(["pgrep", "-x", "-f", SLEEP], capture_output=True, text=True).stdout.strip()  # exact cmdline: the sleep itself
     if not ps:
         break
     time.sleep(0.1)

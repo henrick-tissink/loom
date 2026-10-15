@@ -10,9 +10,13 @@
 //	loom search <query>  full-text search over indexed session history
 //	loom doctor          how this machine's Agent Discipline install compares
 //	                     to the bundle loom carries (read-only; docs/DISCIPLINE.md)
+//	loom setup           install or upgrade the discipline layer behind its gate
+//	loom uninstall       remove exactly what setup installed (from the receipt)
+//	loom discipline …    status, and keep/reset/diff of local edits; restore a backup
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,11 +30,19 @@ import (
 	"github.com/henricktissink/loom/internal/tmux"
 )
 
-const usage = `usage: loom ls | attach <name> | kill <name> | search <query> | doctor [--json] [--deep] [--strict]`
+const usage = `usage: loom ls | attach <name> | kill <name> | search <query>
+       loom doctor [--json] [--deep] [--strict]
+       loom setup [--plan|--dry-run] [--json] [--yes] [--with env] [--without rules,statusline,deny] [--replace <file>,...]
+       loom uninstall [--plan|--dry-run] [--json] [--yes]
+       loom discipline status | diff <file> | keep <file> | reset <file> | restore <backup>`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "loom:", err)
+		var ee exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
 		os.Exit(1)
 	}
 }
@@ -59,6 +71,12 @@ func run(args []string) error {
 		return search(strings.Join(args[1:], " "))
 	case "doctor":
 		return doctor(args[1:])
+	case "setup":
+		return setup(args[1:])
+	case "uninstall":
+		return uninstall(args[1:])
+	case "discipline":
+		return disciplineCmd(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}

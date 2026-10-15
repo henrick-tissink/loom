@@ -141,14 +141,20 @@ embed.go        //go:embed bundle; Bundle() fs.FS; Manifest() Manifest
 manifest.go     types; Load; FileState(target) → current|stale|modified|missing|extra
 layout.go       paths for a config dir: RevDir, CurrentLink, HooksLink, StateDir, LogDir
 doctor.go       Doctor(ctx, Env) Report      read-only
-plan.go         Plan(Report, Options) Plan    pure: list of Steps, each with kind, target, before, after, consent group
-gate.go         Gate(Plan) GateResult         preflight → suites → replay → (human ack) ; no writes
-apply.go        Apply(Plan) error             backup → write → verify → receipt + ledger; rollback on verify failure
-settings.go     merge/unmerge of hooks, statusLine, env, permissions.deny (uses internal/jsonedit)
-claudemd.go     import line add/remove; inline-text → import migration diff
-receipt.go      ~/.loom/discipline/receipt.json, ledger.jsonl
-guard.go        RefuseIfAgent(): error when os.Getenv("CLAUDECODE") != "" or no TTY (CLI only)
+plan.go         PlanSetup(l, Report, PlanOptions, now) / PlanUninstall(l, Report, receipt) → Plan: Steps {kind, target, detail, group, enabled, diff}, Conflicts (keep|replace), Warnings, Errors; RenderPlan
+gate.go         RunGate(ctx, stagedDir, installedHooks, logPath) GateResult: preflight (python3 runs, every hook parses, deadline works) → suites (staged tests, HOOKS_DIR=staged) → replay (30 days of denials through the staged guard vs the installed one: NewAllows / NewDenies); no writes outside the staged dir
+apply.go        Stage(plan) writes discipline/<rev>/ (temp dir + rename) and runs the gate: invisible to sessions. Commit(plan, staged): backups → state dirs → legacy dir moved aside → symlinks (temp link + rename) → deadline → settings re-read and re-merged → CLAUDE.md → verify hashes, links and registrations → receipt + ledger; every step undone in reverse on failure. ApplyUninstall reverses the receipt. Lock file at ~/.loom/discipline/lock.
+settings.go     MergeHooks/UnmergeHooks (identity event|matcher|basename), MergeStatusLine (only when unset), MergeEnv (absent keys only), MergeDeny; each Unmerge removes only what still equals the receipt
+claudemd.go     PlanClaudeMD: inline rules text → import line, else append; UndoClaudeMD puts the text back when the install replaced it
+receipt.go      ~/.loom/discipline/receipt.json, ledger.jsonl, Backup() into ~/.loom/backups/<ts>-<op>/ (origins.json maps each copy to its path; newest 20 kept), RestoreBackup
+local.go        ResolveFile, FileDiff, Keep (records the edit in receipt.kept), Reset (bundle copy back, backed up)
+guard.go        RefuseIfAgent(stdin): ErrAgent when CLAUDECODE is set, ErrNoTTY when stdin is not a terminal (TIOCGWINSZ, not a mode check: /dev/null is a character device)
+textdiff.go     UnifiedDiff for the plan's previews
 ```
+
+Receipt rule for files outside the revision dir (`~/.local/bin/deadline`): they are
+listed only when a setup wrote them, so uninstall never removes a wrapper that
+was there before loom. A file already current at setup time is adopted, not owned.
 
 `Env` carries: config dir, home, `$PATH` of the login shell (via `$SHELL -lc
 'echo $PATH'`), the `env.PATH` from settings, the `tmux -L loom` environment,
@@ -252,15 +258,22 @@ the 7 suites against the installed rev with a 180 s deadline, logs to
 
 ```
 loom doctor [--json] [--deep] [--strict]        exit 1 on red (--strict: on amber too); runs without tmux
-loom setup  [--plan] [--dry-run] [--yes] [--with deny-rule,env] [--without rules]
-loom uninstall [--plan] [--yes]
-loom discipline status | diff <file> | keep <file> | reset <file> | adopt <file> | restore <ledger-ts>
-loom report hooks|tests [--since change|--days N] [--by project] [--json]
+loom setup  [--plan|--dry-run] [--json] [--yes] [--with env] [--without rules,statusline,deny] [--replace <file>,...]
+loom uninstall [--plan|--dry-run] [--json] [--yes]
+loom discipline status | diff <file> | keep <file> | reset <file> | restore <backup>
+loom report hooks|tests [--since change|--days N] [--by project] [--json]      (phase 4)
 ```
 
-`setup`, `uninstall`, `reset`, `restore` call `RefuseIfAgent()` first: exit 2
-with "refusing: running inside a Claude Code session (CLAUDECODE is set);
-install from a terminal or the loom GUI". `--yes` still requires a TTY.
+`setup`, `uninstall`, `keep`, `reset`, `restore` call `RefuseIfAgent()` first:
+exit 2 with "refusing: running inside a Claude Code session (CLAUDECODE is
+set); install from a terminal or the loom GUI". `--yes` still requires a TTY;
+`--plan`/`--dry-run` never refuse because they write nothing. `setup` shows the
+plan with the settings.json and CLAUDE.md diffs, asks, stages the revision and
+runs the gate, asks again if the replay found verdict flips, then commits.
+Defaults: rules and deny on, status line only when none is set, env off.
+`adopt <file>` (phase 3) is not built: adoption of an existing install happens
+implicitly, since registrations already present are kept and never listed as
+loom's in the receipt.
 
 ### GUI
 
@@ -333,11 +346,17 @@ symlinks, move logs to `state/log`, replace inline rules text with the
 import line (diff shown), write receipt.
 
 Done when:
-- [ ] merge_fixtures: `$ go test ./internal/jsonedit/ ./internal/discipline/ -run 'TestMerge|TestUnmerge|TestClaudeMd|TestPlan' -count=1`
-- [ ] refuses_agent: `$ CLAUDECODE=1 go run ./cmd/loom setup --yes; test $? -eq 2`
-- [ ] dry_run_clean: `$ go run ./cmd/loom setup --dry-run --json | jq -e '.errors==[]'`
-- [ ] installed_here: after the owner runs `loom setup` from a terminal: `loom doctor --json` shows `rev.installed=="r3"`, symlink layout, 7/7 registrations, receipt present, `state/log/decisions.jsonl` growing, and a session started afterwards gets its Bash calls guarded (one `deadline`-less background command is denied).
-- [ ] uninstall_roundtrip: on a temp config dir fixture (`CLAUDE_CONFIG_DIR=$tmp HOME=$tmp2`): `$ go test ./internal/discipline/ -run TestSetupUninstallRoundtrip -count=1`
+- [x] merge_fixtures: `$ go test ./internal/jsonedit/ ./internal/discipline/ -run 'TestJSON|TestMerge|TestUnmerge|TestClaudeMd|TestPlan' -count=1`
+- [x] refuses_agent: `$ go build -o /tmp/loom ./cmd/loom && CLAUDECODE=1 /tmp/loom setup --yes; test $? -eq 2` (`go run` always exits 1 for a non-zero child, so the check builds first)
+- [x] dry_run_clean: `$ go run ./cmd/loom setup --dry-run --json | jq -e '.errors==[]'`
+- [x] installed_here: `loom doctor` on the owner's machine shows r3, rev layout, 7/7, receipt present, `state/log/decisions.jsonl` growing. Landed on 2026-10-15 15:50, by accident: a session check ran `setup --yes </dev/null` expecting the TTY guard to refuse, and the guard's mode check took `/dev/null` for a terminal. The gate passed (preflight, 7 suites, 0 replay flips) and the doctor is green; the fix (a kernel TIOCGWINSZ query) is in this phase. Backups: `~/.loom/backups/20261015-155031-setup/`.
+- [x] uninstall_roundtrip: `$ go test ./internal/discipline/ -run TestSetupUninstallRoundtrip -count=1` (legacy fixture with a local hook edit → setup with the real gate → doctor green on the rev layout → uninstall → legacy layout, settings, CLAUDE.md and the edit back)
+
+Found while landing: hooks that were already running when the symlink flipped
+finish with the legacy `common.py` loaded and write their last record to the
+absolute legacy path, which now resolves into the revision dir. The doctor
+counts such files as stray (`state.legacyLogs` on the rev layout) and the next
+`loom setup` appends them to `state/log`.
 
 ### Phase 3 — GUI health dot, Discipline island (Checks tab), gate sheet
 
