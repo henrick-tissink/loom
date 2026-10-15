@@ -1,0 +1,185 @@
+{
+  "rev": "r3",
+  "claudeCodeTested": [
+    "2.1.296",
+    "2.1.300"
+  ],
+  "files": [
+    {
+      "path": "CLAUDE.how-to-work.md",
+      "sha256": "0eb9415c4e5a6a648db63e8174e808ca9b6c9275e8e8b0e05edf101ff916629f",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "REV",
+      "sha256": "09d2a941dca1835faf706e706a83452109b31abd2fb5bf3cee74f57b1bbc6406",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "bin/deadline",
+      "sha256": "c3601bd09a9bf60f8a69d8125b143870a832cf3cae651e90f6e4eee9c8cb569a",
+      "mode": "0755",
+      "target": "~/.local/bin/deadline"
+    },
+    {
+      "path": "enforce/bash_guard.py",
+      "sha256": "a5739a2e8b058acf1e23b61f575489e602af85634edfe2f988667453a9833d14",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "enforce/common.py",
+      "sha256": "ae97401c243bf398bcd5c35c795e5b113f179ad3d45b5e8a70edd2521d46157d",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "enforce/ctx_budget.py",
+      "sha256": "7ddb535e02f41c880f9d0aefdc09805381eb20a8174bedc4c40179444aeb2dec",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "enforce/hook_report.py",
+      "sha256": "a55a8b3f1078b3e4f06b96f3b876a5615002674840f340584b1866ec4ad90f1f",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "enforce/precompact_checkpoint.py",
+      "sha256": "2b9f90dee7c35317a30749d984d67b31e422bdd0fe803333a9a4eaf61e81852e",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "enforce/replay_decisions.py",
+      "sha256": "24af94a557e77c50ccf13c05a416eddd24c3926b79d628238f39ed2112b756bc",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "enforce/session_checkpoint.py",
+      "sha256": "9deadd688d93ab8bab5cca24351c850bbcf9648b0f9b6557d09b0883b15b4a06",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "enforce/stop_guard.py",
+      "sha256": "d38d7831cbdb7eb29bc449c57cb3e3d94724f554ce0fdab3177fed48de232741",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "enforce/test_rerun_log.py",
+      "sha256": "964bdf20cec090c4b70842b386e8c83d11ab91abb5b86c358dd57e05b34c83dd",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "enforce/test_rerun_report.py",
+      "sha256": "7d2362fb4738c6e260ad0cdb3f1964238ab3f98ad9d052546c89ea226a172eb3",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "examples/checkpoint.example.md",
+      "sha256": "0855dbcb15cc1156bdc319192253f01b47191cbb55aaf1273038ea0dbf4023a5",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "examples/task.example.md",
+      "sha256": "a067e4fabba25781a5d34cd5baf88b8f7398747d33629e3638efef094d366fe6",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "registrations.json",
+      "sha256": "a3d32b1cc4f4560a1ed93ce5afe54cc46e74078296c421feecb8de0fe17bbd5d",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "scripts/context-bar.sh",
+      "sha256": "8953d3c6b98f349c66e7ea2e8e9f9796191e28f227d27f60d29471ae9a7e6fe5",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "tests/run_all.sh",
+      "sha256": "c5035ffcdbdb42324648b1f7dbc072ef5d8b2a66328847ea0d978b0fb2486e38",
+      "mode": "0755",
+      "target": "rev"
+    },
+    {
+      "path": "tests/test_bashguard.py",
+      "sha256": "8879bb4a3222caf342ee5f0a62cce8f36ffadb9f8285fdda54a10b4d88a9e23e",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "tests/test_ctxbudget.py",
+      "sha256": "f312c30fccab9fac76953784a09be885cc179d24f831a8b001ce082861690548",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "tests/test_execchecks.py",
+      "sha256": "751f1b1c8f4f8956a7d88fb0e335007715d58e8075c002ec5a1afaba2e6a09af",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "tests/test_finishline.py",
+      "sha256": "351d0c8466fd1f25003cf59547f5742432b51b9bcc8ab67c212a962f3182f46b",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "tests/test_session_lineage.py",
+      "sha256": "82e0035a8e415663f34d259d05f1c58ede08251c300154d7fdfb634330a4db24",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "tests/test_stop_guard.py",
+      "sha256": "5af7b3e6fb8022b684f9645cc0acac32b14ca07f7774768f7f52031a097a7416",
+      "mode": "0644",
+      "target": "rev"
+    },
+    {
+      "path": "tests/test_testlog.py",
+      "sha256": "a0c1eed2585165ddea8ca58ea4dfb8e5045919c9bf041464fe8841f653bda853",
+      "mode": "0644",
+      "target": "rev"
+    }
+  ],
+  "registrations": "registrations.json",
+  "history": {
+    "seed-2026-10-15": {
+      "CLAUDE.how-to-work.md": "0eb9415c4e5a6a648db63e8174e808ca9b6c9275e8e8b0e05edf101ff916629f",
+      "bin/deadline": "c3601bd09a9bf60f8a69d8125b143870a832cf3cae651e90f6e4eee9c8cb569a",
+      "enforce/bash_guard.py": "a5739a2e8b058acf1e23b61f575489e602af85634edfe2f988667453a9833d14",
+      "enforce/common.py": "ab183dfe6c819063e7679f745075ac40f64c1c1bab823ff90de14fb55ffb9d7c",
+      "enforce/ctx_budget.py": "7ddb535e02f41c880f9d0aefdc09805381eb20a8174bedc4c40179444aeb2dec",
+      "enforce/hook_report.py": "b688995555d1bc5aa5fb0144d44423fb4f0111cb3fbd5084056a5dc2006a12cb",
+      "enforce/precompact_checkpoint.py": "2b9f90dee7c35317a30749d984d67b31e422bdd0fe803333a9a4eaf61e81852e",
+      "enforce/replay_decisions.py": "305712da0b8feaf2d1793f664591dcd49c47f5776d494a8fee351020fc8ecb80",
+      "enforce/session_checkpoint.py": "9deadd688d93ab8bab5cca24351c850bbcf9648b0f9b6557d09b0883b15b4a06",
+      "enforce/stop_guard.py": "d38d7831cbdb7eb29bc449c57cb3e3d94724f554ce0fdab3177fed48de232741",
+      "enforce/test_rerun_log.py": "964bdf20cec090c4b70842b386e8c83d11ab91abb5b86c358dd57e05b34c83dd",
+      "enforce/test_rerun_report.py": "214453b643ce56184021b720a418d59dd98b71ec5719b9a82c40bd7a3c0b0758",
+      "scripts/context-bar.sh": "8953d3c6b98f349c66e7ea2e8e9f9796191e28f227d27f60d29471ae9a7e6fe5",
+      "tests/run_all.sh": "edcc4254c87e31dbebbb033aa47ed99687cc1fc448707e1fbc4e99eda577e1a9",
+      "tests/test_bashguard.py": "8879bb4a3222caf342ee5f0a62cce8f36ffadb9f8285fdda54a10b4d88a9e23e",
+      "tests/test_ctxbudget.py": "f312c30fccab9fac76953784a09be885cc179d24f831a8b001ce082861690548",
+      "tests/test_execchecks.py": "751f1b1c8f4f8956a7d88fb0e335007715d58e8075c002ec5a1afaba2e6a09af",
+      "tests/test_finishline.py": "351d0c8466fd1f25003cf59547f5742432b51b9bcc8ab67c212a962f3182f46b",
+      "tests/test_session_lineage.py": "82e0035a8e415663f34d259d05f1c58ede08251c300154d7fdfb634330a4db24",
+      "tests/test_stop_guard.py": "5af7b3e6fb8022b684f9645cc0acac32b14ca07f7774768f7f52031a097a7416",
+      "tests/test_testlog.py": "a0c1eed2585165ddea8ca58ea4dfb8e5045919c9bf041464fe8841f653bda853"
+    }
+  }
+}

@@ -76,6 +76,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status |
 | `~/.claude/state/{tasks,checkpoints}/<sid>.md` | the operator's hooks (Loom: read-only) | a session's pinned finish line and its hand-over checkpoint |
+| `~/.claude/discipline/r<N>/`, `~/.claude/hooks/enforce`, `~/.local/bin/deadline`, `~/.claude/settings.json` hook entries, `~/.claude/CLAUDE.md` | the Agent Discipline bundle. Today Loom only **reads** them (`loom doctor`); phase 2 of `docs/DISCIPLINE.md` makes `internal/discipline` the one writer, by explicit human action | hooks, rules, helpers; see `docs/DISCIPLINE.md` |
 | `~/.claude.json` | Claude (Loom: read-only) | per-project trust flags |
 | `$LOOM_WORKSPACE` (default `~/Sauce`) | user | project discovery root |
 
@@ -125,6 +126,7 @@ conversation a loom row already tails is not shown twice.
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
+| `discipline` | The embedded Agent Discipline bundle (rules, hooks, suites, helpers), its generated manifest, the on-machine layout, and the read-only doctor | Source of truth for the handbook from rev 3 on. Phase 1 writes nothing outside the repo. Plan: `docs/DISCIPLINE.md`. |
 
 Test mass is deliberate: roughly **8k test lines vs 7.5k source lines.**
 
@@ -557,5 +559,6 @@ going to be one.** Loom is a cockpit for a human who is present.
 | What gets indexed, and what's filtered out? | `internal/memory/extract.go` |
 | Who can see what? | `internal/projects/resolver.go`, `cmd/loom-gui/session_dto.go` |
 | Design specs & plans (historical record) | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
+| Bundling the Agent Discipline Handbook (installer, doctor, GUI surfaces) | `docs/DISCIPLINE.md` (plan, not yet built) |
 | Empirical findings about Claude's CLI | `docs/spikes/` |
 | The parked arcs | `git show parked-arcs` |

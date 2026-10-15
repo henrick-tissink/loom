@@ -8,6 +8,8 @@
 //	loom attach <name>   hand this terminal to the session's tmux pane
 //	loom kill <name>     kill the session (the GUI retires its row on its next poll)
 //	loom search <query>  full-text search over indexed session history
+//	loom doctor          how this machine's Agent Discipline install compares
+//	                     to the bundle loom carries (read-only; docs/DISCIPLINE.md)
 package main
 
 import (
@@ -24,7 +26,7 @@ import (
 	"github.com/henricktissink/loom/internal/tmux"
 )
 
-const usage = `usage: loom ls | attach <name> | kill <name> | search <query>`
+const usage = `usage: loom ls | attach <name> | kill <name> | search <query> | doctor [--json] [--deep] [--strict]`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -55,6 +57,8 @@ func run(args []string) error {
 			return fmt.Errorf("%s", usage)
 		}
 		return search(strings.Join(args[1:], " "))
+	case "doctor":
+		return doctor(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}

@@ -14,3 +14,6 @@ cmd/loom-gui/frontend/dist/*
 cmd/loom-gui/frontend/wailsjs/
 cmd/loom-gui/frontend/package.json.md5
 /loom-gui
+
+# python bytecode (hook suites)
+__pycache__/

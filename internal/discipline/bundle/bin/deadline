@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""deadline DURATION CMD [ARGS...]
+
+Run CMD in its own process group with a hard deadline (macOS has no `timeout`).
+
+DURATION: plain seconds, or with a suffix: 90s, 20m, 2h.
+On expiry: SIGTERM the whole process group, SIGKILL after 10s, exit 124
+(the coreutils `timeout` convention). SIGTERM/SIGINT/SIGHUP sent to this
+wrapper (e.g. stopping the background task) are forwarded to the group.
+When CMD exits normally, any processes it left behind in its group are
+cleaned up too, so a command cannot leave orphans running.
+"""
+import os
+import signal
+import subprocess
+import sys
+
+GRACE_SECONDS = 10
+
+
+def parse_duration(text):
+    units = {"s": 1, "m": 60, "h": 3600}
+    if text and text[-1] in units:
+        return float(text[:-1]) * units[text[-1]]
+    return float(text)
+
+
+def kill_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def stop_group(proc):
+    kill_group(proc.pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        kill_group(proc.pid, signal.SIGKILL)
+        proc.wait()
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__, file=sys.stderr)
+        return 125
+    try:
+        seconds = parse_duration(sys.argv[1])
+    except ValueError:
+        print(f"deadline: bad duration {sys.argv[1]!r}", file=sys.stderr)
+        return 125
+
+    proc = subprocess.Popen(sys.argv[2:], start_new_session=True)
+
+    def forward(signum, _frame):
+        stop_group(proc)
+        sys.exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, forward)
+
+    try:
+        code = proc.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        print(f"deadline: {sys.argv[1]} exceeded, stopping process group {proc.pid}",
+              file=sys.stderr)
+        stop_group(proc)
+        return 124
+
+    # The leader exited; reap anything it left running in its group.
+    kill_group(proc.pid, signal.SIGTERM)
+    return code if code >= 0 else 128 - code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

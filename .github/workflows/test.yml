@@ -1,0 +1,23 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: python for the hook suites
+        run: python3 --version
+      # cmd/loom-gui needs Wails + WebKit; everything else, including the
+      # discipline bundle's python suites, runs here. CI=true makes a missing
+      # python3 a failure rather than a skip.
+      - name: vet and test
+        run: |
+          pkgs=$(go list ./... | grep -v /cmd/loom-gui)
+          go vet $pkgs
+          go test -count=1 $pkgs

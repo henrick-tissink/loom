@@ -1,0 +1,18 @@
+{
+  "hooks": [
+    {"event": "PreToolUse",       "matcher": "Bash", "script": "enforce/bash_guard.py",            "timeout": 5,   "onFailure": "block"},
+    {"event": "PreToolUse",       "matcher": "Bash", "script": "enforce/test_rerun_log.py",        "timeout": 5},
+    {"event": "Stop",             "matcher": "",     "script": "enforce/stop_guard.py",            "timeout": 300},
+    {"event": "SubagentStop",     "matcher": "",     "script": "enforce/stop_guard.py",            "timeout": 10},
+    {"event": "UserPromptSubmit", "matcher": "",     "script": "enforce/ctx_budget.py",            "timeout": 10},
+    {"event": "PreCompact",       "matcher": "",     "script": "enforce/precompact_checkpoint.py", "timeout": 20},
+    {"event": "SessionStart",     "matcher": "",     "script": "enforce/session_checkpoint.py",    "timeout": 10}
+  ],
+  "statusLine": {"type": "command", "command": "bash <ccd>/scripts/context-bar.sh"},
+  "env": {
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000"
+  },
+  "permissionsDeny": ["Edit(<ccd>/hooks/**)", "Write(<ccd>/hooks/**)"]
+}
