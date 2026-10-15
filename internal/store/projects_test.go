@@ -484,3 +484,41 @@ func TestRepointProject(t *testing.T) {
 		}
 	})
 }
+
+// TestRemoveProject: removal deletes the project and its membership in one
+// transaction and records the root so discovery skips it; the reserved row is
+// refused; a deliberate re-create at the root clears the ignore.
+func TestRemoveProject(t *testing.T) {
+	s := open(t)
+	mustUpsertProject(t, s, proj("/w/inno", "inno"))
+	mustUpsertRepo(t, s, repo("/w/inno/quickbit", "/w/inno", "inno/quickbit"))
+	mustUpsertProject(t, s, proj("/w/other", "other"))
+
+	if err := s.RemoveProject(UngroupedRoot, 1000); !errors.Is(err, ErrReservedRoot) {
+		t.Fatalf("Ungrouped removal = %v, want ErrReservedRoot", err)
+	}
+	if err := s.RemoveProject("/w/nope", 1000); !errors.Is(err, ErrNoProject) {
+		t.Fatalf("unknown root removal = %v, want ErrNoProject", err)
+	}
+	if err := s.RemoveProject("/w/inno", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.GetProject("/w/inno"); ok {
+		t.Fatal("project row survived removal")
+	}
+	if _, ok, _ := s.GetProjectRepo("/w/inno/quickbit"); ok {
+		t.Fatal("membership row survived removal")
+	}
+	if _, ok, _ := s.GetProject("/w/other"); !ok {
+		t.Fatal("an unrelated project was removed")
+	}
+	if got, _ := s.ListIgnoredRoots(); len(got) != 1 || got[0] != "/w/inno" {
+		t.Fatalf("ignored roots = %v, want [/w/inno]", got)
+	}
+
+	// "+ New project" at the same root: the row comes back and the ignore goes.
+	mustUpsertProject(t, s, proj("/w/inno", "inno"))
+	if got, _ := s.ListIgnoredRoots(); len(got) != 0 {
+		t.Fatalf("ignore survived a re-create: %v", got)
+	}
+}

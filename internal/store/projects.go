@@ -70,13 +70,67 @@ const projectCols = "root, name, origin, hidden, solo, missing, collapsed, notes
 // setter. `missing` is likewise not refreshed from here: it is owned by the
 // sweep (SetProjectMissing), which stats every known row rather than diffing
 // against the scan set (§7 retirement).
+//
+// Inserting a root also clears it from ignored_roots: a project the user
+// removed and then re-created via "+ New project" is wanted again, and the
+// invariant "a root is a project or ignored, never both" is kept here rather
+// than in every caller. The reconciler checks the ignore list BEFORE it
+// upserts, so discovery never trips this.
 func (s *Store) UpsertProject(p Project) error {
-	_, err := s.db.Exec(`INSERT INTO projects (`+projectCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(root) DO NOTHING`,
-		p.Root, p.Name, p.Origin, p.Hidden, p.Solo, p.Missing, p.Collapsed, p.NotesDir,
-		p.CreatedAt, p.UpdatedAt)
-	return err
+	return s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT INTO projects (`+projectCols+`)
+			VALUES (?,?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(root) DO NOTHING`,
+			p.Root, p.Name, p.Origin, p.Hidden, p.Solo, p.Missing, p.Collapsed, p.NotesDir,
+			p.CreatedAt, p.UpdatedAt); err != nil {
+			return err
+		}
+		_, err := tx.Exec("DELETE FROM ignored_roots WHERE root=?", p.Root)
+		return err
+	})
+}
+
+// RemoveProject deletes a project and its membership rows and records the
+// root in ignored_roots, in one transaction. Session rows are NOT touched
+// here — attribution is computed from paths (§4), so the caller must deal
+// with the project's sessions first, while the rows that attribute them
+// still exist. The reserved Ungrouped row cannot be removed.
+func (s *Store) RemoveProject(root string, now int64) error {
+	if root == UngroupedRoot {
+		return ErrReservedRoot
+	}
+	return s.tx(func(tx *sql.Tx) error {
+		if err := projectExists(tx, root); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DELETE FROM project_repos WHERE project_root=?", root); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DELETE FROM projects WHERE root=?", root); err != nil {
+			return err
+		}
+		_, err := tx.Exec("INSERT OR REPLACE INTO ignored_roots (root, removed_at) VALUES (?, ?)", root, now)
+		return err
+	})
+}
+
+// ListIgnoredRoots returns the roots RemoveProject recorded, for the
+// reconciler to skip.
+func (s *Store) ListIgnoredRoots() ([]string, error) {
+	rows, err := s.db.Query("SELECT root FROM ignored_roots ORDER BY root")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) GetProject(root string) (Project, bool, error) {

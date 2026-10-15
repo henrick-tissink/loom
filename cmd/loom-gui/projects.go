@@ -429,6 +429,64 @@ func (a *App) RemoveProjectRepo(path string) error {
 	return a.st.ReassignRepo(path, path, filepath.Base(path))
 }
 
+// RemoveProject takes a project out of the dock for good: it kills the
+// project's live sessions, forgets its finished ones, deletes the project and
+// its membership rows, and records the root so discovery does not re-register
+// it on the next launch. "+ New project" at the same root is the way back.
+//
+// Sessions go first, while the rows that attribute them still exist —
+// attribution is computed from paths (§4), so after the delete every one of
+// them would read as Ungrouped and nothing could find them. A live session
+// whose pane cannot be killed aborts the removal before anything is deleted:
+// a half-removed project is worse than one that is still there. External
+// sessions are not loom's rows and are never touched.
+func (a *App) RemoveProject(root string) error {
+	if a.st == nil {
+		return fmt.Errorf("store unavailable")
+	}
+	root = projects.Canonical(root)
+	if root == store.UngroupedRoot {
+		return fmt.Errorf("Ungrouped cannot be removed")
+	}
+	if _, ok, err := a.st.GetProject(root); err != nil {
+		return err
+	} else if !ok {
+		return fmt.Errorf("no project at %s", root)
+	}
+	at := a.attributor(a.resolver())
+	live, err := a.st.Live()
+	if err != nil {
+		return err
+	}
+	ended, err := a.st.Ended()
+	if err != nil {
+		return err
+	}
+	var doomed []string
+	for _, r := range live {
+		if att, _ := at.Attribute(r); att.Root != root {
+			continue
+		}
+		if a.tm != nil && a.tm.HasSession(r.Name) {
+			if err := a.tm.KillSession(r.Name); err != nil {
+				return fmt.Errorf("kill %s: %w", r.Name, err)
+			}
+		}
+		doomed = append(doomed, r.Name)
+	}
+	for _, r := range ended {
+		if att, _ := at.Attribute(r); att.Root == root {
+			doomed = append(doomed, r.Name)
+		}
+	}
+	for _, name := range doomed {
+		if err := a.st.ForgetSession(name); err != nil {
+			return err
+		}
+	}
+	return a.st.RemoveProject(root, a.now().Unix())
+}
+
 // RenameProject sets the display name. Labels are unaffected by construction
 // (§2 derives them from the root basename).
 func (a *App) RenameProject(root, name string) error {

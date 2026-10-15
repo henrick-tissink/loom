@@ -402,6 +402,25 @@ body {
 .sh-acts .sh-btn { margin-left: 0; }
 .sh-btn.sh-primary { background: var(--accent); color: var(--on-accent); }
 .sh-btn.sh-primary:hover { color: var(--on-accent); filter: brightness(1.05); }
+.sh-btn.sh-danger:hover { color: #fff; background: var(--st-error); }
+.sh-btn:disabled { opacity: 0.45; cursor: default; }
+
+/* ---- dock context menu (right-click on a project token) ---- */
+.ctxmenu {
+  position: fixed; z-index: 60; min-width: 150px; padding: 6px;
+  background: var(--surface); border-radius: 12px; box-shadow: var(--shadow-modal);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.ctxmenu button {
+  font-family: var(--font-ui); font-size: 12.5px; font-weight: 700; color: var(--text);
+  background: transparent; border: 0; border-radius: 8px; padding: 7px 10px;
+  text-align: left; cursor: pointer;
+}
+.ctxmenu button:hover { background: var(--sel); }
+.ctxmenu button.danger { color: var(--st-error); }
+.ctxmenu button.danger:hover { color: #fff; background: var(--st-error); }
+.cm-body p { margin: 0; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+.cm-body b { color: var(--text); }
 
 /* ---- diff modal ---- */
 .diff-modal { width: 800px; max-width: calc(100vw - 48px); }

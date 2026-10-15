@@ -120,7 +120,7 @@ conversation a loom row already tails is not shown twice.
 | `status` | Fuse transcript state with tmux liveness | The reconcile loop. The only writer of live-session status. |
 | `store` | SQLite: schema, sessions, projects, memory index | Migrations are transactional & re-entrant. |
 | `memory` | Index / extract / summarize | Reads the whole Claude archive; the only package that calls out to an LLM. |
-| `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. |
+| `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. Removing a project (`App.RemoveProject`) kills its live sessions, forgets its rows, deletes the project and records the root in `ignored_roots`; "+ New project" at that root un-ignores it. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
@@ -293,6 +293,7 @@ and an "already applied" check on every ALTER, so a replay from a stale
 | 8 | `sessions.add_dirs` |
 | 9 | `projects.collapsed` |
 | 5, 10–25 | tables and columns of the parked arcs (§6.4) |
+| 26 | `ignored_roots` — roots removed from the dock; the reconciler skips them, `UpsertProject` clears them |
 
 ### 6.1 `sessions` — Loom's own launches
 

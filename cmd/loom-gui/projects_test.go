@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/henricktissink/loom/internal/projects"
+	"github.com/henricktissink/loom/internal/registry"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
 )
@@ -406,4 +407,76 @@ func TestResolverKeepsLastGoodOnReadError(t *testing.T) {
 // testAttributor is testResolver wrapped for the DTO layer.
 func testAttributor(hidden ...string) *rowAttributor {
 	return &rowAttributor{Resolver: testResolver(hidden...)}
+}
+
+// TestRemoveProject_clearsSessionsAndStaysGone: Remove in the dock forgets the
+// project's own session rows (live and finished), the project and its repos,
+// and discovery on the next launch does not bring the project back. A
+// deliberate "+ New project" at the root does. The other project and its
+// sessions are untouched.
+func TestRemoveProject_clearsSessionsAndStaysGone(t *testing.T) {
+	a := newTestApp(t)
+	seedProjects(t, a)
+	rows := []store.SessionRow{
+		{Name: "hid-live", ClaudeSessionID: "c1", Cwd: hidRepo, EndedAt: -1, LastStatus: "idle"},
+		{Name: "hid-done", ClaudeSessionID: "c2", Cwd: hidRoot + "/deeper", EndedAt: 10, LastStatus: "done"},
+		{Name: "vis-done", ClaudeSessionID: "c3", Cwd: visRepo, EndedAt: 10, LastStatus: "done"},
+	}
+	for _, r := range rows {
+		if err := a.st.Upsert(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := a.RemoveProject(store.UngroupedRoot); err == nil {
+		t.Fatal("Ungrouped must not be removable")
+	}
+	if err := a.RemoveProject(hidRoot); err != nil {
+		t.Fatalf("RemoveProject: %v", err)
+	}
+
+	for _, name := range []string{"hid-live", "hid-done"} {
+		if _, ok, _ := a.st.Get(name); ok {
+			t.Errorf("session %s survived the removal", name)
+		}
+	}
+	if _, ok, _ := a.st.Get("vis-done"); !ok {
+		t.Error("another project's session was removed")
+	}
+	if _, ok, _ := a.st.GetProject(hidRoot); ok {
+		t.Error("project row survived")
+	}
+	if _, ok, _ := a.st.GetProjectRepo(hidRepo); ok {
+		t.Error("membership row survived")
+	}
+	for _, d := range a.ListProjectDetails() {
+		if d.Root == hidRoot {
+			t.Error("removed project still listed")
+		}
+	}
+
+	// Next launch: discovery finds the folder again and must leave it out.
+	disc := []registry.Project{{Name: "Client", Root: hidRoot, Repos: []registry.Repo{{Label: "hidden/api", Path: hidRepo}}}}
+	if err := a.projects.Reconcile(disc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := a.st.GetProject(hidRoot); ok {
+		t.Fatal("discovery re-registered a removed project")
+	}
+
+	// The way back is deliberate: create at the root again (a real directory,
+	// since CreateProject stats it) and the ignore is gone.
+	dir := t.TempDir()
+	if err := a.CreateProject(dir, "Back", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RemoveProject(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.CreateProject(dir, "Back", nil); err != nil {
+		t.Fatalf("re-create after remove: %v", err)
+	}
+	if got, _ := a.st.ListIgnoredRoots(); len(got) != 1 || got[0] != hidRoot {
+		t.Fatalf("ignored roots = %v, want only %s", got, hidRoot)
+	}
 }

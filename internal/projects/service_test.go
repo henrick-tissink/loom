@@ -26,8 +26,18 @@ type fakeStore struct {
 	projects map[string]store.Project
 	repos    map[string]store.ProjectRepo
 	labels   map[string]string // label -> path
+	ignored  map[string]bool
 	listErr  error
 	upsertPE error // forced failure from UpsertProject
+}
+
+func (f *fakeStore) ListIgnoredRoots() ([]string, error) {
+	out := make([]string, 0, len(f.ignored))
+	for r := range f.ignored {
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func newFake() *fakeStore {
@@ -66,6 +76,7 @@ func (f *fakeStore) UpsertProject(p store.Project) error {
 	if f.upsertPE != nil {
 		return f.upsertPE
 	}
+	delete(f.ignored, p.Root)
 	if _, ok := f.projects[p.Root]; ok {
 		return nil // insert-only
 	}
@@ -412,5 +423,43 @@ func TestListFailurePropagates(t *testing.T) {
 	}
 	if _, err := svc.LaunchTargets(); err == nil {
 		t.Error("LaunchTargets must surface a read failure")
+	}
+}
+
+// TestReconcileSkipsIgnoredRoot: a project the user removed from the dock is
+// recorded in ignored_roots, and discovery — which re-registers every workspace
+// folder on every launch — must not bring it back. Only an explicit create
+// (UpsertProject) clears the ignore.
+func TestReconcileSkipsIgnoredRoot(t *testing.T) {
+	base := t.TempDir()
+	mkdirs(t, base, "gone/one", "kept/one")
+	gone, kept := filepath.Join(base, "gone"), filepath.Join(base, "kept")
+
+	f := newFake()
+	f.ignored = map[string]bool{gone: true}
+	svc := New(f)
+	disc := []registry.Project{
+		{Name: "gone", Root: gone, Repos: []registry.Repo{{Label: "gone/one", Path: filepath.Join(gone, "one")}}},
+		{Name: "kept", Root: kept, Repos: []registry.Repo{{Label: "kept/one", Path: filepath.Join(kept, "one")}}},
+	}
+	if err := svc.Reconcile(disc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.projects[gone]; ok {
+		t.Fatal("ignored root was re-registered by discovery")
+	}
+	if _, ok := f.repos[filepath.Join(gone, "one")]; ok {
+		t.Fatal("ignored root's repo was re-registered by discovery")
+	}
+	if _, ok := f.projects[kept]; !ok {
+		t.Fatal("the other project must still be registered")
+	}
+
+	// A deliberate create at that root is the way back.
+	if err := f.UpsertProject(store.Project{Root: gone, Name: "gone", Origin: "created"}); err != nil {
+		t.Fatal(err)
+	}
+	if f.ignored[gone] {
+		t.Fatal("UpsertProject must clear the ignore")
 	}
 }

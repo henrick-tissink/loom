@@ -24,6 +24,7 @@ type Store interface {
 	UpsertProjectRepo(store.ProjectRepo) error
 	SetProjectMissing(root string, missing bool, now int64) error
 	SetProjectRepoMissing(path string, missing bool) error
+	ListIgnoredRoots() ([]string, error)
 }
 
 // Service owns discovery + DB reconciliation and is queried READ-THROUGH.
@@ -50,6 +51,18 @@ func (s *Service) Reconcile(ps []registry.Project) error {
 	s.warnings = nil
 	s.mu.Unlock()
 
+	// Roots the user removed from the dock. Checked before the upsert: the
+	// upsert is what clears an ignore, and that clearing is reserved for a
+	// deliberate "+ New project", never for the next launch's scan.
+	ignoredList, err := s.st.ListIgnoredRoots()
+	if err != nil {
+		return err
+	}
+	ignored := make(map[string]bool, len(ignoredList))
+	for _, r := range ignoredList {
+		ignored[r] = true
+	}
+
 	for _, p := range ps {
 		if p.Root == store.UngroupedRoot {
 			// The reserved row is seeded by migration and owns no directory;
@@ -57,6 +70,9 @@ func (s *Service) Reconcile(ps []registry.Project) error {
 			continue
 		}
 		root := Canonical(p.Root)
+		if ignored[root] {
+			continue
+		}
 		// Upsert-without-clobber: discovery inserts what is absent and NEVER
 		// overwrites a user-set name, hidden, solo or membership — the
 		// discipline UpsertTranscript uses to protect llm_summary. The store

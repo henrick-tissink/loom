@@ -521,6 +521,16 @@ func (s *Store) migrate() error {
 		// escalation fired. DEFAULT '' = not escalated. Own slot: ALTER has no
 		// IF NOT EXISTS.
 		`ALTER TABLE delegation_runs ADD COLUMN escalation TEXT NOT NULL DEFAULT ''`,
+		// v26: roots the user REMOVED from the dock. Discovery re-registers
+		// every workspace folder on each launch (§7 insert-only upsert), so
+		// deleting the project row alone would bring a discovered project
+		// back the next morning. The reconciler skips these roots;
+		// UpsertProject clears the row, so "+ New project" at that root is the
+		// way back and a root is never both a project and ignored.
+		`CREATE TABLE IF NOT EXISTS ignored_roots (
+			root       TEXT PRIMARY KEY,
+			removed_at INTEGER NOT NULL
+		)`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {
@@ -729,6 +739,23 @@ func (s *Store) DeleteSession(name string) error {
 	_, err := s.db.Exec(
 		"DELETE FROM sessions WHERE name = ? AND last_status IN "+endedSet, name)
 	return err
+}
+
+// ForgetSession removes a row WHATEVER its status. It exists for RemoveProject
+// only: the caller has already killed the tmux session (or confirmed it is
+// gone), and leaving the row behind would resurface the session under
+// Ungrouped once the engine noticed the pane had died. Everything else that
+// deletes goes through DeleteSession and its live-row guard.
+func (s *Store) ForgetSession(name string) error {
+	_, err := s.db.Exec("DELETE FROM sessions WHERE name = ?", name)
+	return err
+}
+
+// Ended returns every finished row, uncapped. Recent() is the rail's capped
+// view; a project removal has to find ALL of a project's finished sessions.
+func (s *Store) Ended() ([]SessionRow, error) {
+	return s.query("SELECT " + cols + " FROM sessions WHERE last_status IN " + endedSet +
+		" ORDER BY ended_at DESC")
 }
 
 // DeleteEnded removes every finished row and returns the number deleted.

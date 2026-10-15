@@ -558,6 +558,7 @@ function renderProjectsPane() {
       li.innerHTML = (p.ung ? "·" : `<span>${esc(initials(p.name))}</span>`) +
         (p.need ? `<span class="pj-badge">${p.need}</span>` : (p.run ? `<span class="pj-tdot"></span>` : ""));
       li.addEventListener("click", () => selectProject(p.root));
+      li.addEventListener("contextmenu", (e) => { e.preventDefault(); projectMenu(p, e.clientX, e.clientY); });
       projectsEl.appendChild(li);
     }
     return;
@@ -576,6 +577,7 @@ function renderProjectsPane() {
       (p.run && !p.need ? `<span class="pj-run"></span>` : "") +
       (p.need ? `<span class="pj-count">${p.need}</span>` : "") + `</span>`;
     li.addEventListener("click", () => selectProject(p.root));
+    li.addEventListener("contextmenu", (e) => { e.preventDefault(); projectMenu(p, e.clientX, e.clientY); });
     projectsEl.appendChild(li);
   }
 }
@@ -889,6 +891,68 @@ function refreshProjectSessions() {
   wireProjectSessions(host);
 }
 
+// removeProjectFlow is the one path out of the dock: a confirm that says what
+// goes (live sessions killed, finished ones cleared, the project forgotten and
+// kept out of discovery), then App.RemoveProject and a jump to Attention,
+// since the project the stage was showing no longer exists.
+async function removeProjectFlow(root) {
+  const p = projectByRoot(root);
+  if (!p || p.ungrouped) return;
+  const live = latestSessions.filter((s) => (s.projectRoot || "") === root && !s.external).length;
+  const fin = latestRecent.filter((s) => (s.projectRoot || "") === root).length;
+  const parts = [];
+  if (live) parts.push(`kill <b>${live}</b> live session${live === 1 ? "" : "s"}`);
+  if (fin) parts.push(`clear <b>${fin}</b> finished`);
+  const what = parts.length ? `This will ${parts.join(" and ")}, then forget ` : "This will forget ";
+  const ok = await confirmModal("Remove project?",
+    `<p>${what}<b>${esc(p.name)}</b> and its repos. Discovery will not add it back; ` +
+    `use <b>New project</b> at the same directory to bring it back.</p>`, "Remove");
+  if (!ok) return;
+  try { await window.go.main.App.RemoveProject(root); }
+  catch (e) { console.error("remove project", e); flashProjectError(String(e)); return; }
+  await poll();
+  if (selProject === root) openAttention();
+}
+
+// projectMenu is the dock token's right-click: Open, Hide/Show, Remove. One
+// menu at a time; any click or Escape outside it closes it.
+function projectMenu(p, x, y) {
+  closeProjectMenu();
+  const m = document.createElement("div");
+  m.className = "ctxmenu";
+  m.id = "ctxmenu";
+  const items = [["Open", () => selectProject(p.root)]];
+  if (!p.ung) {
+    // The dock's row objects carry counts, not flags; the hidden bit lives on
+    // the project detail.
+    const hidden = !!(projectByRoot(p.root) || {}).hidden;
+    items.push([hidden ? "Show" : "Hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !hidden))]);
+    items.push(["Remove…", () => removeProjectFlow(p.root), "danger"]);
+  }
+  for (const [label, fn, cls] of items) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    if (cls) b.classList.add(cls);
+    b.addEventListener("click", () => { closeProjectMenu(); fn(); });
+    m.appendChild(b);
+  }
+  document.body.appendChild(m);
+  const r = m.getBoundingClientRect();
+  m.style.left = Math.min(x, window.innerWidth - r.width - 8) + "px";
+  m.style.top = Math.min(y, window.innerHeight - r.height - 8) + "px";
+  setTimeout(() => {
+    document.addEventListener("click", closeProjectMenu, { once: true, capture: true });
+    document.addEventListener("contextmenu", closeProjectMenu, { once: true, capture: true });
+    document.addEventListener("keydown", onMenuKey, true);
+  }, 0);
+}
+function onMenuKey(e) { if (e.key === "Escape") closeProjectMenu(); }
+function closeProjectMenu() {
+  const m = document.getElementById("ctxmenu");
+  if (m) m.remove();
+  document.removeEventListener("keydown", onMenuKey, true);
+}
+
 function renderProject() {
   const stage = document.getElementById("stage");
   const p = projectByRoot(stageView.root);
@@ -923,6 +987,7 @@ function renderProject() {
         <button class="sh-btn" id="po-rename">Rename</button>
         <button class="sh-btn" id="po-repoint">Re-point</button>
         <button class="sh-btn" id="po-clean">Clean repo</button>
+        <button class="sh-btn sh-danger" id="po-removeproj" title="Kill its sessions, forget the project, keep it out of the dock">Remove</button>
       </span>
     </div>
     <div class="po">
@@ -945,11 +1010,12 @@ function renderProject() {
   // Ungrouped is a real row in the model, but it owns no directory: renaming,
   // re-pointing or adding repos to it is meaningless, and soloing it is
   // explicitly suppressed by §6.1.
-  for (const id of ["po-solo", "po-rename", "po-repoint", "po-addrepo"]) {
+  for (const id of ["po-solo", "po-rename", "po-repoint", "po-addrepo", "po-removeproj"]) {
     const el = document.getElementById(id);
     if (el && ungrouped) el.disabled = true;
   }
   on("po-clean", () => repoCleanupDialog(p.root));
+  on("po-removeproj", () => removeProjectFlow(p.root));
   on("po-hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !p.hidden)));
   on("po-solo", () => projectAction(() => window.go.main.App.SetProjectSolo(p.root, !p.solo)));
   on("po-rename", async () => {
