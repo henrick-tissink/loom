@@ -493,7 +493,7 @@ Done when:
 - [x] index_tests: `$ go test ./internal/memory/ ./internal/store/ -count=1` # ok, 2026-10-16: calls recorded on index, backfilled on the next sweep, summed per session
 - [x] diet_rows: `$ go build -o loom ./cmd/loom && ./loom doctor --json | jq -e '(.diet.pluginsUserScope | length >= 1) and ([.diet.pluginsUserScope[] | select(.enabled)] | length == 6) and (.diet.projects | type == "array")'` # true, 2026-10-16 (the owner's 6 enabled of 18 installed)
 - [x] js_parses, gui_builds, all_tests (`go test ./... && go vet ./...`) # all exit 0, 2026-10-16
-- [ ] observed: the owner's machine lists the 6 enabled user-scope plugins with usage and the per-project MCP usage grid in the Checks tab.
+- [x] observed: the owner's machine lists the 6 enabled user-scope plugins with usage and the per-project MCP usage grid in the Checks tab. # owner's screenshots 2026-10-16 23:41: Context diet header 6 of 18 user-scope plugins enabled, every enabled row with its always-on estimate (22 to 177 tok), loads and usage; the grid filled after the first sweep (Innostream 1143 claude-in-chrome, 453 lava, 130 claude.ai Didit; HappyPay 237 slack; volar 171 claude.ai Gmail), Innostream tagged settings.local.json is git-tracked, 3 sessions outside the listed projects.
 
 Notes:
 - `go run` cannot be the check: `loom doctor` opens loom.db, and the
