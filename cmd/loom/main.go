@@ -34,7 +34,8 @@ const usage = `usage: loom ls | attach <name> | kill <name> | search <query>
        loom doctor [--json] [--deep] [--strict]
        loom setup [--plan|--dry-run] [--json] [--yes] [--with env] [--without rules,statusline,deny] [--replace <file>,...]
        loom uninstall [--plan|--dry-run] [--json] [--yes]
-       loom discipline status | diff <file> | keep <file> | reset <file> | restore <backup>`
+       loom discipline status | diff <file> | keep <file> | reset <file> | restore <backup>
+       loom report hooks|tests [--since change|--days N] [--by project] [--json]`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -77,6 +78,8 @@ func run(args []string) error {
 		return uninstall(args[1:])
 	case "discipline":
 		return disciplineCmd(args[1:])
+	case "report":
+		return report(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}

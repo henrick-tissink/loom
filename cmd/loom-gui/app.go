@@ -35,6 +35,10 @@ type App struct {
 	// do not set one.
 	disc *disciplineState
 
+	// hooks reads the discipline hooks' logs (hooks.go); nil in tests
+	// that do not set one.
+	hooks *hookState
+
 	// projects is the runtime source of truth for launch targets and for §6's
 	// visibility predicate, queried read-through. It replaced a by-value
 	// registry.Discover snapshot taken at startup, which is why a project
@@ -91,6 +95,10 @@ func (a *App) ListSessions() (out []SessionDTO) {
 	// join below, so the two can never disagree about what is hidden.
 	res := a.resolver()
 	out = snapshotToDTOs(snap, a.attributor(res))
+	if a.hooks != nil {
+		a.hooks.reader.Refresh()
+		applyHooks(out, snap, a.hooks.reader)
+	}
 	a.onSnapshot(snap, out, res)
 	return out
 }

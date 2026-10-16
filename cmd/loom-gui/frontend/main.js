@@ -188,7 +188,10 @@ function taskPillHtml(s) {
   if (s.taskStatus === "consultation") return `<span class="tpill tpill-consult"${tip}>consult</span>`;
   const complete = s.taskStatus === "done" || (s.taskTotal > 0 && s.taskDone >= s.taskTotal);
   const label = s.taskTotal > 0 ? `${s.taskDone}/${s.taskTotal}` : s.taskStatus;
-  return `<span class="tpill${complete ? " tpill-ok" : ""}"${tip}>${esc(label)}</span>`;
+  // The stop guard's verdict on the file's current version: ✓ when it ran
+  // the `$` checks and they passed, ✗ when its last word was a failed check.
+  const mark = s.verified ? ` <span class="tmark ok" title="The stop guard ran the Done-when checks on this version and they passed">✓</span>` : s.checksFailed ? ` <span class="tmark bad" title="The stop guard's last verdict: a Done-when check failed">✗</span>` : "";
+  return `<span class="tpill${complete ? " tpill-ok" : ""}${s.checksFailed ? " tpill-bad" : ""}"${tip}>${esc(label)}${mark}</span>`;
 }
 
 // askLineHtml is the question a needs-you row is waiting on, with how long
@@ -346,7 +349,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${restartTag(s)}${taskPillHtml(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   threadsEl.appendChild(li);
@@ -683,7 +686,7 @@ function renderStageHeader(name) {
     `<span class="sh-name">${esc(label)}</span>` +
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(project)}</span>` : "") +
     `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}${wait}</span></span>` +
-    task + ctx + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
+    task + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
     (s && s.external ? "" :
       `<span class="sh-acts">` +
       `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>` +
@@ -691,6 +694,8 @@ function renderStageHeader(name) {
       `<button class="sh-btn sh-primary" id="sh-reply" title="Quick reply (R)">Reply</button></span>`);
   const diffBtn = el.querySelector("#sh-diff");
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
+  const hooksBtn = el.querySelector("#sh-hooks");
+  if (hooksBtn) hooksBtn.addEventListener("click", () => openHooksPanel(name));
   const replyBtn = el.querySelector("#sh-reply");
   if (replyBtn) replyBtn.addEventListener("click", () => openReply(name));
   const freshBtn = el.querySelector("#sh-fresh");
@@ -1764,13 +1769,153 @@ function discFileRows(d) {
     </li>`).join("")}</ul>`;
 }
 
+// ---- Rates and Re-runs tabs (phase 4): the hooks' own logs ----
+let discTab = "checks";
+try { const v = localStorage.getItem("loom.discTab"); if (["checks", "rates", "reruns"].includes(v)) discTab = v; } catch { /* storage off */ }
+let discWindow = "change"; // change | 7d | 30d | all
+
+function fmtPct(n, of) {
+  if (!of) return "—";
+  const p = 100 * n / of;
+  return (p >= 10 ? p.toFixed(0) : p.toFixed(1)) + "%";
+}
+
+function windowBar(dto) {
+  const opts = [["change", "since change"], ["7d", "7 days"], ["30d", "30 days"], ["all", "all"]];
+  const since = dto.since ? `since ${esc(fmtTS(dto.since * 1000))}` : "all records";
+  return `<div class="dsc-winbar"><div class="seg" id="dsc-win">${opts.map(([v, l]) => `<button class="seg-b${dto.window === v ? " active" : ""}" data-win="${v}">${l}</button>`).join("")}</div><span class="po-empty">${since}${dto.hidden ? " · hidden projects' records left out" : ""}</span></div>`;
+}
+
+// A daily sparkline for one span: holds and nudges as two separate bar
+// rows over the day's runs, never stacked into one number.
+function sparkline(days) {
+  if (!days || !days.length) return "";
+  const max = Math.max(1, ...days.map((d) => d.runs));
+  const w = 6, gap = 2, h = 22;
+  const bars = days.map((d, i) => {
+    const x = i * (w + gap);
+    const run = Math.max(1, Math.round(h * d.runs / max));
+    const hold = Math.round(h * d.holds / max);
+    const nudge = Math.round(h * d.nudges / max);
+    return `<g><title>${esc(d.day)}: ${d.runs} runs, ${d.holds} holds, ${d.nudges} nudges</title>` +
+      `<rect x="${x}" y="${h - run}" width="${w}" height="${run}" class="sp-run"/>` +
+      (hold ? `<rect x="${x}" y="${h - hold}" width="${w}" height="${hold}" class="sp-hold"/>` : "") +
+      (nudge ? `<rect x="${x}" y="${h - nudge}" width="${w / 2}" height="${nudge}" class="sp-nudge"/>` : "") + `</g>`;
+  }).join("");
+  return `<svg class="spark" width="${days.length * (w + gap)}" height="${h}" viewBox="0 0 ${days.length * (w + gap)} ${h}" aria-hidden="true">${bars}</svg>`;
+}
+
+function ratesHtml(dto) {
+  if (!dto.rows.length) return windowBar(dto) + `<div class="po-empty">No hook records in this window.</div>`;
+  const rows = dto.rows.map((r) => {
+    const spans = r.spans.map((sp, i) => {
+      const mark = sp.mark ? `<span class="dsc-mark${sp.inferred ? " inferred" : ""}" title="${sp.inferred ? "Inferred from the logs or the old hooks' edit times" : "From loom's ledger"}">${esc(sp.mark)}</span>` : (i === 0 ? `<span class="dsc-mark none">before any change</span>` : "");
+      const top = Object.entries(sp.decisions || {}).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${v} ${esc(k)}`).join(" · ");
+      return `<div class="dsc-span${sp.inferred ? " inferred" : ""}">
+        <div class="dsc-span-head">${mark}<span class="po-rpath">${/^0001-/.test(sp.from || "") ? "start" : esc(fmtTS(sp.from))} → ${esc(fmtTS(sp.to))}</span></div>
+        <div class="dsc-span-row">${sparkline(sp.days)}<span class="dsc-num"><b>${sp.runs}</b> runs</span><span class="dsc-num hold"><b>${fmtPct(sp.holds, sp.runs)}</b> holds <small>${sp.holds}</small></span><span class="dsc-num nudge"><b>${fmtPct(sp.nudges, sp.runs)}</b> nudges <small>${sp.nudges}</small></span></div>
+        ${top ? `<div class="po-rpath dsc-top">${top}</div>` : ""}
+      </div>`;
+    }).join("");
+    return `<section class="po-block dsc-hook"><div class="po-bhead"><h3>${esc(r.hook)}</h3>${r.rev ? `<span class="po-tag">${esc(r.rev)}</span>` : ""}</div>${spans}</section>`;
+  }).join("");
+  return windowBar(dto) + `<p class="po-empty">Holds are blocks and denies; nudges are advisory. They are never added together, and a span never crosses a hook change.</p>` + rows;
+}
+
+function rerunsHtml(dto) {
+  if (!dto.rows.length) return windowBar(dto) + `<div class="po-empty">No test runs logged in this window.</div>`;
+  const home = (dto.rows[0].project || "").match(/^\/Users\/[^/]+|^\/home\/[^/]+/);
+  const short = (p) => home ? p.replace(home[0], "~") : p;
+  const rows = dto.rows.map((r, i) => `
+    <li class="po-repo dsc-rerun" data-i="${i}">
+      <span class="po-rlabel">${esc(short(r.project))}</span>
+      <span class="dsc-num"><b>${r.runs}</b> runs</span>
+      <span class="dsc-num"><b>${r.afterChange}</b> after a change</span>
+      <span class="dsc-num hold"><b>${fmtPct(r.noChange, r.runs)}</b> no change <small>${r.noChange}</small></span>
+      <span class="dsc-num">${r.medianGapS ? `median gap <b>${fmtAge(r.medianGapS)}</b>` : ""}</span>
+      ${r.commands.length ? `<button class="tact dsc-cmds">commands</button>` : ""}
+      <div class="dsc-cmdlist" hidden>${r.commands.map((c) => `<code>${esc(c)}</code>`).join("")}</div>
+    </li>`).join("");
+  return windowBar(dto) + `<p class="po-empty">A re-run with no change is a test command run again with the same tree (HEAD, diff and untracked files) as the run before it.</p><ul class="po-list">${rows}</ul>`;
+}
+
+async function renderDiscTab() {
+  const el = document.getElementById("dsc-tab");
+  if (!el) return;
+  const fn = bound(discTab === "rates" ? "HookRates" : "HookReruns");
+  if (!fn) { el.innerHTML = `<div class="po-empty">Not available in this build.</div>`; return; }
+  let dto;
+  try { dto = await fn(discWindow); } catch (e) { el.innerHTML = `<div class="modal-error">${esc(String(e))}</div>`; return; }
+  if (stageView.kind !== "discipline" || document.getElementById("dsc-tab") !== el) return;
+  el.innerHTML = discTab === "rates" ? ratesHtml(dto) : rerunsHtml(dto);
+  for (const b of el.querySelectorAll("#dsc-win .seg-b")) b.addEventListener("click", () => { discWindow = b.dataset.win; renderDiscTab(); });
+  for (const b of el.querySelectorAll(".dsc-cmds")) b.addEventListener("click", (e) => { e.stopPropagation(); const l = b.parentElement.querySelector(".dsc-cmdlist"); if (l) l.hidden = !l.hidden; });
+}
+
+// ---- per-session: finish-line marks, the held chip, the hooks panel ----
+function heldChip(s) {
+  if (!s.held) return "";
+  return `<span class="tpill tpill-held" title="${esc(s.held.hook)} blocked this session ${s.held.count} times for the same reason since its task started">held ×${s.held.count} · ${esc(s.held.decision.replace(/^(block|deny)_/, ""))}</span>`;
+}
+
+function hooksChip(s) {
+  if (!s || (!s.holds && !s.nudges)) return "";
+  const parts = [];
+  if (s.holds) parts.push(`${s.holds} hold${s.holds === 1 ? "" : "s"}`);
+  if (s.nudges) parts.push(`${s.nudges} nudge${s.nudges === 1 ? "" : "s"}`);
+  return `<button class="sh-chip sh-chip-btn${s.held ? " over" : ""}" id="sh-hooks" title="What the hooks did to this session since its task started">${parts.join(" · ")}</button>`;
+}
+
+function classLine(c) {
+  const hook = c.hook, n = c.count, of = c.of;
+  const unit = { bash_guard: "Bash calls", stop_guard: "stops", ctx_budget: "prompts", precompact: "compactions", session_checkpoint: "starts", test_rerun: "test runs" }[hook] || "runs";
+  const verb = c.class === "hold" ? (hook === "bash_guard" ? "denied" : "blocked") : c.class === "nudge" ? "nudged" : "repeated with no change";
+  return `<li><b>${n}</b> of ${of} ${esc(unit)} ${verb} <span class="po-rpath">${esc(hook)}</span></li>`;
+}
+
+async function openHooksPanel(name) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const fn = bound("SessionHooks");
+  if (!fn) return;
+  const s = latestSessions.find((x) => x.name === name);
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal hooks-modal" role="dialog" aria-label="Hooks">
+      <h2>Hooks · ${esc(s ? displayName(s) : name)}</h2>
+      <div id="hooks-body" class="dsc-sheet-body"><div class="po-empty">Loading…</div></div>
+      <div class="modal-actions"><button class="btn-ghost" id="hooks-close">Close</button></div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#hooks-close").addEventListener("click", close);
+  const body = backdrop.querySelector("#hooks-body");
+  let p;
+  try { p = await fn(name); } catch (e) { body.innerHTML = `<div class="modal-error">${esc(String(e))}</div>`; return; }
+  const groups = (p.stats && p.stats.groups) || [];
+  const since = p.since ? `since the task started ${esc(fmtTS(p.since * 1000))}` : "over the whole session";
+  // Commands stay masked until a row is expanded: a hold's command can
+  // name a client, and this panel is often open on a shared screen.
+  body.innerHTML =
+    `<p class="po-empty">${since}</p>` +
+    `<section class="po-block"><div class="po-bhead"><h3>Holds</h3></div>` +
+    (groups.length ? `<ul class="po-list">${groups.map((g, i) => `<li class="po-repo dsc-hold" data-i="${i}"><span class="po-rlabel">${esc(g.hook)} · ${esc(g.decision)}</span>${g.count > 1 ? `<span class="po-tag${g.count >= 3 ? " po-tag-solo" : ""}">×${g.count}</span>` : ""}<span class="po-rpath">${g.count > 1 ? `${esc(fmtTS(g.first))} → ` : ""}${esc(fmtTS(g.last))}</span>${g.command ? `<button class="tact dsc-show">command</button><code class="dsc-cmd" hidden>${esc(g.command)}</code>` : ""}</li>`).join("")}</ul>` : `<div class="po-empty">Nothing held this session.</div>`) +
+    `</section>` +
+    `<section class="po-block"><div class="po-bhead"><h3>Rates</h3></div>` +
+    (p.classes.length ? `<ul class="dsc-classes">${p.classes.map(classLine).join("")}</ul>` : `<div class="po-empty">No hook has fired for this session yet.</div>`) +
+    `</section>` +
+    (p.recent.length ? `<section class="po-block"><div class="po-bhead"><h3>Recent decisions</h3></div><ul class="dsc-steps">${p.recent.slice(0, 15).map((r) => `<li class="gs-step"><span class="po-rpath">${esc(fmtTS(r.ts))}</span><span class="dsc-k">${esc(r.hook)}</span><span>${esc(r.decision)}</span>${r.agentType ? `<span class="po-tag">${esc(r.agentType)}</span>` : ""}</li>`).join("")}</ul></section>` : "");
+  for (const b of body.querySelectorAll(".dsc-show")) b.addEventListener("click", (e) => { e.stopPropagation(); const c = b.parentElement.querySelector(".dsc-cmd"); if (c) { c.hidden = !c.hidden; b.textContent = c.hidden ? "command" : "hide"; } });
+}
+
 function renderDiscipline() {
   const stage = document.getElementById("stage");
   if (!stage || stageView.kind !== "discipline") return;
   const d = disc;
   // Keep an open diff or a mid-flight error: the island re-renders on every
   // 10s poll, so only replace the DOM when something it shows changed.
-  const sig = d ? JSON.stringify([d.checkedAt, d.headline, d.action, d.staged, d.report.health, d.report.files, d.keptPaths, d.ledger.length]) : "";
+  const sig = d ? JSON.stringify([d.checkedAt, d.headline, d.action, d.staged, d.report.health, d.report.files, d.keptPaths, d.ledger.length, discTab]) : "";
   if (stage.dataset.discSig === sig && stage.querySelector("#dsc-root")) return;
   stage.dataset.discSig = sig;
   stage.replaceChildren();
@@ -1800,6 +1945,35 @@ function renderDiscipline() {
     <div class="po" id="dsc-root">
       <div class="modal-error" id="dsc-error"></div>
       <p class="dsc-headline">${esc(d.headline)}</p>
+      <div class="seg dsc-tabs" id="dsc-tabs">${["checks", "rates", "reruns"].map((t) => `<button class="seg-b${discTab === t ? " active" : ""}" data-tab="${t}">${{ checks: "Checks", rates: "Rates", reruns: "Re-runs" }[t]}</button>`).join("")}</div>
+      <div id="dsc-tab" class="dsc-tab">${discTab === "checks" ? discChecksHtml(d) : `<div class="po-empty">Loading…</div>`}</div>
+    </div>`;
+  for (const b of stage.querySelectorAll("#dsc-tabs .seg-b")) b.addEventListener("click", () => { discTab = b.dataset.tab; try { localStorage.setItem("loom.discTab", discTab); } catch { /* storage off */ } renderDiscipline(); });
+  if (discTab !== "checks") renderDiscTab();
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
+  on("dsc-recheck", () => discPoll(true));
+  on("dsc-action", () => openGateSheet(d.action));
+  on("dsc-uninstall", () => uninstallFlow());
+  wireFileRows(stage);
+}
+
+function wireFileRows(stage) {
+  for (const li of stage.querySelectorAll("li[data-file]")) {
+    const file = li.dataset.file;
+    const diffB = li.querySelector(".dsc-diff"), keepB = li.querySelector(".dsc-keep"), resetB = li.querySelector(".dsc-reset");
+    if (diffB) diffB.addEventListener("click", (e) => { e.stopPropagation(); discFileAction("diff", file); });
+    if (keepB) keepB.addEventListener("click", (e) => { e.stopPropagation(); discFileAction("keep", file); });
+    if (resetB) armAction(resetB, "reset?", () => discFileAction("reset", file));
+  }
+}
+
+// The Checks tab: issues, the doctor's table, files, history, paths.
+function discChecksHtml(d) {
+  const r = d.report;
+  const checks = discChecks(r);
+  const sev = (s) => s === "ok" ? "var(--st-running)" : s === "warn" ? "var(--over)" : "var(--st-error)";
+  const led = (d.ledger || []).slice(-6).reverse();
+  return `
       ${(r.issues || []).length ? `<div class="po-warns">${r.issues.map((i) => `<div class="po-warn dsc-issue dsc-${esc(i.severity)}"><b>${esc(i.group)}</b> ${esc(i.message)}${i.fix ? ` <span class="dsc-fix">· ${esc(i.fix)}</span>` : ""}</div>`).join("")}</div>` : ""}
       <section class="po-block">
         <div class="po-bhead"><h3>Checks</h3><span class="po-empty">${esc(fmtTS(r.checkedAt))}</span></div>
@@ -1818,18 +1992,7 @@ function renderDiscipline() {
         <div class="po-bhead"><h3>Where</h3></div>
         <div class="dsc-where">${[["config", r.layout.configDir], ["hooks", r.layout.hooksDir], ["state", r.layout.stateDir], ["logs", r.layout.logDir], ["deadline", r.layout.deadline]].map(([k, v]) => `<span class="dsc-k">${k}</span><span class="po-rpath">${esc(v || "")}</span>`).join("")}</div>
       </section>
-    </div>`;
-  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
-  on("dsc-recheck", () => discPoll(true));
-  on("dsc-action", () => openGateSheet(d.action));
-  on("dsc-uninstall", () => uninstallFlow());
-  for (const li of stage.querySelectorAll("li[data-file]")) {
-    const file = li.dataset.file;
-    const diffB = li.querySelector(".dsc-diff"), keepB = li.querySelector(".dsc-keep"), resetB = li.querySelector(".dsc-reset");
-    if (diffB) diffB.addEventListener("click", (e) => { e.stopPropagation(); discFileAction("diff", file); });
-    if (keepB) keepB.addEventListener("click", (e) => { e.stopPropagation(); discFileAction("keep", file); });
-    if (resetB) armAction(resetB, "reset?", () => discFileAction("reset", file));
-  }
+`;
 }
 
 async function discFileAction(action, file) {

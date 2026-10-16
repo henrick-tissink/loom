@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/henricktissink/loom/internal/hooklog"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
 )
@@ -46,6 +47,16 @@ type SessionDTO struct {
 	// unknown). The frontend compares it with the discipline layer's last
 	// hook flip to mark sessions that still run the previous hooks.
 	StartedAt int64 `json:"startedAt"`
+	// From the hooks' logs (hooks.go), counted since the current task file
+	// started: holds (blocks and denies), nudges, and the one hold that
+	// repeated 3+ times, if any. Verified is the stop guard's marker for
+	// the task file's current version; ChecksFailed is its last Stop
+	// verdict being a failed check with no verification since.
+	Holds        int           `json:"holds"`
+	Nudges       int           `json:"nudges"`
+	Held         *hooklog.Held `json:"held,omitempty"`
+	Verified     bool          `json:"verified"`
+	ChecksFailed bool          `json:"checksFailed"`
 }
 
 // snapshotToDTOs flattens a status.Snapshot's live rows into SessionDTOs,

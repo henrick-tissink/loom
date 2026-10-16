@@ -88,7 +88,9 @@ func run() error {
 	app := newApp(engine, tm, st, launcher, svc, time.Now)
 	app.settings = newSettingsStore(cfg.LoomDir)
 	if home, err := os.UserHomeDir(); err == nil {
-		app.disc = newDisciplineState(discipline.NewLayout(cfg.ClaudeConfigDir, home, os.Getenv("CLAUDE_STATE_DIR")), time.Now)
+		l := discipline.NewLayout(cfg.ClaudeConfigDir, home, os.Getenv("CLAUDE_STATE_DIR"))
+		app.disc = newDisciplineState(l, time.Now)
+		app.hooks = newHookState(l)
 	}
 	session.SetClaudeTheme(app.settings.get().TerminalTheme) // match Claude's theme to the terminal
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}

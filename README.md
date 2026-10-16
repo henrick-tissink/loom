@@ -78,6 +78,8 @@ The app is the frontend:
     ./loom setup            # install or upgrade the discipline layer (plan, gate, apply; asks first)
     ./loom uninstall        # remove exactly what setup installed
     ./loom discipline …     # status | diff <file> | keep <file> | reset <file> | restore <backup>
+    ./loom report hooks     # what the hooks did: runs, holds, nudges per hook, split at each hooks change (--since change | --days N, --by project, --json)
+    ./loom report tests     # test re-runs with no change in the tree, per project
 
 `setup`, `uninstall` and the `discipline` writes refuse inside a Claude Code
 session or without a terminal: only a person installs. See `docs/DISCIPLINE.md`.

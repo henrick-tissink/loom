@@ -203,18 +203,28 @@ where normalise expands `~` and `$HOME`, resolves the config dir, and
 `<path>` form are the same identity. Duplicates found at merge time are
 reported, never silently collapsed.
 
-### 3.7 `internal/hooklog` (phase 4)
+### 3.7 `internal/hooklog`
 
 Incremental reader for `state/log/decisions.jsonl` and `allows.jsonl`:
 remembers `(inode, offset)` per file, tolerates truncation (restarts at 0),
-keeps records in memory keyed by session id. Also reads the legacy location
-`hooks/enforce/*.jsonl` read-only for history. Exposes:
+reads only complete lines, drops a file's records when it vanishes. Legacy
+dirs (`AddLegacyDir`: the current `hooks/enforce` dir and the receipt's
+`migratedFrom` dir) are read once, read-only, for history. Exposes:
 
-- `BySession(sid) []Record` — decisions and allows; SubagentStop records carry
-  the parent's session id and are attributed to it.
-- `Rates(window, splitAt []ChangeMark) []HookRow` — runs, silent, blocks,
-  nudges per hook, split at change marks (ledger + `rev` field transitions).
-- `Reruns(window) []ProjectRow` — the test re-run report.
+- `Records()` / `BySession(sid)` — decisions and allows merged by time;
+  SubagentStop records carry the parent's session id and are attributed to it.
+- `Rates(recs, since, marks, now) []HookRow` — per hook: rev and one `Span`
+  per change mark with runs, silent, holds, nudges, tests, the decision
+  histogram and a daily series. A span never crosses a mark and the rates
+  are never summed across marks.
+- `InferredMarks(recs, legacyDirs, solid, within)` — the dashed marks: the
+  first record of each `rev` value, the `.py` mtimes of a legacy hooks dir
+  and the stamps in backup names, clustered within an hour and dropped when
+  a ledger mark already stands within the hour.
+- `Reruns(recs, since) []ProjectRow` — the test re-run report per project.
+- `Session(recs, since) SessionStats` — holds, nudges, re-runs, the held
+  group (same hook + decision ≥ `HeldThreshold` = 3 times) and the last stop
+  verdict; `Classes(recs, since)` gives the "N of M" lines.
 
 Privacy: the record's `command` (≤800 chars) and `cwd` are stored; the GUI
 applies the project hide rules by `cwd`, and `allows.jsonl` records (which
@@ -265,7 +275,7 @@ loom doctor [--json] [--deep] [--strict]        exit 1 on red (--strict: on ambe
 loom setup  [--plan|--dry-run] [--json] [--yes] [--with env] [--without rules,statusline,deny] [--replace <file>,...]
 loom uninstall [--plan|--dry-run] [--json] [--yes]
 loom discipline status | diff <file> | keep <file> | reset <file> | restore <backup>
-loom report hooks|tests [--since change|--days N] [--by project] [--json]      (phase 4)
+loom report hooks|tests [--since change|--days N] [--by project] [--json]
 ```
 
 `setup`, `uninstall`, `keep`, `reset`, `restore` call `RefuseIfAgent()` first:
@@ -285,8 +295,8 @@ loom's in the receipt.
   a guard fails open, a registration missing, suites failing, stale files.
   Red: lockout condition (missing fail-closed script, python3 stub). Manual
   rows and local edits never colour it.
-- **Discipline island**, tabs **Checks · Rates · Re-runs** (phase 3 built
-  Checks, plus Files and History; the tabs come with phase 4). Opened from
+- **Discipline island**, tabs **Checks · Rates · Re-runs** (Checks carries
+  the issues, the checks table, Files, History and Where). Opened from
   the shield token on the dock footer; never modal, never opened on its own.
   Headline + one button: "Not installed … [Review install]" / "Enforcing · r3
   + 1 local edit" (no button) / "r4 available · What's new" / red broken line
@@ -312,8 +322,9 @@ loom's in the receipt.
   Allows appear only as denominators.
 - **Rates tab**: window selector (default "since change"); per hook: rev,
   runs, holds %, nudges %, daily sparkline split at change marks (solid from
-  the ledger, dashed when inferred from `rev` transitions or old backup
-  timestamps). Holds and nudges are never added together.
+  the ledger, dashed when inferred from `rev` transitions, the migrated
+  hooks' edit times or old backup timestamps). Holds and nudges are never
+  added together.
 - **Re-runs tab**: per project: runs, after-change, no-change %, median gap,
   commands one click away.
 - **Modified-file row actions**: Diff, Keep, Reset (two-click, backed up),
@@ -400,14 +411,44 @@ Notes:
 
 ### Phase 4 — per-session holds, hooks panel, Rates and Re-runs tabs
 
-Scope: `internal/hooklog`; `session_dto` gains `holds` and `verified`; rail
-chip and finish-line mark; hooks panel; the two report tabs with change
-marks; `loom report`.
+Scope: `internal/hooklog`; `internal/taskfile` gains `StartedAt` (the
+`Started:` header) and `Verified` (the stop guard's `<taskfile>.verified`
+marker against the file's mtime); `SessionDTO` gains `holds`, `nudges`,
+`held`, `verified`, `checksFailed`; the rail's finish-line mark and held
+chip; the stage-header chip and hooks panel (`cmd/loom-gui/hooks.go`:
+`SessionHooks`, `HookRates`, `HookReruns`); the island's Rates and Re-runs
+tabs with change marks; `loom report hooks|tests`. Per-session numbers
+count from the task file's `Started:` time, so a new task file resets them.
 
 Done when:
-- [ ] hooklog_tests: `$ go test ./internal/hooklog/ -count=1`  # incremental read, truncation, SubagentStop attribution, split-at-change-mark never sums across a mark
-- [ ] report_cli: `$ go run ./cmd/loom report hooks --since change --json | jq -e 'map(select(.hook=="stop_guard"))[0].spans | length >= 1'`
-- [ ] observed: the Rates tab on the owner's machine shows stop_guard with a mark at the 13 Oct change and 0 SubagentStop holds after it; a session blocked 3+ times for the same running task shows the held chip; hidden projects' records do not appear.
+- [x] hooklog_tests: `$ go test ./internal/hooklog/ -count=1` # ok, 2026-10-16: incremental read, truncation, legacy read-once, held threshold, split-at-mark never sums, inferred marks, re-runs
+- [x] taskfile_tests: `$ go test ./internal/taskfile/ -count=1` # ok, 2026-10-16
+- [x] report_cli: `$ go build -o loom ./cmd/loom && ./loom report hooks --since change --json | jq -e 'map(select(.hook=="stop_guard"))[0].spans | length >= 1'` # true, 2026-10-16 (`go run` cannot be used: the check needs the built binary twice)
+- [x] report_tests_cli: `$ ./loom report tests --json | jq -e 'type=="array"'` # true, 2026-10-16
+- [x] gui_tests: `$ go test ./cmd/loom-gui/ -run 'TestHook|TestDiscipline|TestSnapshot' -count=1` # ok, 2026-10-16
+- [x] js_parses, gui_builds, all_tests (`go test ./... && go vet ./...`) # all exit 0, 2026-10-16
+- [ ] observed: the Rates tab on the owner's machine shows stop_guard with a change mark at the 13 Oct hand edit and at the r3 install; a session blocked 3+ times for the same running task shows the held chip; hidden projects' records do not appear.
+
+Notes:
+- Change marks: ledger entries are solid (`op from → to`); inferred marks
+  are dashed and come from the first record of each `rev` value, the `.py`
+  mtimes of the migrated hooks dir and backup-name stamps, clustered within
+  an hour. The receipt's `migratedFrom` already ends in `/enforce`; it is
+  used as is. On the owner's logs this puts marks at the 13 Oct hand edits
+  and the r3 setup and upgrade: stop_guard holds went from 85% of stops
+  before the hand edits to 6% after them and 2% after the r3 upgrade.
+- `checksFailed` is set when the stop guard's last logged Stop verdict for
+  the session was `block_done_check_failed`, `block_done_unticked_checks`
+  or `allow_done_checks_failed_already_nudged` (a hand-back let through
+  because the failure was already reported), the task file has not been
+  edited since that verdict, and no `.verified` marker matches the file;
+  `verified` wins once the marker does.
+- The first span of a window carries the mark that opened it (the latest
+  mark at or before the window start), so "since change" names the change.
+- `SessionDTO.holds` and the held chip are computed on every poll from the
+  reader's in-memory records; `ListSessions` refreshes the reader first, so
+  no watcher is needed.
+- The window "since change" falls back to all records when no mark exists.
 
 ### Phase 5 — context-diet advisor (report only)
 

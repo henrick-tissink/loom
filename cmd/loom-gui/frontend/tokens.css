@@ -657,3 +657,41 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .disc-sheet { width: min(720px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
 .dsc-sheet-body { overflow-y: auto; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
 #dsc-patch { white-space: pre; overflow: auto; max-height: 320px; }
+
+/* hooks: finish-line marks, held chip, hooks panel, rates and re-runs tabs */
+.tmark { font-weight: 800; }
+.tmark.ok { color: var(--st-running); }
+.tmark.bad { color: var(--st-error); }
+.tpill-bad { color: var(--st-error); background: rgba(232, 137, 122, 0.14); }
+.tpill-held { color: var(--over); background: var(--over-bg); }
+.sh-chip-btn { cursor: pointer; border: 0; font: inherit; font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; }
+.sh-chip-btn:hover { color: var(--text); }
+.hooks-modal { width: min(720px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
+.dsc-classes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text); }
+.dsc-classes b { font-variant-numeric: tabular-nums; }
+.dsc-cmd, .dsc-cmdlist code { display: block; flex-basis: 100%; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); white-space: pre-wrap; word-break: break-all; margin-top: 4px; }
+.dsc-hold, .dsc-rerun { flex-wrap: wrap; }
+.dsc-tabs { margin: 2px 0 4px; align-self: flex-start; }
+.dsc-tab { display: flex; flex-direction: column; gap: 14px; }
+.dsc-winbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.dsc-winbar .seg { flex-shrink: 0; }
+.dsc-hook { gap: 6px; }
+.dsc-span { display: flex; flex-direction: column; gap: 3px; padding: 6px 0 6px 10px; border-left: 2px solid var(--accent); }
+.dsc-span.inferred { border-left-style: dashed; border-left-color: var(--text-faint); }
+.dsc-span-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.dsc-mark { font-size: 11px; font-weight: 700; color: var(--accent-ink); }
+.dsc-mark.inferred { color: var(--text-dim); }
+.dsc-mark.none { color: var(--text-faint); font-weight: 500; }
+.dsc-span-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.dsc-num { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.dsc-num b { color: var(--text); font-weight: 700; }
+.dsc-num small { color: var(--text-faint); }
+.dsc-num.hold b { color: var(--st-error); }
+.dsc-num.nudge b { color: var(--over); }
+.dsc-top { font-size: 11px; }
+.spark { display: block; flex-shrink: 0; }
+.sp-run { fill: var(--sel); }
+.sp-hold { fill: var(--st-error); }
+.sp-nudge { fill: var(--over); }
+.dsc-rerun .dsc-num { flex-shrink: 0; }
+.dsc-rerun .po-rlabel { flex: 1; min-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

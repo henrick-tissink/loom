@@ -1,6 +1,7 @@
 package taskfile
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -122,5 +123,52 @@ func TestCacheReparsesOnChangeOnly(t *testing.T) {
 	}
 	if _, ok := c.Checkpoint("nope"); ok {
 		t.Fatal("missing checkpoint must read as absent")
+	}
+}
+
+func TestStartedAtAndVerifiedMarker(t *testing.T) {
+	tk, _ := ParseTask("Session: s\nStarted: 2026-10-16 20:49\nStatus: open\n\n## Outcome\nx\n")
+	want := time.Date(2026, 10, 16, 20, 49, 0, 0, time.Local).Unix()
+	if tk.StartedAt != want {
+		t.Fatalf("started %d, want %d", tk.StartedAt, want)
+	}
+	if tk, _ := ParseTask("Started: yesterday\n\n## Outcome\nx\n"); tk.StartedAt != 0 {
+		t.Fatalf("unparsable start must be 0, got %d", tk.StartedAt)
+	}
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tasks", "sid.md")
+	if err := os.WriteFile(p, []byte(sample), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCache(dir)
+	if tk, _ := c.Task("sid"); tk.Verified {
+		t.Fatal("no marker: must not be verified")
+	}
+	fi, _ := os.Stat(p)
+	mtime := float64(fi.ModTime().UnixNano()) / 1e9
+	// The guard writes repr(st_mtime) of the version it checked.
+	if err := os.WriteFile(p+".verified", []byte(fmt.Sprintf("%.6f\n", mtime)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if tk, _ := c.Task("sid"); !tk.Verified {
+		t.Fatal("marker at the file's mtime: must be verified, even though the task file itself is cached")
+	}
+	// A later edit of the task file outdates the marker.
+	later := fi.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(p, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if tk, _ := c.Task("sid"); tk.Verified {
+		t.Fatal("edited after the marker: must not be verified")
+	}
+	if err := os.WriteFile(p+".verified", []byte("junk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if tk, _ := c.Task("sid"); tk.Verified {
+		t.Fatal("junk marker must read as unverified")
 	}
 }

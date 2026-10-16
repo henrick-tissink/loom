@@ -13,8 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Task is the finish line a session pinned: its Status header, its Done-when
@@ -24,6 +26,18 @@ type Task struct {
 	Done    int    // ticked Done-when checks
 	Total   int    // all Done-when checks
 	Outcome string // first paragraph of ## Outcome, whitespace-folded
+	// StartedAt is the Started: header as unix seconds (0 when absent or
+	// unparsable). A new task file in the same session has a new start,
+	// which is what "the current task file version" means to the hooks
+	// panel and the held chip.
+	StartedAt int64
+	// Modified is the file's mtime as unix seconds: a verdict the hooks
+	// logged before it was about an older version of the file.
+	Modified int64
+	// Verified is true when the stop guard's marker beside the file
+	// (<file>.verified) is at least as new as the file: it ran the `$`
+	// checks on this version and they passed. Set by Cache.Task only.
+	Verified bool
 }
 
 // Checkpoint is a hand-over note: when it was written (file mtime) and its
@@ -59,8 +73,13 @@ func ParseTask(text string) (t Task, ok bool) {
 		if i >= 12 {
 			break
 		}
-		if m := headRe.FindStringSubmatch(line); m != nil && m[1] == "Status" {
-			t.Status = strings.ToLower(strings.TrimSpace(m[2]))
+		if m := headRe.FindStringSubmatch(line); m != nil {
+			switch m[1] {
+			case "Status":
+				t.Status = strings.ToLower(strings.TrimSpace(m[2]))
+			case "Started":
+				t.StartedAt = parseStarted(strings.TrimSpace(m[2]))
+			}
 		}
 	}
 	sections := map[string][]string{}
@@ -95,6 +114,17 @@ func ParseTask(text string) (t Task, ok bool) {
 		t.Status = "open" // what the hooks assume for an unlabelled file
 	}
 	return t, true
+}
+
+// parseStarted reads the hooks' "2006-01-02 15:04" (local) header, or the
+// RFC 3339 form; 0 for anything else.
+func parseStarted(s string) int64 {
+	for _, layout := range []string{"2006-01-02 15:04", "2006-01-02 15:04:05", time.RFC3339} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t.Unix()
+		}
+	}
+	return 0
 }
 
 // firstParagraph folds the first run of non-blank lines into one line,
@@ -167,9 +197,38 @@ func (c *Cache) Task(sid string) (Task, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return read(c.tf, sid, filepath.Join(c.dir, "tasks", sid+".md"), func(b []byte, _ os.FileInfo) (Task, bool) {
-		return ParseTask(string(b))
+	path := filepath.Join(c.dir, "tasks", sid+".md")
+	t, ok := read(c.tf, sid, path, func(b []byte, fi os.FileInfo) (Task, bool) {
+		t, ok := ParseTask(string(b))
+		t.Modified = fi.ModTime().Unix()
+		return t, ok
 	})
+	if ok {
+		// The marker lands after the file's last edit without touching the
+		// file, so it is checked on every call rather than cached with it.
+		t.Verified = verified(path)
+	}
+	return t, ok
+}
+
+// verified reports whether <path>.verified holds an mtime (the hooks write
+// repr(st_mtime)) at least as new as the file itself.
+func verified(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	b, err := os.ReadFile(path + ".verified")
+	if err != nil {
+		return false
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64)
+	if err != nil {
+		return false
+	}
+	// Python's st_mtime is a float with sub-second precision; allow for
+	// the rounding on either side.
+	return v+1e-3 >= float64(fi.ModTime().UnixNano())/1e9
 }
 
 // Checkpoint returns the session's model-written checkpoint, if any. The

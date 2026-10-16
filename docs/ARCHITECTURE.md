@@ -109,7 +109,8 @@ frontend.
 | `session` | Launch recipe + the launch/resume sequence | Owns tmux naming, argv construction, the ready/trust gate, seed delivery, multi-repo `--add-dir`. |
 | `transcript` | Locate + interpret Claude's JSONL | Path encoding, incremental `Reader`, turn-boundary `Classifier`. |
 | `ccsessions` | Read Claude's own session registry | The only way to learn a pane's *current* session id after `/clear` or an in-pane resume. |
-| `taskfile` | Read the hooks' task file and checkpoint | Finish line (status, Done-when ticks, outcome) and hand-over age per session; stat-cached per poll. |
+| `taskfile` | Read the hooks' task file and checkpoint | Finish line (status, Done-when ticks, outcome, `Started:` time, the stop guard's `.verified` marker) and hand-over age per session; stat-cached per poll. |
+| `hooklog` | Read the hooks' decision and allow logs | Incremental `(inode, offset)` reader with truncation restart; legacy dirs read once. Per session: holds, nudges, the held group, the last stop verdict. Per hook: rates split at change marks (ledger, or inferred from `rev` transitions and old edit times), never summed across a mark. Test re-runs per project. |
 
 **External sessions.** Every live registry entry that is not in a loom pane (a
 `claude` started in some terminal) is shown as an `ext-<id>` row: status from
@@ -485,7 +486,10 @@ search, the diff panel, preferences, the ⌘K palette, and the Agent
 Discipline island behind the shield token on the dock footer (`discipline.go`:
 the doctor's report cached by an mtime signature, the gate sheet that
 stages, runs the gate and commits only on a click after PASS, Diff / Keep /
-Reset for local edits, uninstall from the receipt; see `docs/DISCIPLINE.md`).
+Reset for local edits, uninstall from the receipt; see `docs/DISCIPLINE.md`; `hooks.go`:
+the per-session holds and held chip on the rail, the ✓/✗ on the finish-line
+pill, the hooks panel, and the island's Rates and Re-runs tabs over
+`internal/hooklog`).
 
 Native touches, each with a real reason:
 
