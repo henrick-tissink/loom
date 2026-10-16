@@ -531,6 +531,14 @@ func (s *Store) migrate() error {
 			root       TEXT PRIMARY KEY,
 			removed_at INTEGER NOT NULL
 		)`,
+		// v27: the MCP servers each indexed transcript file called, as a JSON
+		// object {server: calls}, for the context-diet report (docs/
+		// DISCIPLINE.md phase 5). Keyed by file, like the fingerprint, so a
+		// re-index of one file replaces exactly its own counts. NULL means
+		// the file was indexed before this column existed and has not been
+		// scanned yet; the indexer backfills a bounded batch per sweep.
+		// Own slot: ALTER has no IF NOT EXISTS.
+		`ALTER TABLE indexed_files ADD COLUMN mcp TEXT`,
 	}
 	for i := v; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {

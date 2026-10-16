@@ -9,6 +9,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"strings"
 )
 
@@ -27,6 +28,16 @@ type Transcript struct {
 type IndexedFile struct {
 	Path, SessionID                    string
 	Size, Mtime, FirstRowid, LastRowid int64
+	// MCP is the JSON object {server: calls} of mcp__ tool calls in this
+	// file ("{}" when none). Empty means not yet scanned (NULL in the DB).
+	MCP string
+}
+
+// MCPUsage is one session's MCP calls, summed over its indexed files.
+type MCPUsage struct {
+	SessionID, ProjectDir, Cwd string
+	LastTS                     int64
+	Servers                    map[string]int
 }
 
 // Doc is one row of the `messages_fts` table, as read back out (for the
@@ -118,7 +129,7 @@ func (s *Store) ListTranscripts() ([]Transcript, error) {
 // ListIndexedFiles loads the whole fingerprint table keyed by path: one
 // query per sweep instead of one per file (6,700 files on the live machine).
 func (s *Store) ListIndexedFiles() (map[string]IndexedFile, error) {
-	rows, err := s.db.Query("SELECT path, session_id, size, mtime, first_rowid, last_rowid FROM indexed_files")
+	rows, err := s.db.Query("SELECT path, session_id, size, mtime, first_rowid, last_rowid, mcp FROM indexed_files")
 	if err != nil {
 		return nil, err
 	}
@@ -126,9 +137,11 @@ func (s *Store) ListIndexedFiles() (map[string]IndexedFile, error) {
 	out := map[string]IndexedFile{}
 	for rows.Next() {
 		var f IndexedFile
-		if err := rows.Scan(&f.Path, &f.SessionID, &f.Size, &f.Mtime, &f.FirstRowid, &f.LastRowid); err != nil {
+		var mcp sql.NullString
+		if err := rows.Scan(&f.Path, &f.SessionID, &f.Size, &f.Mtime, &f.FirstRowid, &f.LastRowid, &mcp); err != nil {
 			return nil, err
 		}
+		f.MCP = mcp.String
 		out[f.Path] = f
 	}
 	return out, rows.Err()
@@ -164,14 +177,16 @@ func (s *Store) GetTranscripts(ids []string) (map[string]Transcript, error) {
 
 func (s *Store) GetIndexedFile(path string) (IndexedFile, bool, error) {
 	f := IndexedFile{Path: path}
-	err := s.db.QueryRow("SELECT session_id, size, mtime, first_rowid, last_rowid FROM indexed_files WHERE path=?", path).
-		Scan(&f.SessionID, &f.Size, &f.Mtime, &f.FirstRowid, &f.LastRowid)
+	var mcp sql.NullString
+	err := s.db.QueryRow("SELECT session_id, size, mtime, first_rowid, last_rowid, mcp FROM indexed_files WHERE path=?", path).
+		Scan(&f.SessionID, &f.Size, &f.Mtime, &f.FirstRowid, &f.LastRowid, &mcp)
 	if err == sql.ErrNoRows {
 		return IndexedFile{}, false, nil
 	}
 	if err != nil {
 		return IndexedFile{}, false, err
 	}
+	f.MCP = mcp.String
 	return f, true, nil
 }
 
@@ -221,16 +236,103 @@ func (s *Store) ReplaceFileDocs(f IndexedFile, docs []Doc) (err error) {
 		lastRowid = id
 	}
 
-	_, err = tx.Exec(`INSERT INTO indexed_files (path, session_id, size, mtime, first_rowid, last_rowid)
-		VALUES (?,?,?,?,?,?)
+	_, err = tx.Exec(`INSERT INTO indexed_files (path, session_id, size, mtime, first_rowid, last_rowid, mcp)
+		VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(path) DO UPDATE SET
 			session_id=excluded.session_id, size=excluded.size, mtime=excluded.mtime,
-			first_rowid=excluded.first_rowid, last_rowid=excluded.last_rowid`,
-		f.Path, f.SessionID, f.Size, f.Mtime, firstRowid, lastRowid)
+			first_rowid=excluded.first_rowid, last_rowid=excluded.last_rowid, mcp=excluded.mcp`,
+		f.Path, f.SessionID, f.Size, f.Mtime, firstRowid, lastRowid, nullIfEmpty(f.MCP))
 	if err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// unscannedMCP is the predicate for files indexed before the mcp column
+// existed. The synthetic meta docs are not files and are never scanned.
+const unscannedMCP = "mcp IS NULL AND path NOT LIKE 'loom://%'"
+
+// UnscannedMCP lists up to limit indexed files whose MCP calls have not
+// been scanned yet (oldest-indexed first, by rowid).
+func (s *Store) UnscannedMCP(limit int) ([]IndexedFile, error) {
+	rows, err := s.db.Query("SELECT path, session_id, size, mtime FROM indexed_files WHERE "+unscannedMCP+" ORDER BY rowid LIMIT ?", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IndexedFile
+	for rows.Next() {
+		var f IndexedFile
+		if err := rows.Scan(&f.Path, &f.SessionID, &f.Size, &f.Mtime); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// UnscannedMCPCount is how many indexed files still carry no MCP data.
+func (s *Store) UnscannedMCPCount() (int64, error) {
+	var n int64
+	err := s.db.QueryRow("SELECT COUNT(*) FROM indexed_files WHERE " + unscannedMCP).Scan(&n)
+	return n, err
+}
+
+// SetFileMCP records a file's MCP calls without touching its docs.
+func (s *Store) SetFileMCP(path, mcp string) error {
+	_, err := s.db.Exec("UPDATE indexed_files SET mcp=? WHERE path=?", mcp, path)
+	return err
+}
+
+// MCPUsage sums each session's MCP calls over its scanned files and joins
+// the session's cwd and last activity. Sessions with no calls are absent.
+func (s *Store) MCPUsage() ([]MCPUsage, error) {
+	rows, err := s.db.Query(`SELECT f.session_id, f.mcp, t.project_dir, t.cwd, t.last_ts
+		FROM indexed_files f JOIN transcripts t ON t.session_id = f.session_id
+		WHERE f.mcp IS NOT NULL ORDER BY f.session_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MCPUsage
+	by := map[string]int{}
+	for rows.Next() {
+		var sid, mcp, pd, cwd string
+		var last int64
+		if err := rows.Scan(&sid, &mcp, &pd, &cwd, &last); err != nil {
+			return nil, err
+		}
+		var raw map[string]any
+		if json.Unmarshal([]byte(mcp), &raw) != nil {
+			continue
+		}
+		calls := map[string]int{}
+		for k, v := range raw {
+			if n, ok := v.(float64); ok && !strings.HasPrefix(k, "@") && n > 0 {
+				calls[k] = int(n)
+			}
+		}
+		if len(calls) == 0 {
+			continue
+		}
+		i, ok := by[sid]
+		if !ok {
+			i = len(out)
+			by[sid] = i
+			out = append(out, MCPUsage{SessionID: sid, ProjectDir: pd, Cwd: cwd, LastTS: last, Servers: map[string]int{}})
+		}
+		for k, v := range calls {
+			out[i].Servers[k] += v
+		}
+	}
+	return out, rows.Err()
 }
 
 // SessionDocs returns all indexed docs for a session (Plan B summarizer

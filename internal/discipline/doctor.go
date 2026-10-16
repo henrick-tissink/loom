@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/henricktissink/loom/internal/diet"
 	"io"
 	"io/fs"
 	"os"
@@ -70,6 +71,9 @@ type Report struct {
 	Firing        FiringReport   `json:"firing"`
 	Suites        *SuitesReport  `json:"suites,omitempty"`
 	Layout        LayoutReport   `json:"layout"`
+	// Diet is the context-diet group (phase 5): filled by the caller, which
+	// has the transcript index and the project list the doctor does not.
+	Diet *diet.Report `json:"diet,omitempty"`
 }
 
 type RevReport struct {

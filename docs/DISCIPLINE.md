@@ -231,6 +231,29 @@ applies the project hide rules by `cwd`, and `allows.jsonl` records (which
 have no `cwd`) are hidden whenever any project is hidden. Commands are masked
 in the GUI until the row is expanded.
 
+### 3.8 `internal/diet` (phase 5)
+
+The context-diet report, pure and read-only: `Build(ctx, Inputs)` reads
+`~/.claude.json` (user-scope `mcpServers`, per-directory `disabledMcpServers`
+/ `disabledMcpjsonServers` / project `mcpServers`, `pluginUsage`),
+`settings.json` (`enabledPlugins`), `plugins/installed_plugins.json` and the
+plugin cache (skills, commands, agents, hooks, `.mcp.json`), and asks
+`claude plugin details` for each enabled plugin's always-on token estimate
+(concurrently, 15 s each; `Inputs.Run` nil skips it). The usage grid comes
+from loom's transcript index: `internal/memory` records the
+`mcp__<server>__` calls per indexed file (`indexed_files.mcp`, migration
+v27; files indexed before the column existed are backfilled by a scan
+bounded to 20 s per sweep). `internal/diet/fromstore` is the only glue to
+the store: visible projects with their repos, an attribution that respects
+hide and solo, the usage rows and the unscanned count. `discipline.Report`
+carries the result as `diet`; the CLI and the GUI fill it, the doctor
+itself does not know the store.
+
+Rows carry commands (`claude plugin disable|enable <key> -s user`,
+`claude mcp remove <name> -s user` only once the index is fully scanned)
+and loom never runs one. A repo whose `.claude/settings.local.json` is
+git-tracked is flagged on its project row.
+
 ---
 
 ## 4. Doctor checks (read-only)
@@ -248,7 +271,7 @@ in the GUI until the row is expanded.
 | state | state dirs exist and are writable; `CLAUDE_STATE_DIR`/`CLAUDE_CONFIG_DIR` agree between loom and hooks | red | create dirs: yes |
 | rules | `CLAUDE.md` has the import line exactly once; the rules file hash is current; no second inline copy of the rules text | amber | import line: gate; inline text: diff + consent only |
 | firing | each hook has at least one log record since the last session that should have triggered it (payload-shape drift detector) | amber | no |
-| diet (report) | plugins enabled at user scope; MCP servers per project (from loom's transcript index); connectors disabled per project | ○ | no |
+| diet (report) | plugins enabled at user scope with what each loads, its always-on token estimate and its usage count; MCP servers and connectors called per project (from loom's transcript index); servers and connectors disabled per project; a git-tracked `settings.local.json` | ○ | no (copyable commands) |
 
 Never auto-fixed: shell profiles; installing python/jq/CLT; modified files;
 user-tuned values; another tool's statusLine; other tools' hooks; plugins,
@@ -327,6 +350,13 @@ loom's in the receipt.
   added together.
 - **Re-runs tab**: per project: runs, after-change, no-change %, median gap,
   commands one click away.
+- **Context diet** (Checks tab, below History): one row per user-scope
+  plugin (enabled first: what it loads, `~N tok` always-on, used N× and
+  when, a copy button for its enable/disable command); the per-project
+  grid of MCP calls with the servers and connectors switched off for that
+  project and a `settings.local.json is git-tracked` tag; a row with a
+  removal command for each user-scope server no visible project ever
+  called, shown only once every indexed file has been scanned.
 - **Modified-file row actions**: Diff, Keep, Reset (two-click, backed up),
   Adopt into loom (only when a repo checkout is configured in `~/.loom/settings.json`;
   copies the file and any new suites into `internal/discipline/bundle/`, runs
@@ -455,11 +485,34 @@ Notes:
 Scope: doctor's diet group filled from `~/.claude.json` (read-only), the
 enabled-plugins list, and loom's transcript index (which `mcp__` servers each
 project actually calls); rows with copyable `claude plugin …` /
-`settings.local.json` commands and a warning when that file is git-tracked.
+`claude mcp …` commands and a warning when `settings.local.json` is
+git-tracked. Built as `internal/diet` (§3.8) plus the index's MCP column.
 
 Done when:
-- [ ] diet_rows: `$ go run ./cmd/loom doctor --json | jq -e '.diet.pluginsUserScope | length >= 0'`
-- [ ] observed: the owner's machine lists 6 user-scope plugins and the per-project MCP usage grid.
+- [x] diet_tests: `$ go test ./internal/diet/ -count=1` # ok, 2026-10-16
+- [x] index_tests: `$ go test ./internal/memory/ ./internal/store/ -count=1` # ok, 2026-10-16: calls recorded on index, backfilled on the next sweep, summed per session
+- [x] diet_rows: `$ go build -o loom ./cmd/loom && ./loom doctor --json | jq -e '(.diet.pluginsUserScope | length >= 1) and ([.diet.pluginsUserScope[] | select(.enabled)] | length == 6) and (.diet.projects | type == "array")'` # true, 2026-10-16 (the owner's 6 enabled of 18 installed)
+- [x] js_parses, gui_builds, all_tests (`go test ./... && go vet ./...`) # all exit 0, 2026-10-16
+- [ ] observed: the owner's machine lists the 6 enabled user-scope plugins with usage and the per-project MCP usage grid in the Checks tab.
+
+Notes:
+- `go run` cannot be the check: `loom doctor` opens loom.db, and the
+  built binary is what the GUI and the check both read.
+- The removal command for an unused user-scope server is withheld until
+  the index has scanned every file: an archive half-scanned after the
+  upgrade would call every server unused.
+- Plugin usage counts are Claude Code's own (`pluginUsage`); a hooks-only
+  plugin counts every hook run, so a large number is not a sign of value.
+- The mcp value carries the fingerprint it was computed for (`"@fp":
+  "size:mtime"`): a loom binary without the column re-upserts a grown
+  file's size and mtime and leaves the counts, and the next sweep would
+  otherwise never rescan it. A backfilled main file skips its sidechain
+  lines, as the extractor does, so a subagent's calls count once.
+- The GUI caches the diet on its own stamp (settings.json and the plugin
+  registry) with a 10-minute floor: `~/.claude.json`, which it reads,
+  changes on nearly every hook run and cannot drive the doctor's cache.
+- Not built: measuring the per-project cost of connectors (nothing on the
+  machine records it) and any automatic change (D8).
 
 Later (rev 4 hooks, separate decision): absolute python3 path in
 registrations; hooks honour `CLAUDE_CONFIG_DIR` everywhere; monthly log files

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -363,5 +364,61 @@ func TestRunSweepsImmediatelyThenOnTicker(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after ctx cancellation")
+	}
+}
+
+func TestSweepRecordsAndBackfillsMCP(t *testing.T) {
+	ccd, main1, _ := buildArchive(t)
+	line := `{"type":"assistant","timestamp":"2026-10-16T10:00:00Z","cwd":"/w/loom1","message":{"role":"assistant","content":[{"type":"tool_use","id":"m1","name":"mcp__lava__lava_emit","input":{}}]}}` + "\n"
+	f, err := os.OpenFile(main1, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(line)
+	f.Close()
+	st := openStore(t)
+	ix := NewIndexer(st, ccd)
+	if err := ix.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, _ := st.GetIndexedFile(main1)
+	fp := fmt.Sprintf(`{"@fp":"%d:%d","lava":1}`, got.Size, got.Mtime)
+	if !ok || got.MCP != fp {
+		t.Fatalf("indexed with calls: %+v", got)
+	}
+	// A file indexed before the column existed carries NULL; the next sweep
+	// backfills it without re-indexing the docs.
+	got.MCP = ""
+	if err := st.ReplaceFileDocs(got, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := st.UnscannedMCPCount(); n != 1 {
+		t.Fatalf("unscanned %d", n)
+	}
+	if err := ix.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := st.UnscannedMCPCount(); n != 0 {
+		t.Fatalf("still unscanned %d", n)
+	}
+	got, _, _ = st.GetIndexedFile(main1)
+	if got.MCP != fp {
+		t.Fatalf("backfilled: %+v", got)
+	}
+	// Another binary re-upserted the fingerprint and left stale counts:
+	// the next sweep notices the fingerprint inside the value and rescans.
+	got.MCP = `{"@fp":"1:1","lava":7}`
+	if err := st.ReplaceFileDocs(got, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ = st.GetIndexedFile(main1); got.MCP != fp {
+		t.Fatalf("stale counts rescanned: %+v", got)
+	}
+	usage, _ := st.MCPUsage()
+	if len(usage) != 1 || usage[0].Cwd != "/w/loom1" || usage[0].Servers["lava"] != 1 {
+		t.Fatalf("usage: %+v", usage)
 	}
 }

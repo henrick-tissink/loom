@@ -884,8 +884,8 @@ func TestUserVersionIsPinned(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 26 {
-		t.Fatalf("user_version = %d, want 26", v)
+	if v != 27 {
+		t.Fatalf("user_version = %d, want 27", v)
 	}
 	for _, obj := range []string{"orchestrators", "delegation_runs", "delegation_tasks",
 		"delegation_artifacts", "delegation_amendments"} {
@@ -934,7 +934,7 @@ func TestMigrationHeadIsPinned(t *testing.T) {
 	// replay from every stale version by TestMigrationsReplayFromEveryStaleVersion.
 	// v26 (remove project from the dock) added ignored_roots — CREATE TABLE IF
 	// NOT EXISTS, so the same replay test covers it.
-	const wantHead = 26
+	const wantHead = 27
 
 	s := open(t)
 	var v int

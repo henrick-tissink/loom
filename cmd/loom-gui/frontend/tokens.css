@@ -695,3 +695,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .sp-nudge { fill: var(--over); }
 .dsc-rerun .dsc-num { flex-shrink: 0; }
 .dsc-rerun .po-rlabel { flex: 1; min-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* context diet */
+.dsc-plugin.off .po-rlabel { color: var(--text-dim); }
+.dsc-plugin { flex-wrap: wrap; }
+.dsc-gridwrap { overflow-x: auto; }
+.dsc-grid { border-collapse: collapse; font-size: 12px; white-space: nowrap; }
+.dsc-grid th { text-align: left; font-weight: 600; color: var(--text-dim); padding: 4px 10px 4px 0; border-bottom: 1px solid var(--edge); max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+.dsc-grid td { padding: 4px 10px 4px 0; border-bottom: 1px solid var(--edge); font-variant-numeric: tabular-nums; }
+.dsc-grid td.dsc-cell { text-align: right; color: var(--text); }
+.dsc-grid td.dsc-cell.zero { color: var(--text-faint); }
+

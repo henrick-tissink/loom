@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/henricktissink/loom/internal/diet"
 	"github.com/henricktissink/loom/internal/discipline"
 )
 
@@ -41,10 +42,47 @@ type disciplineState struct {
 	staged *discipline.Staged
 
 	skipGate bool // tests only: Stage without running the gate
+
+	// diet builds the context-diet group for a report; nil leaves it out.
+	// Set by main from the store and the resolver, which the doctor
+	// itself does not know. It shells out (`claude plugin details` per
+	// enabled plugin), so it is cached on its own: ~/.claude.json, which
+	// it reads, changes on nearly every hook run and cannot be its stamp.
+	diet      func(context.Context) *diet.Report
+	dietRep   *diet.Report
+	dietAt    time.Time
+	dietStamp string
+	dietFloor time.Duration
+}
+
+// dietSignature is the mtimes of the files whose change means the plugin
+// list changed: the registry and settings.json (enabledPlugins).
+func (d *disciplineState) dietSignature() string {
+	var b strings.Builder
+	for _, p := range []string{d.layout.SettingsPath(), filepath.Join(d.layout.ConfigDir, "plugins", "installed_plugins.json")} {
+		if fi, err := os.Stat(p); err == nil {
+			fmt.Fprintf(&b, "%s=%d;", p, fi.ModTime().UnixNano())
+		}
+	}
+	return b.String()
+}
+
+// dietCached returns the diet group, rebuilt when the plugin files changed,
+// the floor passed, or force is set. Called with d.mu held.
+func (d *disciplineState) dietCached(force bool) *diet.Report {
+	if d.diet == nil {
+		return nil
+	}
+	sig := d.dietSignature()
+	if !force && d.dietRep != nil && sig == d.dietStamp && d.now().Sub(d.dietAt) < d.dietFloor {
+		return d.dietRep
+	}
+	d.dietRep, d.dietStamp, d.dietAt = d.diet(context.Background()), sig, d.now()
+	return d.dietRep
 }
 
 func newDisciplineState(l discipline.Layout, now func() time.Time) *disciplineState {
-	return &disciplineState{layout: l, env: discipline.DefaultEnv(), now: now, floor: 60 * time.Second}
+	return &disciplineState{layout: l, env: discipline.DefaultEnv(), now: now, floor: 60 * time.Second, dietFloor: 10 * time.Minute}
 }
 
 // DisciplineDTO is what the island and the dock dot render.
@@ -184,6 +222,7 @@ func (d *disciplineState) check(force bool) discipline.Report {
 		return *d.report
 	}
 	rep := discipline.Doctor(context.Background(), d.layout, d.env, discipline.Options{})
+	rep.Diet = d.dietCached(force)
 	d.report, d.stamp, d.checkedAt = &rep, sig, d.now()
 	return rep
 }

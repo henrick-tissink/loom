@@ -74,7 +74,7 @@ The app is the frontend:
     ./loom attach <name>    # hand this terminal to the session's tmux pane
     ./loom kill <name>
     ./loom search <query>   # full-text search over indexed session history
-    ./loom doctor           # how this machine's Agent Discipline install compares to the bundle loom carries
+    ./loom doctor           # how this machine's Agent Discipline install compares to the bundle loom carries, plus the context diet: plugins, MCP servers per project, commands to copy
     ./loom setup            # install or upgrade the discipline layer (plan, gate, apply; asks first)
     ./loom uninstall        # remove exactly what setup installed
     ./loom discipline …     # status | diff <file> | keep <file> | reset <file> | restore <backup>

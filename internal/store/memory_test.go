@@ -325,3 +325,45 @@ func TestUpsertPreservesLLMSummary(t *testing.T) {
 		t.Errorf("SummaryAt was overwritten: got %d want 999", got.SummaryAt)
 	}
 }
+
+func TestIndexedFileMCPAndUsage(t *testing.T) {
+	s := open(t)
+	// A file indexed before the column existed: MCP "" is stored as NULL.
+	if err := s.ReplaceFileDocs(IndexedFile{Path: "/p/old.jsonl", SessionID: "s1", Size: 1, Mtime: 1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceFileDocs(IndexedFile{Path: "/p/new.jsonl", SessionID: "s1", Size: 2, Mtime: 2, MCP: `{"@fp":"2:2","lava":2}`}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceFileDocs(IndexedFile{Path: "loom://meta/s1", SessionID: "s1", Size: 0, Mtime: 0}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := s.UnscannedMCPCount(); n != 1 {
+		t.Fatalf("unscanned %d", n)
+	}
+	un, _ := s.UnscannedMCP(10)
+	if len(un) != 1 || un[0].Path != "/p/old.jsonl" {
+		t.Fatalf("%+v", un)
+	}
+	f, ok, _ := s.GetIndexedFile("/p/new.jsonl")
+	if !ok || f.MCP != `{"@fp":"2:2","lava":2}` {
+		t.Fatalf("%+v", f)
+	}
+	if err := s.SetFileMCP("/p/old.jsonl", `{"@fp":"1:1","lava":1,"mario":3}`); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := s.UnscannedMCPCount(); n != 0 {
+		t.Fatalf("unscanned after set %d", n)
+	}
+	if err := s.UpsertTranscript(Transcript{SessionID: "s1", ProjectDir: "-w-a", Cwd: "/w/a", LastTS: 50}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.MCPUsage()
+	if err != nil || len(u) != 1 || u[0].Cwd != "/w/a" || u[0].LastTS != 50 || u[0].Servers["lava"] != 3 || u[0].Servers["mario"] != 3 {
+		t.Fatalf("%v %+v", err, u)
+	}
+	all, _ := s.ListIndexedFiles()
+	if all["/p/old.jsonl"].MCP == "" || all["loom://meta/s1"].MCP != "" {
+		t.Fatalf("%+v", all)
+	}
+}

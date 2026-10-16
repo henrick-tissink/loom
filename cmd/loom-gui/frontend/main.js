@@ -1958,6 +1958,7 @@ function renderDiscipline() {
 }
 
 function wireFileRows(stage) {
+  for (const b of stage.querySelectorAll(".dsc-copy")) b.addEventListener("click", (e) => { e.stopPropagation(); copyCommand(b); });
   for (const li of stage.querySelectorAll("li[data-file]")) {
     const file = li.dataset.file;
     const diffB = li.querySelector(".dsc-diff"), keepB = li.querySelector(".dsc-keep"), resetB = li.querySelector(".dsc-reset");
@@ -1988,11 +1989,60 @@ function discChecksHtml(d) {
         <div class="po-bhead"><h3>History</h3>${d.receipt ? `<span class="po-empty">installed ${esc(fmtTS(d.receipt.installedAt))}${d.receipt.loomBuild ? " by " + esc(d.receipt.loomBuild) : ""}</span>` : ""}</div>
         ${led.length ? `<ul class="po-list">${led.map((e) => `<li class="po-repo"><span class="po-rlabel">${esc(e.op)}${e.fromRev || e.toRev ? ` ${esc(e.fromRev || "—")} → ${esc(e.toRev || "—")}` : ""}</span><span class="po-rpath">${esc(fmtTS(e.ts))}${e.gate ? ` · gate ${e.gate.suitesPassed ? "pass" : "fail"}${e.gate.newAllows || e.gate.newDenies ? ` · ${e.gate.newAllows} new allows, ${e.gate.newDenies} new denies` : ""}` : ""}${e.note ? " · " + esc(e.note) : ""}</span>${e.backup ? `<span class="po-tag" title="${esc(e.backup)}">backup</span>` : ""}</li>`).join("")}</ul>` : `<div class="po-empty">Loom has not installed or changed anything here yet.</div>`}
       </section>
+      ${dietHtml(r.diet)}
       <section class="po-block">
         <div class="po-bhead"><h3>Where</h3></div>
         <div class="dsc-where">${[["config", r.layout.configDir], ["hooks", r.layout.hooksDir], ["state", r.layout.stateDir], ["logs", r.layout.logDir], ["deadline", r.layout.deadline]].map(([k, v]) => `<span class="dsc-k">${k}</span><span class="po-rpath">${esc(v || "")}</span>`).join("")}</div>
       </section>
 `;
+}
+
+// ---- Context diet (phase 5): what every session loads, what each project
+// uses. Rows carry a copyable command; loom never runs one.
+function dietHtml(d) {
+  if (!d) return "";
+  const plugins = d.pluginsUserScope || [];
+  const enabled = plugins.filter((p) => p.enabled);
+  const servers = (d.servers || []).filter((s) => s.calls > 0 || s.scope === "user" || s.scope === "plugin" || s.scope === "project");
+  const projects = d.projects || [];
+  const cols = servers.filter((s) => s.calls > 0).map((s) => s.name);
+  const days = (ts) => ts ? fmtAge(Math.max(0, Math.floor(Date.now() / 1000 - ts))) + " ago" : "never";
+  const loads = (p) => [p.skills ? `${p.skills} skill${p.skills === 1 ? "" : "s"}` : "", p.commands ? `${p.commands} command${p.commands === 1 ? "" : "s"}` : "", p.agents ? `${p.agents} agent${p.agents === 1 ? "" : "s"}` : "", p.hooks ? "hooks" : "", (p.mcpServers || []).length ? `mcp ${p.mcpServers.join(", ")}` : ""].filter(Boolean).join(" · ");
+  const copyBtn = (cmd) => cmd ? `<button class="tact dsc-copy" data-cmd="${esc(cmd)}" title="${esc(cmd)}">copy command</button>` : "";
+  const pluginRow = (p) => `<li class="po-repo dsc-plugin${p.enabled ? "" : " off"}">
+      <span class="po-rlabel">${esc(p.name)}<span class="po-rpath"> @${esc(p.marketplace)}${p.version ? " " + esc(p.version) : ""}</span></span>
+      ${p.enabled ? (p.alwaysOnTokens ? `<span class="po-tag" title="Added to every session, per claude plugin details">~${p.alwaysOnTokens >= 1000 ? (p.alwaysOnTokens / 1000).toFixed(1) + "k" : p.alwaysOnTokens} tok</span>` : "") : `<span class="po-tag">off</span>`}
+      <span class="dsc-num">${esc(loads(p) || "nothing loaded")}</span>
+      <span class="dsc-num ${p.enabled && !p.usageCount ? "hold" : ""}"><b>${p.usageCount ? `used ${p.usageCount}×` : "never used"}</b>${p.lastUsedAt ? ` <small>${esc(days(p.lastUsedAt))}</small>` : ""}</span>
+      ${copyBtn(p.command)}
+    </li>`;
+  const grid = projects.length && cols.length ? `<div class="dsc-gridwrap"><table class="dsc-grid"><thead><tr><th>project</th>${cols.map((c) => `<th title="${esc(c)}">${esc((servers.find((s) => s.name === c) || {}).label || c)}</th>`).join("")}<th>off here</th></tr></thead><tbody>${projects.map((p) => `<tr><td class="dsc-k">${esc(p.name)}${p.trackedLocalSettings && p.trackedLocalSettings.length ? ` <span class="po-tag po-tag-solo" title="${esc(p.trackedLocalSettings.join("\n"))}">settings.local.json is git-tracked</span>` : ""}</td>${cols.map((c) => `<td class="dsc-cell${p.calls && p.calls[c] ? "" : " zero"}">${p.calls && p.calls[c] ? p.calls[c] : "·"}</td>`).join("")}<td class="po-rpath">${esc((p.disabled || []).map(dietLabel).join(", "))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="po-empty">${d.usageSource ? "No MCP calls indexed for a visible project yet." : "MCP usage is unknown: loom's index was not opened."}</div>`;
+  const unused = servers.filter((s) => s.command);
+  return `
+      <section class="po-block dsc-diet">
+        <div class="po-bhead"><h3>Context diet</h3><span class="po-empty">${enabled.length} of ${plugins.length} user-scope plugins enabled${d.unscannedFiles ? ` · ${d.unscannedFiles} indexed files not yet scanned for MCP calls` : ""}</span></div>
+        ${plugins.length ? `<ul class="po-list">${plugins.map(pluginRow).join("")}</ul>` : `<div class="po-empty">No plugins installed at user scope.</div>`}
+        <p class="po-empty">Every enabled plugin and every MCP server adds its tool definitions to each session's context. Nothing here is applied by loom: copy the command and run it yourself.</p>
+        ${grid}
+        ${unused.length ? `<ul class="po-list">${unused.map((s) => `<li class="po-repo"><span class="po-rlabel">${esc(s.label)}</span><span class="dsc-num hold"><b>no calls</b> in any visible project</span>${copyBtn(s.command)}</li>`).join("")}</ul>` : ""}
+        ${d.unattributed ? `<div class="po-empty">${d.unattributed} session${d.unattributed === 1 ? "" : "s"} with MCP calls outside the listed projects.</div>` : ""}
+        ${(d.warnings || []).map((w) => `<div class="po-warn dsc-issue dsc-amber">${esc(w)}</div>`).join("")}
+      </section>`;
+}
+
+function dietLabel(name) {
+  if (name.startsWith("claude_ai_")) return "claude.ai " + name.slice(10).replace(/_/g, " ");
+  if (name.startsWith("plugin_")) { const r = name.slice(7); const i = r.lastIndexOf("_"); return i > 0 ? `${r.slice(i + 1)} (plugin ${r.slice(0, i)})` : r; }
+  return name;
+}
+
+async function copyCommand(btn) {
+  try {
+    await navigator.clipboard.writeText(btn.dataset.cmd);
+    const was = btn.textContent;
+    btn.textContent = "copied";
+    setTimeout(() => { btn.textContent = was; }, 1200);
+  } catch { flashDisc("Could not copy: " + btn.dataset.cmd); }
 }
 
 async function discFileAction(action, file) {

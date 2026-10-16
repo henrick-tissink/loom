@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"time"
 
+	"github.com/henricktissink/loom/internal/diet"
+	"github.com/henricktissink/loom/internal/diet/fromstore"
 	"github.com/henricktissink/loom/internal/discipline"
 )
 
@@ -35,6 +39,7 @@ func doctor(args []string) error {
 		return err
 	}
 	rep := discipline.Doctor(context.Background(), l, discipline.DefaultEnv(), discipline.Options{Deep: deep})
+	rep.Diet = buildDiet(context.Background(), l)
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -48,4 +53,29 @@ func doctor(args []string) error {
 		return fmt.Errorf("health %s", rep.Health)
 	}
 	return nil
+}
+
+// buildDiet assembles the diet group from the store's transcript index and
+// project list. Without a store it still reports plugins and config, with
+// a warning in place of the usage grid.
+func buildDiet(ctx context.Context, l discipline.Layout) *diet.Report {
+	in := diet.Inputs{
+		ConfigDir:  l.ConfigDir,
+		ClaudeJSON: diet.ClaudeJSONPath(l.ConfigDir, l.Home),
+		Now:        time.Now(),
+		Run: func(ctx context.Context, name string, args ...string) (string, error) {
+			out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+			return string(out), err
+		},
+	}
+	_, st, err := openStore()
+	if err == nil {
+		defer st.Close()
+		fromstore.Fill(&in, st)
+	}
+	rep := diet.Build(ctx, in)
+	if err != nil {
+		rep.Warnings = append(rep.Warnings, "loom.db not opened ("+err.Error()+"): MCP usage unknown")
+	}
+	return &rep
 }

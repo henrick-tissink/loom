@@ -209,8 +209,54 @@ func (ix *Indexer) Sweep() error {
 	ix.swept.Store(swept)
 	ix.changed.Store(changed)
 	ix.total.Store(int64(len(all)))
+	ix.backfillMCP(mcpBackfillBatch, mcpBackfillBudget)
 	_ = ix.st.Compact() // give this sweep's freed pages back (auto_vacuum INCREMENTAL)
 	return nil
+}
+
+// The MCP backfill: files indexed before the mcp column existed are read
+// once more for their mcp__ calls, in batches, until a time budget per
+// sweep is spent. The budget keeps the sweep short on a large archive;
+// the batches keep the queries small.
+const (
+	mcpBackfillBatch  = 200
+	mcpBackfillBudget = 20 * time.Second
+)
+
+// backfillMCP scans unscanned files for their MCP calls until the budget
+// is spent or none are left. A file that changed since it was indexed is
+// left to the next sweep's re-index, which records the calls with the
+// docs; a file that vanished is marked empty so it is not asked again.
+func (ix *Indexer) backfillMCP(batch int, budget time.Duration) {
+	start := time.Now()
+	for time.Since(start) < budget {
+		files, err := ix.st.UnscannedMCP(batch)
+		if err != nil || len(files) == 0 {
+			return
+		}
+		progressed := false
+		for _, f := range files {
+			fi, err := os.Stat(f.Path)
+			if err != nil {
+				_ = ix.st.SetFileMCP(f.Path, MCPJSON(nil, f.Size, f.Mtime))
+				progressed = true
+				continue
+			}
+			if fi.Size() != f.Size || fi.ModTime().Unix() != f.Mtime {
+				continue
+			}
+			// A main file is <session>.jsonl; anything else is a subagent file.
+			mainFile := filepath.Base(f.Path) == f.SessionID+".jsonl"
+			_ = ix.st.SetFileMCP(f.Path, MCPJSON(ScanMCP(f.Path, mainFile), f.Size, f.Mtime))
+			progressed = true
+			if time.Since(start) >= budget {
+				return
+			}
+		}
+		if !progressed {
+			return // only changed files remain; the next re-index takes them
+		}
+	}
 }
 
 // lookup is GetIndexedFile through the per-sweep cache (see Indexer.known).
@@ -245,7 +291,12 @@ func (ix *Indexer) indexFile(path, sessionID, projectDir string, isSubagent bool
 		return false, err
 	}
 	if ok && existing.Size == size && existing.Mtime == mtime {
-		return false, nil // fingerprint unchanged: skip
+		// Fingerprint unchanged: skip, unless the MCP counts were left
+		// behind by a binary that re-indexed the file without them.
+		if existing.MCP != "" && !MCPCurrent(existing.MCP, size, mtime) {
+			_ = ix.st.SetFileMCP(path, MCPJSON(ScanMCP(path, !isSubagent), size, mtime))
+		}
+		return false, nil
 	}
 
 	roleOverride := ""
@@ -257,7 +308,7 @@ func (ix *Indexer) indexFile(path, sessionID, projectDir string, isSubagent bool
 		return false, err
 	}
 
-	idxFile := store.IndexedFile{Path: path, SessionID: sessionID, Size: size, Mtime: mtime}
+	idxFile := store.IndexedFile{Path: path, SessionID: sessionID, Size: size, Mtime: mtime, MCP: MCPJSON(ex.MCP, size, mtime)}
 	if ok {
 		idxFile.FirstRowid = existing.FirstRowid
 		idxFile.LastRowid = existing.LastRowid

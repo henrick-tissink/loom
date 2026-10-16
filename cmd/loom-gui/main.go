@@ -6,9 +6,12 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/henricktissink/loom/internal/config"
+	"github.com/henricktissink/loom/internal/diet"
+	"github.com/henricktissink/loom/internal/diet/fromstore"
 	"github.com/henricktissink/loom/internal/discipline"
 	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/projects"
@@ -90,6 +93,16 @@ func run() error {
 	if home, err := os.UserHomeDir(); err == nil {
 		l := discipline.NewLayout(cfg.ClaudeConfigDir, home, os.Getenv("CLAUDE_STATE_DIR"))
 		app.disc = newDisciplineState(l, time.Now)
+		app.disc.diet = func(ctx context.Context) *diet.Report {
+			in := diet.Inputs{ConfigDir: l.ConfigDir, ClaudeJSON: diet.ClaudeJSONPath(l.ConfigDir, l.Home), Now: time.Now(),
+				Run: func(ctx context.Context, name string, args ...string) (string, error) {
+					out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+					return string(out), err
+				}}
+			fromstore.Fill(&in, st)
+			rep := diet.Build(ctx, in)
+			return &rep
+		}
 		app.hooks = newHookState(l)
 	}
 	session.SetClaudeTheme(app.settings.get().TerminalTheme) // match Claude's theme to the terminal

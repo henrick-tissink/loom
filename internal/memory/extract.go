@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,59 @@ type Extraction struct {
 	FirstTS  int64
 	LastTS   int64
 	MsgCount int
+	// MCP counts the mcp__<server>__<tool> calls per server over the
+	// assistant blocks this file owns (a main file's sidechain lines are
+	// left to the subagent files, as for docs, so nothing counts twice).
+	MCP map[string]int
+}
+
+// MCPServer returns the server segment of an mcp__<server>__<tool> name,
+// "" for any other tool.
+func MCPServer(tool string) string {
+	const p = "mcp__"
+	if !strings.HasPrefix(tool, p) {
+		return ""
+	}
+	rest := tool[len(p):]
+	if i := strings.Index(rest, "__"); i > 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
+// MCPJSON renders the counts as the JSON object the store keeps, with the
+// file fingerprint they were computed for under the reserved key "@fp".
+// Another loom binary without this column can re-upsert the row's size
+// and mtime and leave the counts behind; the fingerprint inside the value
+// is how the indexer notices and rescans. Keys are sorted by Marshal.
+func MCPJSON(m map[string]int, size, mtime int64) string {
+	out := make(map[string]any, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	out[mcpFPKey] = strconv.FormatInt(size, 10) + ":" + strconv.FormatInt(mtime, 10)
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// mcpFPKey is the reserved key in the mcp JSON that holds "size:mtime".
+const mcpFPKey = "@fp"
+
+// MCPCurrent reports whether a stored mcp value was computed for this
+// fingerprint. An empty value (unscanned) is never current.
+func MCPCurrent(mcp string, size, mtime int64) bool {
+	if mcp == "" {
+		return false
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(mcp), &m) != nil {
+		return false
+	}
+	fp, _ := m[mcpFPKey].(string)
+	return fp == strconv.FormatInt(size, 10)+":"+strconv.FormatInt(mtime, 10)
 }
 
 // record is the subset of a claude JSONL line's fields the extractor
@@ -337,7 +391,13 @@ func extractUserText(content json.RawMessage) (string, bool) {
 }
 
 func (e *extractState) feedAssistant(r record, role string, ts int64) {
-	texts, files := extractAssistantBlocks(r.Message.Content)
+	texts, files, mcp := extractAssistantBlocks(r.Message.Content)
+	for _, sv := range mcp {
+		if e.out.MCP == nil {
+			e.out.MCP = map[string]int{}
+		}
+		e.out.MCP[sv]++
+	}
 	for _, path := range files {
 		if e.fileSeen == nil {
 			e.fileSeen = map[string]bool{}
@@ -363,7 +423,7 @@ func (e *extractState) feedAssistant(r record, role string, ts int64) {
 // text yes, thinking/tool_use no) and touched-file paths from tool_use
 // inputs (Edit/Write/MultiEdit's file_path, NotebookEdit's notebook_path)
 // out of an assistant message's content.
-func extractAssistantBlocks(content json.RawMessage) (texts, files []string) {
+func extractAssistantBlocks(content json.RawMessage) (texts, files, mcp []string) {
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
 		if s != "" {
@@ -383,6 +443,9 @@ func extractAssistantBlocks(content json.RawMessage) (texts, files []string) {
 				texts = append(texts, b.Text)
 			}
 		case "tool_use":
+			if sv := MCPServer(b.Name); sv != "" {
+				mcp = append(mcp, sv)
+			}
 			switch b.Name {
 			case "Edit", "Write", "MultiEdit":
 				var in toolFileInput

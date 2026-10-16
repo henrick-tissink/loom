@@ -516,3 +516,34 @@ func TestRecallMarkerStrippedFromAskFallbackCandidate(t *testing.T) {
 		t.Fatalf("Ask fallback leaked recall marker text: %q", ex.Ask)
 	}
 }
+
+func TestMCPCallsCountedPerServer(t *testing.T) {
+	p := writeJSONL(t,
+		`{"type":"assistant","timestamp":"2026-10-16T10:00:00Z","cwd":"/w/a","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__lava__lava_emit","input":{}},{"type":"tool_use","id":"t2","name":"Bash","input":{}}]}}`,
+		`{"type":"assistant","timestamp":"2026-10-16T10:00:01Z","cwd":"/w/a","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"mcp__claude_ai_Gmail__search","input":{}},{"type":"tool_use","id":"t4","name":"mcp__lava__lava_check","input":{}}]}}`,
+		`{"type":"assistant","isSidechain":true,"timestamp":"2026-10-16T10:00:01Z","cwd":"/w/a","message":{"role":"assistant","content":[{"type":"tool_use","id":"t5","name":"mcp__mario__x","input":{}}]}}`,
+		`{"type":"assistant","timestamp":"2026-10-16T10:00:02Z","cwd":"/w/a","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`,
+	)
+	ex, err := ExtractFile(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.MCP["lava"] != 2 || ex.MCP["claude_ai_Gmail"] != 1 || len(ex.MCP) != 2 {
+		t.Fatalf("%+v", ex.MCP)
+	}
+	if got := ScanMCP(p, true); got["lava"] != 2 || got["claude_ai_Gmail"] != 1 || got["mario"] != 0 {
+		t.Fatalf("scan of a main file leaves sidechain lines to the subagent files: %+v", got)
+	}
+	if got := ScanMCP(p, false); got["mario"] != 1 {
+		t.Fatalf("scan of a subagent file counts its lines: %+v", got)
+	}
+	if MCPJSON(nil, 10, 20) != `{"@fp":"10:20"}` || MCPJSON(ex.MCP, 10, 20) != `{"@fp":"10:20","claude_ai_Gmail":1,"lava":2}` {
+		t.Fatal(MCPJSON(ex.MCP, 10, 20))
+	}
+	if !MCPCurrent(`{"@fp":"10:20"}`, 10, 20) || MCPCurrent(`{"@fp":"10:20"}`, 11, 20) || MCPCurrent("", 10, 20) || MCPCurrent(`{"lava":1}`, 10, 20) {
+		t.Fatal("fingerprint check")
+	}
+	if MCPServer("mcp__x") != "x" || MCPServer("Edit") != "" {
+		t.Fatal("server segment")
+	}
+}

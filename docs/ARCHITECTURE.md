@@ -110,6 +110,7 @@ frontend.
 | `transcript` | Locate + interpret Claude's JSONL | Path encoding, incremental `Reader`, turn-boundary `Classifier`. |
 | `ccsessions` | Read Claude's own session registry | The only way to learn a pane's *current* session id after `/clear` or an in-pane resume. |
 | `taskfile` | Read the hooks' task file and checkpoint | Finish line (status, Done-when ticks, outcome, `Started:` time, the stop guard's `.verified` marker) and hand-over age per session; stat-cached per poll. |
+| `diet` | The context-diet report: plugins at user scope, MCP servers and connectors per project, commands to copy | Pure and read-only over Claude's own files; `diet/fromstore` is its only tie to loom.db. Nothing is applied. |
 | `hooklog` | Read the hooks' decision and allow logs | Incremental `(inode, offset)` reader with truncation restart; legacy dirs read once. Per session: holds, nudges, the held group, the last stop verdict. Per hook: rates split at change marks (ledger, or inferred from `rev` transitions and old edit times), never summed across a mark. Test re-runs per project. |
 
 **External sessions.** Every live registry entry that is not in a loom pane (a
@@ -121,7 +122,7 @@ last status per external row only so the needs-you bell stays once-only. A
 conversation a loom row already tails is not shown twice.
 | `status` | Fuse transcript state with tmux liveness | The reconcile loop. The only writer of live-session status. |
 | `store` | SQLite: schema, sessions, projects, memory index | Migrations are transactional & re-entrant. |
-| `memory` | Index / extract / summarize | Reads the whole Claude archive; the only package that calls out to an LLM. |
+| `memory` | Index / extract / summarize | Reads the whole Claude archive; the only package that calls out to an LLM. Also records each indexed file's `mcp__` calls (`indexed_files.mcp`) for the diet report, backfilling older files a bounded batch per sweep. |
 | `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. Removing a project (`App.RemoveProject`) kills its live sessions, forgets its rows, deletes the project and records the root in `ignored_roots`; "+ New project" at that root un-ignores it. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
@@ -489,7 +490,8 @@ stages, runs the gate and commits only on a click after PASS, Diff / Keep /
 Reset for local edits, uninstall from the receipt; see `docs/DISCIPLINE.md`; `hooks.go`:
 the per-session holds and held chip on the rail, the ✓/✗ on the finish-line
 pill, the hooks panel, and the island's Rates and Re-runs tabs over
-`internal/hooklog`).
+`internal/hooklog`; the Checks tab's Context diet section over
+`internal/diet`).
 
 Native touches, each with a real reason:
 

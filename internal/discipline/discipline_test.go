@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/henricktissink/loom/internal/diet"
 )
 
 // TestManifestCurrent pins the committed manifest to the embedded files: a
@@ -405,5 +407,15 @@ func TestHookLogsUnderStateDirWithRev(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "enforce", "allows.jsonl")); err == nil {
 		t.Fatal("log written beside the hooks")
+	}
+}
+
+func TestRenderIncludesDiet(t *testing.T) {
+	r := Report{Diet: &diet.Report{PluginsUserScope: []diet.Plugin{{Key: "a@m", Enabled: true, Skills: 2, AlwaysOnTokens: 50, UsageCount: 1}}, Servers: []diet.Server{{Name: "lava", Label: "lava", Scope: "user", Command: "claude mcp remove lava -s user"}}, Projects: []diet.ProjectRow{{Name: "P", Calls: map[string]int{"claude_ai_Gmail": 2}, TrackedLocalSettings: []string{"/w/p"}}}}}
+	out := Render(r)
+	for _, want := range []string{"DIET     plugins 1 enabled of 1", "✓ a@m", "~50 tok always-on", "claude mcp remove lava -s user", "claude.ai Gmail 2", "settings.local.json is git-tracked in /w/p"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
 	}
 }

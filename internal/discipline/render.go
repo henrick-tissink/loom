@@ -2,7 +2,10 @@ package discipline
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+
+	"github.com/henricktissink/loom/internal/diet"
 )
 
 // Render prints a report the way the GUI's Checks tab will show it: one
@@ -101,6 +104,9 @@ func Render(r Report) string {
 			b.WriteString(indent(r.Suites.Output))
 		}
 	}
+	if r.Diet != nil {
+		b.WriteString(RenderDiet(*r.Diet))
+	}
 	if len(r.Issues) > 0 {
 		b.WriteString("\n")
 		for _, is := range r.Issues {
@@ -109,6 +115,92 @@ func Render(r Report) string {
 				fmt.Fprintf(&b, "      %-13s → %s\n", "", is.Fix)
 			}
 		}
+	}
+	return b.String()
+}
+
+// RenderDiet prints the diet group: plugins, servers, the per-project grid
+// and the commands, none of which loom runs.
+func RenderDiet(d diet.Report) string {
+	var b strings.Builder
+	enabled := 0
+	for _, p := range d.PluginsUserScope {
+		if p.Enabled {
+			enabled++
+		}
+	}
+	fmt.Fprintf(&b, "DIET     plugins %d enabled of %d at user scope", enabled, len(d.PluginsUserScope))
+	if d.UsageSource == "" {
+		b.WriteString(" · MCP usage unknown (no index)")
+	} else if d.UnscannedFiles > 0 {
+		fmt.Fprintf(&b, " · %d indexed files not yet scanned for MCP calls", d.UnscannedFiles)
+	}
+	b.WriteString("\n")
+	for _, p := range d.PluginsUserScope {
+		if !p.Enabled {
+			continue
+		}
+		var loads []string
+		if p.Skills > 0 {
+			loads = append(loads, fmt.Sprintf("%d skills", p.Skills))
+		}
+		if p.Commands > 0 {
+			loads = append(loads, fmt.Sprintf("%d commands", p.Commands))
+		}
+		if p.Agents > 0 {
+			loads = append(loads, fmt.Sprintf("%d agents", p.Agents))
+		}
+		if p.Hooks {
+			loads = append(loads, "hooks")
+		}
+		if len(p.MCPServers) > 0 {
+			loads = append(loads, "mcp "+strings.Join(p.MCPServers, ","))
+		}
+		cost := ""
+		if p.AlwaysOnTokens > 0 {
+			cost = fmt.Sprintf(" · ~%d tok always-on", p.AlwaysOnTokens)
+		}
+		used := "never used"
+		if p.UsageCount > 0 {
+			used = fmt.Sprintf("used %d×", p.UsageCount)
+		}
+		fmt.Fprintf(&b, "         ✓ %-44s %s%s · %s\n", p.Key, strings.Join(loads, ", "), cost, used)
+	}
+	for _, s := range d.Servers {
+		scope := s.Scope
+		if scope == "" {
+			scope = "server"
+		}
+		fmt.Fprintf(&b, "         %-9s %-32s %d calls in %d projects", scope, s.Label, s.Calls, s.Projects)
+		if s.Command != "" {
+			b.WriteString("  → " + s.Command)
+		}
+		b.WriteString("\n")
+	}
+	for _, p := range d.Projects {
+		var parts []string
+		for name, n := range p.Calls {
+			parts = append(parts, fmt.Sprintf("%s %d", diet.Label(name), n))
+		}
+		sort.Strings(parts)
+		line := strings.Join(parts, ", ")
+		if line == "" {
+			line = "no MCP calls indexed"
+		}
+		fmt.Fprintf(&b, "         %-28s %s", p.Name, line)
+		if len(p.Disabled) > 0 {
+			fmt.Fprintf(&b, " · off: %s", strings.Join(p.Disabled, ", "))
+		}
+		for _, repo := range p.TrackedLocalSettings {
+			fmt.Fprintf(&b, "\n         %-28s ! .claude/settings.local.json is git-tracked in %s", "", repo)
+		}
+		b.WriteString("\n")
+	}
+	if d.Unattributed > 0 {
+		fmt.Fprintf(&b, "         %d sessions outside the listed projects\n", d.Unattributed)
+	}
+	for _, w := range d.Warnings {
+		fmt.Fprintf(&b, "         ! %s\n", w)
 	}
 	return b.String()
 }
