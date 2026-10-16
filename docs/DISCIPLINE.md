@@ -427,7 +427,7 @@ Done when:
 - [x] report_tests_cli: `$ ./loom report tests --json | jq -e 'type=="array"'` # true, 2026-10-16
 - [x] gui_tests: `$ go test ./cmd/loom-gui/ -run 'TestHook|TestDiscipline|TestSnapshot' -count=1` # ok, 2026-10-16
 - [x] js_parses, gui_builds, all_tests (`go test ./... && go vet ./...`) # all exit 0, 2026-10-16
-- [ ] observed: the Rates tab on the owner's machine shows stop_guard with a change mark at the 13 Oct hand edit and at the r3 install; a session blocked 3+ times for the same running task shows the held chip; hidden projects' records do not appear.
+- [x] observed: the Rates tab on the owner's machine shows stop_guard with a change mark at the 13 Oct hand edit and at the r3 install; a session blocked 3+ times for the same running task shows the held chip; hidden projects' records do not appear. # owner's screenshots 2026-10-16 23:11, Rates tab on 30 days: stop_guard 85% holds before any change, dashed "hooks edited by hand" marks at 13 Oct 17:45, 13 Oct 21:03, 14 Oct 23:31, solid "setup local → r3" and "upgrade r3 → r3", holds 5.7% → 6.7% → 6.5% → 1.4% after them; the 3/3 ✓ pill on the rail. No live session was held and no project hidden at the time: those two parts rest on TestHooksForCountsSinceTaskStartAndMarksChecks and TestVisibleRecordsHidesByCwdAndDropsAllowsWhenFiltering.
 
 Notes:
 - Change marks: ledger entries are solid (`op from → to`); inferred marks
