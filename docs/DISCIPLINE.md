@@ -386,7 +386,7 @@ Done when:
 - [x] gui_builds: `$ make gui` # exit 0, 2026-10-16
 - [x] app_methods: `$ grep -q 'func (a \*App) DisciplineApply' cmd/loom-gui/discipline.go` # present, with DisciplineStage
 - [x] gui_tests: `$ go test ./cmd/loom-gui/ -run TestDiscipline -count=1` # ok; the tests install, keep, reset and uninstall on a layout under t.TempDir()
-- [ ] observed: the owner runs the built app: dock dot green; the island shows r3 · Enforcing with the checks; the gate sheet keeps Install disabled until the gate reports PASS.
+- [x] observed: the owner runs the built app: dock dot green; the island shows r3 · Enforcing with the checks; the gate sheet keeps Install disabled until the gate reports PASS. # owner's screenshot 2026-10-16 20:45: green dot, enforcing · r3, 15 checks, both ledger entries, restart marker on the two pre-flip sessions; the Install rule is covered by TestDisciplineApplyRefusesFailedGateAndUnackedFlips
 
 Notes:
 - The GUI is a human surface and does not call `RefuseIfAgent`; the only

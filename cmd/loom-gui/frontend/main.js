@@ -1708,7 +1708,7 @@ function discChecks(r) {
     let st = t.found ? "ok" : (need ? "bad" : "warn");
     if (name === "python3" && t.found && !t.runs) st = "bad";
     if (name === "claude" && t.tested === "newer") st = "warn";
-    rows.push([name, st, t.found ? `${t.version || ""}${t.path ? " · " + t.path : ""}${t.tested && t.tested !== "tested" ? " · " + t.tested + " than the bundle was tested with" : ""}` : "not found"]);
+    rows.push([name, st, t.found ? [t.version, t.path, t.tested && t.tested !== "tested" ? t.tested + " than the bundle was tested with" : ""].filter(Boolean).join(" · ") : "not found"]);
   };
   tool("python3", pr.python3, true); tool("claude", pr.claude, true); tool("jq", pr.jq, false); tool("git", pr.git, false); tool("tmux", pr.tmux, false);
   const fileSt = miss ? "bad" : (stale ? "warn" : "ok");
