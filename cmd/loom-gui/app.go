@@ -31,6 +31,10 @@ type App struct {
 	settings   *settingsStore
 	summarizer *memory.Summarizer
 
+	// disc is the Agent Discipline layer (discipline.go); nil in tests that
+	// do not set one.
+	disc *disciplineState
+
 	// projects is the runtime source of truth for launch targets and for §6's
 	// visibility predicate, queried read-through. It replaced a by-value
 	// registry.Discover snapshot taken at startup, which is why a project

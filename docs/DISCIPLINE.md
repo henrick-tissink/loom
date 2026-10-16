@@ -244,11 +244,15 @@ Never auto-fixed: shell profiles; installing python/jq/CLT; modified files;
 user-tuned values; another tool's statusLine; other tools' hooks; plugins,
 MCP, connectors; `env.PATH`; a git-tracked `settings.local.json`; the logs.
 
-Re-check triggers (GUI): launch; a watched file changes (settings.json,
-CLAUDE.md, the discipline dir, `~/.local/bin/deadline`), debounced 2 s;
-window focus; not the 1.5 s poll. `--deep` (CLI) / "Run suites" (GUI) runs
-the 7 suites against the installed rev with a 180 s deadline, logs to
-`/dev/null`.
+Re-check triggers (GUI): launch; every 10 s the frontend asks for the
+report and the Go side re-runs the doctor only when the mtime signature of
+what it depends on changed (settings.json, CLAUDE.md, the receipt and
+ledger, `~/.local/bin/deadline`, the decisions log, the `current` and
+`hooks/enforce` links) or the last run is older than a minute; the island's
+Re-check button and every write from the island force it. Not the 1.5 s
+poll: the doctor shells out. `--deep` (CLI) runs the 7 suites against the
+installed rev with a 180 s deadline, logs to `/dev/null`; the GUI has no
+"Run suites" yet (the gate sheet runs them against the staged rev).
 
 ---
 
@@ -281,8 +285,9 @@ loom's in the receipt.
   a guard fails open, a registration missing, suites failing, stale files.
   Red: lockout condition (missing fail-closed script, python3 stub). Manual
   rows and local edits never colour it.
-- **Discipline island**, tabs **Checks · Rates · Re-runs**. Opened once by the
-  stage on first run when the layer is absent or broken; never modal.
+- **Discipline island**, tabs **Checks · Rates · Re-runs** (phase 3 built
+  Checks, plus Files and History; the tabs come with phase 4). Opened from
+  the shield token on the dock footer; never modal, never opened on its own.
   Headline + one button: "Not installed … [Review install]" / "Enforcing · r3
   + 1 local edit" (no button) / "r4 available · What's new" / red broken line
   plus a titlebar chip.
@@ -291,7 +296,12 @@ loom's in the receipt.
   another tool's statusLine off; each env key off; deny rule on). Shows the
   gate output live: preflight, suites, replay with each flipped decision to
   acknowledge. Install unlocks only when the gate passes. Re-reads
-  `settings.json` right before writing.
+  `settings.json` right before writing. Cancel or Escape abandons the staged
+  revision. Uninstall from the island shows the receipt's steps behind a
+  confirm.
+- **Restart marker**: a live session started before the ledger's last
+  setup, upgrade or uninstall carries `restart for new hooks` on its row and
+  in the stage header (Claude Code reads the hooks at start).
 - **Rail**: on the finish-line pill, `4/4 ✓` when the stop guard's `.verified`
   marker matches the task file mtime, `4/4 ✗` after `block_done_check_failed`.
   A **held** chip (`held ×5 · bg work`) only when the same hook+decision
@@ -361,16 +371,32 @@ counts such files as stray (`state.legacyLogs` on the rev layout) and the next
 ### Phase 3 — GUI health dot, Discipline island (Checks tab), gate sheet
 
 Scope: `cmd/loom-gui/discipline.go` (App methods `DisciplineDoctor`,
-`DisciplinePlan`, `DisciplineGate`, `DisciplineApply`, `DisciplineAction`),
-frontend island + sheet in the islands visual language (tokens from the
-design system), fsnotify-style watcher with debounce, "restart to pick up
-new hooks" marker on sessions started before the last flip.
+`DisciplinePlan`, `DisciplineStage`, `DisciplineApply`, `DisciplineAbandon`,
+`DisciplineUninstallPlan`, `DisciplineUninstall`, `DisciplineAction`) over
+`internal/discipline` as is; the shield token with the health dot on the
+dock footer; the island (headline, Checks, Files with Diff / Keep / Reset on
+`yours` rows, History from the ledger, Where); the gate sheet; the
+`restart for new hooks` marker from `SessionDTO.startedAt` against the
+ledger's last flip. The report is cached by an mtime signature with a
+one-minute floor instead of an fsnotify watcher: the poll is already there
+and a signature is cheaper than a watcher on five paths.
 
 Done when:
-- [ ] js_parses: `$ N=$(ls -d ~/.nvm/versions/node/*/bin | sort -V | tail -1) && $N/node --check cmd/loom-gui/frontend/main.js`
-- [ ] gui_builds: `$ make gui`
-- [ ] app_methods: `$ grep -q 'func (a \*App) DisciplineApply' cmd/loom-gui/discipline.go`
-- [ ] observed: health dot green on the owner's machine after phase 2; opening the island shows the Checks table with the deny-rule row as "yours"; the gate sheet refuses to enable Install until the suites pass.
+- [x] js_parses: `$ N=$(ls -d ~/.nvm/versions/node/*/bin | sort -V | tail -1) && $N/node --check cmd/loom-gui/frontend/main.js` # exit 0, 2026-10-16
+- [x] gui_builds: `$ make gui` # exit 0, 2026-10-16
+- [x] app_methods: `$ grep -q 'func (a \*App) DisciplineApply' cmd/loom-gui/discipline.go` # present, with DisciplineStage
+- [x] gui_tests: `$ go test ./cmd/loom-gui/ -run TestDiscipline -count=1` # ok; the tests install, keep, reset and uninstall on a layout under t.TempDir()
+- [ ] observed: the owner runs the built app: dock dot green; the island shows r3 · Enforcing with the checks; the gate sheet keeps Install disabled until the gate reports PASS.
+
+Notes:
+- The GUI is a human surface and does not call `RefuseIfAgent`; the only
+  write path is Install after a click, and Apply refuses a staged revision
+  whose gate did not pass or whose replay flips are not acknowledged.
+- Not built here, by the phase 3 scope: the Rates and Re-runs tabs and the
+  hooks panel (phase 4), the diet advisor (phase 5), "Adopt into loom", and
+  routing the missing-binaries exit (§7) into the island. `DisciplineGate`
+  from the earlier scope line became `DisciplineStage`: staging and the gate
+  are one call, as in the CLI.
 
 ### Phase 4 — per-session holds, hooks panel, Rates and Re-runs tabs
 

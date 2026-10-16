@@ -42,6 +42,10 @@ type SessionDTO struct {
 	// place on the stage.
 	External bool   `json:"external"`
 	Cwd      string `json:"cwd"`
+	// StartedAt is when loom launched the session (unix seconds; 0 =
+	// unknown). The frontend compares it with the discipline layer's last
+	// hook flip to mark sessions that still run the previous hooks.
+	StartedAt int64 `json:"startedAt"`
 }
 
 // snapshotToDTOs flattens a status.Snapshot's live rows into SessionDTOs,
@@ -77,6 +81,7 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 			NextStep:     r.Checkpoint.NextStep,
 			External:     r.External,
 			Cwd:          r.Cwd,
+			StartedAt:    r.CreatedAt,
 		})
 	}
 	return out

@@ -346,7 +346,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${taskPillHtml(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${restartTag(s)}${taskPillHtml(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   threadsEl.appendChild(li);
@@ -683,7 +683,7 @@ function renderStageHeader(name) {
     `<span class="sh-name">${esc(label)}</span>` +
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(project)}</span>` : "") +
     `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}${wait}</span></span>` +
-    task + ctx +
+    task + ctx + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
     (s && s.external ? "" :
       `<span class="sh-acts">` +
       `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>` +
@@ -1631,6 +1631,381 @@ function showLinkTip(e) {
 function hideLinkTip() { if (linkTip) linkTip.style.display = "none"; }
 
 // ---- poll ----
+// ---- Agent Discipline (docs/DISCIPLINE.md, phase 3) ----
+// The doctor's report behind a dot on the dock footer and an island; the
+// gate sheet is the one place the GUI writes to the machine, and only when
+// the person clicks Install after the gate reports PASS. The Go side caches
+// the report by mtime, so this polls it every 10s, not per 1.5s tick.
+let disc = null; // last DisciplineDTO
+const DISC_POLL_MS = 10000;
+
+function discColor(d) {
+  if (!d || !d.report) return "var(--text-faint)";
+  if (d.report.rev && d.report.rev.layout === "none") return "var(--text-faint)";
+  return { green: "var(--st-running)", amber: "var(--over)", red: "var(--st-error)" }[d.report.health] || "var(--text-faint)";
+}
+
+function discWord(d) {
+  if (!d || !d.report || !d.report.rev) return "unknown";
+  if (d.report.rev.layout === "none") return "not installed";
+  return { green: "enforcing", amber: "needs attention", red: "broken" }[d.report.health] || "unknown";
+}
+
+function renderDiscDot() {
+  const dot = document.getElementById("disc-dot");
+  const btn = document.getElementById("disc-btn");
+  if (!dot || !btn) return;
+  dot.style.background = discColor(disc);
+  dot.classList.toggle("hollow", !disc || !disc.report || disc.report.rev.layout === "none");
+  btn.classList.toggle("on", stageView.kind === "discipline");
+  btn.title = "Agent Discipline — " + (disc ? disc.headline : "checking…");
+}
+
+async function discPoll(force) {
+  const fn = bound("DisciplineDoctor");
+  if (!fn) return;
+  try { disc = await fn(!!force); } catch (e) { console.error("discipline", e); return; }
+  renderDiscDot();
+  if (stageView.kind === "discipline") renderDiscipline();
+}
+
+// A session started before the last hook flip still runs the previous
+// hooks: Claude Code reads settings.json and the hook files at start.
+function needsRestart(s) {
+  return !!(disc && disc.flippedAt && s && s.startedAt && s.startedAt < disc.flippedAt && disc.report && disc.report.rev.layout !== "none");
+}
+function restartTag(s) {
+  return needsRestart(s) ? `<span class="tpill tpill-restart" title="Started before the hooks were last changed (${new Date(disc.flippedAt * 1000).toLocaleString()}); it keeps the previous hooks until restarted">restart for new hooks</span>` : "";
+}
+
+function openDiscipline() {
+  teardownTerminal();
+  activeName = null;
+  stageView = { kind: "discipline" };
+  renderDiscipline();
+  renderRail();
+  renderDiscDot();
+  discPoll(true);
+}
+
+function fmtTS(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return String(ts);
+  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function discChecks(r) {
+  // One row per check the doctor makes, in the handbook's order. Each is
+  // [label, ok|warn|bad, detail].
+  const rows = [];
+  const files = r.files || [];
+  const count = (st) => files.filter((f) => f.state === st).length;
+  const cur = count("current"), stale = count("stale"), mod = count("modified"), miss = count("missing");
+  const pr = r.prereq || {};
+  const tool = (name, t, need) => {
+    if (!t) return;
+    let st = t.found ? "ok" : (need ? "bad" : "warn");
+    if (name === "python3" && t.found && !t.runs) st = "bad";
+    if (name === "claude" && t.tested === "newer") st = "warn";
+    rows.push([name, st, t.found ? `${t.version || ""}${t.path ? " · " + t.path : ""}${t.tested && t.tested !== "tested" ? " · " + t.tested + " than the bundle was tested with" : ""}` : "not found"]);
+  };
+  tool("python3", pr.python3, true); tool("claude", pr.claude, true); tool("jq", pr.jq, false); tool("git", pr.git, false); tool("tmux", pr.tmux, false);
+  const fileSt = miss ? "bad" : (stale ? "warn" : "ok");
+  rows.push(["files", fileSt, `${cur} current${stale ? `, ${stale} stale` : ""}${mod ? `, ${mod} yours` : ""}${miss ? `, ${miss} missing` : ""}`]);
+  const reg = r.registrations || {};
+  rows.push(["hook registrations", reg.matched === reg.expected ? "ok" : "bad", `${reg.matched}/${reg.expected}${reg.disableAllHooks ? " · disableAllHooks is set" : ""}${(reg.others || []).length ? ` · ${reg.others.length} other hook${reg.others.length === 1 ? "" : "s"} registered` : ""}`]);
+  const se = r.settings || {};
+  rows.push(["status line", se.statusLineSet ? "ok" : "warn", se.statusLineSet ? (se.statusLineOurs ? "the context bar" : "your own") : "not set"]);
+  const env = se.env || {};
+  const envSet = Object.values(env).filter((v) => v.set).length, envN = Object.keys(env).length;
+  rows.push(["env keys", envSet === envN ? "ok" : "warn", envN ? `${envSet}/${envN} set${se.contextBudget ? ` · budget ${Math.round(se.contextBudget / 1000)}k` : ""}` : "none"]);
+  const op = r.operate || {};
+  rows.push(["deny rule", op.denyRule ? "ok" : "warn", op.denyRule ? "hook directory protected from edits" : "not set"]);
+  const pa = r.path || {};
+  const res = (x) => x && x.known ? (x.deadline && x.python3 ? "ok" : "bad") : "warn";
+  rows.push(["deadline on PATH", res(pa.login), `login ${pa.login && pa.login.deadline ? "yes" : "no"} · tmux ${pa.tmux && pa.tmux.deadline ? "yes" : "no"} · settings env ${pa.settingsEnv && pa.settingsEnv.deadline ? "yes" : "no"}`]);
+  const st = r.state || {};
+  const dirs = st.dirs || [];
+  const badDirs = dirs.filter((d) => !d.exists || !d.writable).length;
+  rows.push(["state dirs", badDirs ? "bad" : "ok", `${dirs.length - badDirs}/${dirs.length} writable${st.legacyLogs ? " · logs still beside the hooks" : ""}`]);
+  const ru = r.rules || {};
+  rows.push(["rules", ru.importLines > 0 || ru.inline ? "ok" : "warn", ru.inline ? "inline in CLAUDE.md" : ru.importLines > 0 ? `imported (${ru.rulesFileState || "ok"})` : "not imported"]);
+  const fi = r.firing || {};
+  rows.push(["hooks firing", fi.logsFound ? ((fi.quiet || []).length ? "warn" : "ok") : "warn", fi.logsFound ? ((fi.quiet || []).length ? `quiet for 7 days: ${fi.quiet.join(", ")}` : "every hook has fired") : "no log yet"]);
+  return rows;
+}
+
+function discFileRows(d) {
+  const r = d.report;
+  // keptPaths is the receipt's Kept set spelled the way the report spells
+  // installedPath (through the current link), resolved on the Go side.
+  const keptSet = new Set(d.keptPaths || []);
+  const rows = (r.files || []).filter((f) => f.state !== "current" && f.state !== "absent" && f.state !== "inline");
+  for (const f of r.files || []) if (f.state === "current" && f.installedPath && keptSet.has(f.installedPath) && !rows.includes(f)) rows.push(f);
+  if (!rows.length) return `<div class="po-empty">Every file matches the bundle.</div>`;
+  const tag = (f) => {
+    if (f.state === "modified" && keptSet.has(f.installedPath)) return `<span class="po-tag po-tag-solo" title="Recorded as yours: upgrades leave it alone">kept · yours</span>`;
+    if (f.state === "modified") return `<span class="po-tag po-tag-solo">yours</span>`;
+    if (keptSet.has(f.installedPath)) return `<span class="po-tag">kept</span>`;
+    if (f.state === "stale") return `<span class="po-tag">stale · ${esc(f.matches || "older")}</span>`;
+    return `<span class="po-tag">${esc(f.state)}</span>`;
+  };
+  return `<ul class="po-list">${rows.map((f) => `
+    <li class="po-repo" data-file="${esc(f.path)}">
+      <span class="po-rlabel">${esc(f.path)}</span>
+      <span class="po-rpath">${esc(f.installedPath || f.target)}</span>
+      ${tag(f)}
+      <span class="po-racts">
+        ${f.state === "modified" ? `<button class="tact dsc-diff" title="Show your edit against the bundle">diff</button>` : ""}
+        ${f.state === "modified" && !keptSet.has(f.installedPath) ? `<button class="tact dsc-keep" title="Record this as yours: upgrades leave it alone">keep</button>` : ""}
+        ${f.state === "modified" || keptSet.has(f.installedPath) ? `<button class="tact dsc-reset" title="Put the bundle's copy back (yours goes to a backup)">reset</button>` : ""}
+      </span>
+    </li>`).join("")}</ul>`;
+}
+
+function renderDiscipline() {
+  const stage = document.getElementById("stage");
+  if (!stage || stageView.kind !== "discipline") return;
+  const d = disc;
+  // Keep an open diff or a mid-flight error: the island re-renders on every
+  // 10s poll, so only replace the DOM when something it shows changed.
+  const sig = d ? JSON.stringify([d.checkedAt, d.headline, d.action, d.staged, d.report.health, d.report.files, d.keptPaths, d.ledger.length]) : "";
+  if (stage.dataset.discSig === sig && stage.querySelector("#dsc-root")) return;
+  stage.dataset.discSig = sig;
+  stage.replaceChildren();
+  if (!d) {
+    stage.innerHTML = `<div id="stage-header" class="stage-head"><span class="sh-name">Agent Discipline</span></div><div class="po" id="dsc-root"><div class="po-empty">Checking…</div></div>`;
+    return;
+  }
+  const r = d.report;
+  const color = discColor(d);
+  const actionLabel = { install: "Review install…", upgrade: `Upgrade to ${esc(r.rev.bundled)}…`, repair: "Repair…" }[d.action] || "";
+  const installed = r.rev.layout === "rev";
+  const checks = discChecks(r);
+  const sev = (s) => s === "ok" ? "var(--st-running)" : s === "warn" ? "var(--over)" : "var(--st-error)";
+  const led = (d.ledger || []).slice(-6).reverse();
+  stage.innerHTML = `
+    <div id="stage-header" class="stage-head po-head">
+      <span class="sh-name">Agent Discipline</span>
+      <span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(discWord(d))}</span></span>
+      ${installed ? `<span class="sh-chip">${esc(r.rev.installed)}</span>` : ""}
+      ${r.rev.bundled && r.rev.bundled !== r.rev.installed ? `<span class="sh-chip" title="Revision carried by this build of loom">bundle ${esc(r.rev.bundled)}</span>` : ""}
+      <span class="po-acts">
+        <button class="sh-btn" id="dsc-recheck" title="Run the doctor again now">Re-check</button>
+        ${actionLabel ? `<button class="sh-btn sh-primary" id="dsc-action">${actionLabel}</button>` : ""}
+        ${installed && d.receipt ? `<button class="sh-btn sh-danger" id="dsc-uninstall" title="Undo what loom installed, from the receipt">Uninstall</button>` : ""}
+      </span>
+    </div>
+    <div class="po" id="dsc-root">
+      <div class="modal-error" id="dsc-error"></div>
+      <p class="dsc-headline">${esc(d.headline)}</p>
+      ${(r.issues || []).length ? `<div class="po-warns">${r.issues.map((i) => `<div class="po-warn dsc-issue dsc-${esc(i.severity)}"><b>${esc(i.group)}</b> ${esc(i.message)}${i.fix ? ` <span class="dsc-fix">· ${esc(i.fix)}</span>` : ""}</div>`).join("")}</div>` : ""}
+      <section class="po-block">
+        <div class="po-bhead"><h3>Checks</h3><span class="po-empty">${esc(fmtTS(r.checkedAt))}</span></div>
+        <table class="dsc-table">${checks.map(([l, s, det]) => `<tr><td class="dsc-k">${esc(l)}</td><td class="dsc-s"><i style="background:${sev(s)}"></i></td><td class="dsc-v">${esc(det)}</td></tr>`).join("")}</table>
+      </section>
+      <section class="po-block">
+        <div class="po-bhead"><h3>Files</h3></div>
+        ${discFileRows(d)}
+        <div class="diff-patch" id="dsc-patch" hidden></div>
+      </section>
+      <section class="po-block">
+        <div class="po-bhead"><h3>History</h3>${d.receipt ? `<span class="po-empty">installed ${esc(fmtTS(d.receipt.installedAt))}${d.receipt.loomBuild ? " by " + esc(d.receipt.loomBuild) : ""}</span>` : ""}</div>
+        ${led.length ? `<ul class="po-list">${led.map((e) => `<li class="po-repo"><span class="po-rlabel">${esc(e.op)}${e.fromRev || e.toRev ? ` ${esc(e.fromRev || "—")} → ${esc(e.toRev || "—")}` : ""}</span><span class="po-rpath">${esc(fmtTS(e.ts))}${e.gate ? ` · gate ${e.gate.suitesPassed ? "pass" : "fail"}${e.gate.newAllows || e.gate.newDenies ? ` · ${e.gate.newAllows} new allows, ${e.gate.newDenies} new denies` : ""}` : ""}${e.note ? " · " + esc(e.note) : ""}</span>${e.backup ? `<span class="po-tag" title="${esc(e.backup)}">backup</span>` : ""}</li>`).join("")}</ul>` : `<div class="po-empty">Loom has not installed or changed anything here yet.</div>`}
+      </section>
+      <section class="po-block">
+        <div class="po-bhead"><h3>Where</h3></div>
+        <div class="dsc-where">${[["config", r.layout.configDir], ["hooks", r.layout.hooksDir], ["state", r.layout.stateDir], ["logs", r.layout.logDir], ["deadline", r.layout.deadline]].map(([k, v]) => `<span class="dsc-k">${k}</span><span class="po-rpath">${esc(v || "")}</span>`).join("")}</div>
+      </section>
+    </div>`;
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
+  on("dsc-recheck", () => discPoll(true));
+  on("dsc-action", () => openGateSheet(d.action));
+  on("dsc-uninstall", () => uninstallFlow());
+  for (const li of stage.querySelectorAll("li[data-file]")) {
+    const file = li.dataset.file;
+    const diffB = li.querySelector(".dsc-diff"), keepB = li.querySelector(".dsc-keep"), resetB = li.querySelector(".dsc-reset");
+    if (diffB) diffB.addEventListener("click", (e) => { e.stopPropagation(); discFileAction("diff", file); });
+    if (keepB) keepB.addEventListener("click", (e) => { e.stopPropagation(); discFileAction("keep", file); });
+    if (resetB) armAction(resetB, "reset?", () => discFileAction("reset", file));
+  }
+}
+
+async function discFileAction(action, file) {
+  const fn = bound("DisciplineAction");
+  const err = document.getElementById("dsc-error");
+  if (!fn) return;
+  try {
+    const out = await fn(action, file);
+    if (action === "diff") {
+      const el = document.getElementById("dsc-patch");
+      if (el) { el.hidden = false; el.innerHTML = out ? renderPatch(out) : `<span class="dl">no difference</span>`; }
+      return;
+    }
+    if (err) err.textContent = out;
+    discPoll(true);
+  } catch (e) { console.error("discipline", e); if (err) err.textContent = String(e); }
+}
+
+async function uninstallFlow() {
+  const planFn = bound("DisciplineUninstallPlan"), doFn = bound("DisciplineUninstall");
+  if (!planFn || !doFn) return;
+  let plan;
+  try { plan = await planFn(); } catch (e) { flashDisc(String(e)); return; }
+  const body = `<p>Loom undoes what its receipt lists and nothing else: ${plan.steps.length} steps.</p>` +
+    `<ul class="dsc-steps">${plan.steps.map((s) => `<li>${esc(s.kind)} <span class="po-rpath">${esc(s.target)}</span>${s.detail ? ` <span class="dsc-fix">${esc(s.detail)}</span>` : ""}</li>`).join("")}</ul>` +
+    (plan.warnings.length ? `<div class="po-warns">${plan.warnings.map((w) => `<div class="po-warn">${esc(w)}</div>`).join("")}</div>` : "") +
+    (plan.errors.length ? `<div class="modal-error">${plan.errors.map(esc).join("<br>")}</div>` : "") +
+    `<p>Running sessions keep working; they pick up the change when restarted.</p>`;
+  if (plan.errors.length) { await confirmModal("Cannot uninstall", body, "OK"); return; }
+  if (!(await confirmModal("Uninstall Agent Discipline?", body, "Uninstall"))) return;
+  try { await doFn(); } catch (e) { flashDisc(String(e)); }
+  discPoll(true);
+}
+
+function flashDisc(msg) {
+  const el = document.getElementById("dsc-error");
+  if (el) el.textContent = msg;
+  else console.error("discipline", msg);
+}
+
+// The gate sheet: choices → plan → "Stage & run gate" → result → Install,
+// which is enabled only on PASS and, when the replay found verdict flips,
+// only once they are acknowledged. Cancel at any point abandons the staged
+// revision; nothing a session uses has changed until Install.
+async function openGateSheet(action) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const planFn = bound("DisciplinePlan"), stageFn = bound("DisciplineStage"), applyFn = bound("DisciplineApply"), abandonFn = bound("DisciplineAbandon");
+  if (!planFn || !stageFn || !applyFn) return;
+  const opts = { rules: true, statusLine: true, env: false, deny: true, replace: [] };
+  const titles = { install: "Install Agent Discipline", upgrade: "Upgrade Agent Discipline", repair: "Repair Agent Discipline" };
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal disc-sheet" role="dialog" aria-label="${esc(titles[action] || "Agent Discipline")}">
+      <h2>${esc(titles[action] || "Agent Discipline")}</h2>
+      <div class="dsc-sheet-body" id="gs-body"><div class="po-empty">Planning…</div></div>
+      <div class="modal-error" id="gs-error"></div>
+      <div class="modal-actions">
+        <span class="gs-status" id="gs-status"></span>
+        <button class="btn-ghost" id="gs-cancel">Cancel</button>
+        <button class="btn-launch" id="gs-stage">Stage &amp; run gate</button>
+        <button class="btn-launch" id="gs-install" disabled title="Enabled once the gate reports PASS">Install</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const body = backdrop.querySelector("#gs-body"), errEl = backdrop.querySelector("#gs-error"), status = backdrop.querySelector("#gs-status");
+  const stageBtn = backdrop.querySelector("#gs-stage"), installBtn = backdrop.querySelector("#gs-install"), cancelBtn = backdrop.querySelector("#gs-cancel");
+  let staged = null, busy = false;
+  const close = async () => {
+    if (busy) return;
+    document.removeEventListener("keydown", onEsc, true);
+    backdrop.remove();
+    if (staged && abandonFn) { try { await abandonFn(); } catch (e) { console.error("abandon", e); } }
+    discPoll(true);
+  };
+  const onEsc = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onEsc, true);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  cancelBtn.addEventListener("click", close);
+
+  // Read only the controls that are on screen: before the first plan and on
+  // the gate screen there are none, and the choices made earlier must hold.
+  const readOpts = () => {
+    const cb = (id, key) => { const el = body.querySelector("#" + id); if (el) opts[key] = el.checked; };
+    cb("gs-rules", "rules"); cb("gs-statusline", "statusLine"); cb("gs-env", "env"); cb("gs-deny", "deny");
+    const sels = [...body.querySelectorAll("select.gs-conflict")];
+    if (sels.length) opts.replace = sels.filter((s) => s.value === "replace").map((s) => s.dataset.path);
+  };
+  const stepLine = (s) => `<li class="gs-step${s.enabled ? "" : " off"}"><span class="dsc-k">${esc(s.kind)}</span><span class="po-rpath">${esc(s.target)}</span>${s.detail ? `<span class="dsc-fix">${esc(s.detail)}</span>` : ""}${s.diff ? `<details class="gs-diff"><summary>diff</summary><div class="diff-patch">${renderPatch(s.diff)}</div></details>` : ""}</li>`;
+  const renderPlan = (plan) => {
+    const groups = [["core", "Core: hooks, context bar, deadline wrapper, registrations", null],
+      ["rules", "Import the handbook's rules into CLAUDE.md", "gs-rules"],
+      ["statusline", "Set the context bar as the status line (only when none is set)", "gs-statusline"],
+      ["env", "Set the three optional env keys (auto-compact above budget, PATH)", "gs-env"],
+      ["deny", "Deny edits to the hook directory from inside sessions", "gs-deny"]];
+    const byGroup = (g) => plan.steps.filter((s) => s.group === g);
+    body.innerHTML =
+      `<p class="dsc-headline">${esc(plan.op)} ${esc(plan.fromRev && plan.fromRev !== plan.rev ? plan.fromRev + " → " + plan.rev : plan.rev)} on the ${esc(plan.layout)} layout · ${plan.steps.filter((s) => s.enabled).length} steps</p>` +
+      (plan.errors.length ? `<div class="modal-error">${plan.errors.map(esc).join("<br>")}</div>` : "") +
+      (plan.warnings.length ? `<div class="po-warns">${plan.warnings.map((w) => `<div class="po-warn">${esc(w)}</div>`).join("")}</div>` : "") +
+      (plan.conflicts.length ? `<section class="po-block"><div class="po-bhead"><h3>Your edits</h3></div><ul class="po-list">${plan.conflicts.map((c) => `<li class="po-repo"><span class="po-rpath">${esc(c.path)}</span><select class="gs-conflict" data-path="${esc(c.path)}"><option value="keep"${c.choice === "keep" ? " selected" : ""}>keep mine</option><option value="replace"${c.choice === "replace" ? " selected" : ""}>replace with the bundle's</option></select></li>`).join("")}</ul></section>` : "") +
+      groups.map(([g, label, id]) => {
+        const steps = byGroup(g);
+        if (!steps.length) return "";
+        const head = id ? `<label class="pf-check"><input type="checkbox" id="${id}"${opts[g === "statusline" ? "statusLine" : g] ? " checked" : ""} /><span>${label}</span></label>` : `<div class="po-bhead"><h3>${label}</h3></div>`;
+        return `<section class="po-block">${head}<ul class="dsc-steps">${steps.map(stepLine).join("")}</ul></section>`;
+      }).join("") +
+      (plan.hooks && plan.hooks.length ? `<section class="po-block"><div class="po-bhead"><h3>Registrations</h3></div><ul class="dsc-steps">${plan.hooks.map((h) => `<li class="gs-step"><span class="dsc-k">${esc(h.action)}</span><span class="po-rpath">${esc(h.id)}</span>${h.detail ? `<span class="dsc-fix">${esc(h.detail)}</span>` : ""}</li>`).join("")}</ul></section>` : "");
+    stageBtn.disabled = plan.errors.length > 0;
+    for (const id of ["gs-rules", "gs-statusline", "gs-env", "gs-deny"]) {
+      const el = body.querySelector("#" + id);
+      if (el) el.addEventListener("change", replan);
+    }
+    for (const sel of body.querySelectorAll("select.gs-conflict")) sel.addEventListener("change", replan);
+  };
+  const replan = async () => {
+    readOpts();
+    try { renderPlan(await planFn(opts)); } catch (e) { errEl.textContent = String(e); }
+  };
+  const renderGate = (res) => {
+    const g = res.gate || {};
+    const flips = ((g.replay && g.replay.newAllows) || []).length + ((g.replay && g.replay.newDenies) || []).length;
+    const line = (ok, label, det) => `<tr><td class="dsc-s"><i style="background:${ok === null ? "var(--text-faint)" : ok ? "var(--st-running)" : "var(--st-error)"}"></i></td><td class="dsc-k">${esc(label)}</td><td class="dsc-v">${det}</td></tr>`;
+    const pre = g.preflightFailures || [];
+    body.innerHTML =
+      `<p class="dsc-headline">${res.error ? "The gate did not pass. Nothing was changed." : g.passed ? "Gate PASS. Nothing a session uses has changed yet; Install switches the revision in." : "The gate did not pass. Nothing was changed."}</p>` +
+      (res.error ? `<div class="modal-error">${esc(res.error)}</div>` : "") +
+      `<table class="dsc-table">` +
+      line(pre.length === 0, "preflight", pre.length ? pre.map(esc).join("<br>") : "python3 runs, every hook parses, the deadline wrapper works") +
+      (g.suites && g.suites.ran ? line(g.suites.passed, "suites", g.suites.passed ? "OVERALL: PASS" : `<details><summary>FAIL</summary><pre class="gs-out">${esc(g.suites.output || "")}</pre></details>`) : line(null, "suites", "not run")) +
+      (g.replay && g.replay.ran ? line(flips === 0, "replay", `${g.replay.newAllows.length} newly allowed, ${g.replay.newDenies.length} newly denied over 30 days of logged denials`) : line(null, "replay", "no decisions log to replay")) +
+      `</table>` +
+      (flips ? `<section class="po-block"><div class="po-bhead"><h3>Verdicts that change</h3></div><ul class="dsc-steps">${g.replay.newAllows.map((s) => `<li class="gs-step"><span class="dsc-k">now allow</span><span class="po-rpath">${esc(s)}</span></li>`).join("")}${g.replay.newDenies.map((s) => `<li class="gs-step"><span class="dsc-k">now deny</span><span class="po-rpath">${esc(s)}</span></li>`).join("")}</ul><label class="pf-check"><input type="checkbox" id="gs-ack" /><span>I have read these ${flips} changes and want the new verdicts</span></label></section>` : "");
+    const ack = body.querySelector("#gs-ack");
+    const update = () => { installBtn.disabled = !(g.passed && !res.error && (flips === 0 || (ack && ack.checked))); installBtn.title = installBtn.disabled ? (g.passed ? "Acknowledge the verdict changes first" : "Enabled once the gate reports PASS") : "Switch the staged revision in"; };
+    if (ack) ack.addEventListener("change", update);
+    update();
+  };
+
+  stageBtn.addEventListener("click", async () => {
+    if (busy) return;
+    readOpts();
+    busy = true; stageBtn.disabled = true; installBtn.disabled = true; cancelBtn.disabled = true;
+    status.textContent = "Staging and running the gate… (suites take a minute)";
+    errEl.textContent = "";
+    try {
+      const res = await stageFn(opts);
+      staged = !res.error;
+      renderGate(res);
+      status.textContent = "";
+    } catch (e) { errEl.textContent = String(e); staged = false; }
+    busy = false; cancelBtn.disabled = false; stageBtn.disabled = false; stageBtn.textContent = "Stage again";
+  });
+  installBtn.addEventListener("click", async () => {
+    if (busy || installBtn.disabled) return;
+    const ack = body.querySelector("#gs-ack");
+    busy = true; installBtn.disabled = true; stageBtn.disabled = true; cancelBtn.disabled = true;
+    status.textContent = "Installing…";
+    try {
+      const res = await applyFn(!!(ack && ack.checked));
+      staged = null;
+      body.innerHTML = `<p class="dsc-headline">Installed. Sessions started from now on use the new hooks; running ones keep the old until restarted.</p>` +
+        (res && res.backupDir ? `<p class="po-empty">Backup of settings.json and CLAUDE.md in ${esc(res.backupDir)}</p>` : "") +
+        (res && res.log ? `<pre class="gs-out">${esc(res.log.join("\n"))}</pre>` : "");
+      status.textContent = "";
+      stageBtn.hidden = true; installBtn.hidden = true; cancelBtn.textContent = "Close";
+    } catch (e) { errEl.textContent = String(e); status.textContent = ""; installBtn.disabled = false; stageBtn.disabled = false; }
+    busy = false; cancelBtn.disabled = false;
+  });
+  await replan();
+}
+
+document.getElementById("disc-btn").addEventListener("click", openDiscipline);
+discPoll(false);
+setInterval(() => discPoll(false), DISC_POLL_MS);
+
 async function poll() {
   try {
     const listProjects = bound("ListProjectDetails");

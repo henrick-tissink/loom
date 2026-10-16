@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/henricktissink/loom/internal/config"
+	"github.com/henricktissink/loom/internal/discipline"
 	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/registry"
@@ -86,6 +87,9 @@ func run() error {
 	engine := status.NewEngine(tm, st, cfg.ClaudeConfigDir)
 	app := newApp(engine, tm, st, launcher, svc, time.Now)
 	app.settings = newSettingsStore(cfg.LoomDir)
+	if home, err := os.UserHomeDir(); err == nil {
+		app.disc = newDisciplineState(discipline.NewLayout(cfg.ClaudeConfigDir, home, os.Getenv("CLAUDE_STATE_DIR")), time.Now)
+	}
 	session.SetClaudeTheme(app.settings.get().TerminalTheme) // match Claude's theme to the terminal
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
 

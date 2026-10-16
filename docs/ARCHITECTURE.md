@@ -481,7 +481,11 @@ engine, with `defer recover()` on the poll paths so a half-built engine
 degrades to an empty list rather than crashing the window. Surfaces: the
 rail (projects · threads · stage), the launcher with multi-repo targets, the
 project overview (rename, re-point, add/remove repo, hide/solo, clean repo),
-search, the diff panel, preferences, and the ⌘K palette.
+search, the diff panel, preferences, the ⌘K palette, and the Agent
+Discipline island behind the shield token on the dock footer (`discipline.go`:
+the doctor's report cached by an mtime signature, the gate sheet that
+stages, runs the gate and commits only on a click after PASS, Diff / Keep /
+Reset for local edits, uninstall from the receipt; see `docs/DISCIPLINE.md`).
 
 Native touches, each with a real reason:
 
