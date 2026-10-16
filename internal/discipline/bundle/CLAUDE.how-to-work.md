@@ -17,7 +17,7 @@
 - For larger work, answer in one sentence: "What can the user do or see when this lands
   that they can't now?" If the answer is scaffolding, a framework, or orchestration
   rather than the feature, stop and say so.
-- Keep unrelated improvements out of the task. Report them briefly (or as a Lava finding).
+- Keep unrelated improvements out of the task. Report them briefly.
 
 ### Work directly
 - Do not spawn implementing subagents or teams unless I explicitly ask. A few shell commands
@@ -140,30 +140,3 @@ When compacting, preserve verbatim: the task file path and its Done-when list wi
 state, the checkpoint path, each test or check command that ran with its last result, the
 list of files touched, and every running background job with its deadline. Drop tool output
 that has already been acted on.
-
-## Lava Lamp
-
-The team shares a coordination feed. Use it via the `lava_*` MCP tools, or the `lava` CLI.
-
-- **At task start**, run `lava intent "<objective>" [repo-relative paths...]` from your
-  worktree. This publishes your plan and checks other tasks, including the same human's agents.
-  With MCP, call `lava_emit(kind: "claim", session, repo, branch, summary, paths)` then
-  `lava_check(repo, session, paths)`. Reuse the coordination session ID from the startup hook;
-  without hooks, choose a unique task ID and use it consistently.
-- **Before entering a new area**, check the intended paths and update your intent if the scope
-  changes. Pre-edit hooks also check supported edit tools, but cannot detect every shell edit.
-- **On overlap**, read the other task's objective and branch. Continue independent work when
-  the boundary is clear; tell the human about actual conflicts and ask before duplicating or
-  depending on the other task's unfinished changes. A warning is advisory, not a lock or permission
-  to modify another worktree, switch its branch, or cherry-pick its commits.
-- **When you notice a real defect or pain point that's out of scope**, record it with
-  `lava_emit(kind: "finding")`. One line. State what's wrong and where, not what you'd do about it.
-- **When you finish a distinct piece of work**, `lava_emit(kind: "done")` with one line that
-  quotes the task file's Outcome.
-- **Keep findings open until verified on the integration branch.** A fix on your feature branch
-  is not a landed fix; mention its branch in your completion note instead of closing prematurely.
-- **Before picking up new work**, `lava_findings` is a good source of known problems.
-
-Do not record: routine progress, things you already fixed this session, style opinions, speculation,
-or anything you haven't actually observed. A findings list nobody trusts is worse than no list. If
-you're unsure whether something is worth recording, it probably isn't.
