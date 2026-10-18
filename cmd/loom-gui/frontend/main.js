@@ -148,8 +148,11 @@ const STATUS_ICON = {
 };
 const FOLDER_ICON = '<path d="M3 7h6l2 2h10v10H3z"/>';
 
-function icon(inner, w) {
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w || 2.6}" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+// Every icon draws in a 24-unit box but shows at 11-16px, so a stroke-width
+// attribute would render at a different weight per size. .ic sets one
+// on-screen weight (--icon-stroke, non-scaling) and the caps and joins.
+function icon(inner) {
+  return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">${inner}</svg>`;
 }
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -306,7 +309,7 @@ function actionBtn(pathInner, title, onClick, extraClass) {
   const b = document.createElement("button");
   b.className = "tact" + (extraClass ? " " + extraClass : "");
   b.title = title;
-  b.innerHTML = icon(pathInner, 2.3);
+  b.innerHTML = icon(pathInner);
   b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
   return b;
 }
@@ -327,7 +330,7 @@ function killButton(name) {
   const b = document.createElement("button");
   b.className = "tact tact-kill";
   b.title = "Kill session";
-  const glyph = () => { b.innerHTML = icon('<path d="M6 6l12 12M18 6L6 18"/>', 2.3); };
+  const glyph = () => { b.innerHTML = icon('<path d="M6 6l12 12M18 6L6 18"/>'); };
   if (armedKills.has(name)) { b.classList.add("armed"); b.textContent = "Kill?"; }
   else { glyph(); }
   b.addEventListener("click", (e) => {
@@ -460,7 +463,7 @@ function appendLiveRow(s, projLabel) {
   const color = statusColor(s.status);
   li.style.setProperty("--tc", color);
   li.innerHTML =
-    `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
+    `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
@@ -498,7 +501,7 @@ function appendFinishedRow(s) {
   // outcome the indexer extracted, so a finished row reads as what it ended with.
   else if (s.outcome) sumLine = `<span class="tsum" title="${esc(s.outcome)}">${esc(sumPreview(s.outcome))}</span>`;
   li.innerHTML =
-    `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>` +
+    `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span>${sumLine}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(s.status)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
@@ -826,7 +829,7 @@ function homeMarkup() {
   const sub = queue.length ? counts.join(" · ") || "Freshest ask first."
     : counts.length ? counts.join(" · ") + " — walk away, loom pulls you back." : "Walk away — loom pulls you back.";
 
-  const glyph = (s) => `<span class="tglyph i-${esc(s.status)}" style="--tc:${statusColor(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>`;
+  const glyph = (s) => `<span class="tglyph i-${esc(s.status)}" style="--tc:${statusColor(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>`;
   const projOf = (s) => esc(s.projectName || s.project || "");
   const more = (n, what) => n > 0 ? `<div class="home-more">+${n} more ${what} in the list on the left</div>` : "";
 
@@ -891,12 +894,12 @@ function renderStageHeader(name) {
   const ctx = s && s.ctxTokens ? `<span class="sh-chip${overBudget(s) ? " over" : ""}">${Math.round(s.ctxTokens / 1000)}k${overBudget(s) ? " · over budget" : ""}</span>` : "";
   el.innerHTML =
     `<span class="sh-name">${esc(label)}</span>` +
-    (project ? `<span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(project)}</span>` : "") +
+    (project ? `<span class="sh-proj">${icon(FOLDER_ICON)}${esc(project)}</span>` : "") +
     `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}${wait}</span></span>` +
     task + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
     (s && s.external ? "" :
       `<span class="sh-acts">` +
-      `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>', 2)}Diff</button>` +
+      `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
       (s && overBudget(s) ? `<button class="sh-btn" id="sh-fresh" title="Fresh session from checkpoint (same directory; this one stays open)">Fresh session</button>` : "") +
       `<button class="sh-btn sh-primary" id="sh-reply" title="Quick reply (R)">Reply</button></span>`);
   const diffBtn = el.querySelector("#sh-diff");
@@ -1193,7 +1196,7 @@ function renderProject() {
       ${p.hidden ? `<span class="po-tag">hidden</span>` : ""}
       ${p.solo ? `<span class="po-tag po-tag-solo">solo</span>` : ""}
       ${p.missing ? `<span class="po-tag">missing</span>` : ""}
-      <span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(p.root || "no directory")}</span>
+      <span class="sh-proj">${icon(FOLDER_ICON)}${esc(p.root || "no directory")}</span>
       <span class="po-acts">
         <button class="sh-btn sh-primary" id="po-brief" title="A deep account of what was done here, written by Claude">Brief</button>
         <button class="sh-btn" id="po-hide">${p.hidden ? "Show" : "Hide"}</button>
@@ -1552,7 +1555,7 @@ function renderBriefReader() {
   const oItem = (o) => `<a class="br-oi${o.num ? " br-onum" : ""}" data-go="${o.id}">${o.num ? `<span>${String(o.num).padStart(2, "0")}</span>` : ""}<b title="${esc(o.title)}">${esc(o.title)}</b></a>`;
   el.innerHTML = `
     <div class="br-bar">
-      <button class="br-cur" id="br-cur" title="Contents"><span id="br-cur-t">${esc("Last " + briefWinLabel(m.window))}</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+      <button class="br-cur" id="br-cur" title="Contents"><span id="br-cur-t">${esc("Last " + briefWinLabel(m.window))}</span><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
       <span class="br-bacts">
         <button class="sh-btn" id="br-page" title="Open as a standalone page in your browser, to print or keep">Make artefact</button>
         <button class="sh-btn" id="br-files" title="Show brief.md, evidence.md and the page in Finder">Files</button>

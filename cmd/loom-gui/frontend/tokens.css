@@ -71,6 +71,9 @@
   --t-head: 22px;    /* brief headings, empty-state titles */
   --t-display: 28px; /* the brief's hero */
 
+  /* every chrome icon strokes at this on-screen weight, whatever its size */
+  --icon-stroke: 1.5px;
+
   /* Bundled (main.js imports @fontsource-variable), so the look is the same
      offline and the terminal can wait for its real metrics. Emoji/symbol fonts
      are appended as fallbacks: xterm.js uses the DOM renderer, so glyphs the
@@ -152,6 +155,8 @@ body {
   transition: color 0.12s ease, background 0.12s ease;
 }
 #new-session:hover, #search-btn:hover, #prefs-btn:hover, #disc-btn:hover, #pp-collapse:hover { color: var(--text); background: var(--sel); }
+.ic { stroke-linecap: round; stroke-linejoin: round; }
+.ic * { stroke-width: var(--icon-stroke); vector-effect: non-scaling-stroke; }
 #new-session svg, #search-btn svg, #prefs-btn svg, #disc-btn svg { width: 16px; height: 16px; }
 #new-session { color: var(--accent-ink); background: var(--accent-soft); }
 #new-session:hover { color: var(--on-accent); background: var(--accent); }
