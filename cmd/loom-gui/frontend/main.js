@@ -1,3 +1,7 @@
+// Bundled variable fonts (Manrope for the chrome, JetBrains Mono for names,
+// paths and the terminal): the same look offline, and no remote request.
+import "@fontsource-variable/manrope";
+import "@fontsource-variable/jetbrains-mono";
 import "./tokens.css";
 import "@xterm/xterm/css/xterm.css";
 import { statusColor, statusWord, xtermThemeFor } from "./theme.js";
@@ -36,6 +40,10 @@ let latestProjects = [];
 // so the 1.5s poll can refresh the overview's session lists without stomping
 // on a rename the user is mid-way through typing.
 let stageView = { kind: "none" };
+// The terminal's face, and a load started at boot so it is usually in hand
+// before the first session opens (@font-face is lazy otherwise).
+const MONO_FACE = '"JetBrains Mono Variable"';
+const monoReady = Promise.all([400, 600].map((w) => document.fonts.load(`${w} 13px ${MONO_FACE}`))).catch(() => {});
 let termThemeMode = "dark"; // "dark" | "light", from preferences (themes the whole chrome)
 
 // bound resolves a Wails-bound method by name, or null. Two callers need this:
@@ -1846,9 +1854,16 @@ function selectSession(name) {
   renderStageHeader(name);
   renderRail(latestSessions, latestRecent); // reflect active highlight immediately
 
+  // xterm measures its cell from the font at open(). If the mono face is not
+  // loaded yet it measures a fallback, so note that and re-measure on load.
+  const monoLate = !document.fonts.check(`13px ${MONO_FACE}`);
   term = new Terminal({
-    fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--font-mono"),
+    fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim(),
     fontSize: 13,
+    // Line height stays xterm's 1.0: the DOM renderer draws box glyphs as
+    // text, so any extra leading breaks Claude's │ ╭ ╮ frames into dashes.
+    fontWeight: 400,
+    fontWeightBold: 600,
     theme: xtermThemeFor(termThemeMode),
     cursorBlink: true,
     // Unicode11Addon registers via the proposed unicode API; without this
@@ -1901,9 +1916,14 @@ function selectSession(name) {
   });
   termRO.observe(host);
   // The very first fit can run before the mono font has been measured, giving a
-  // wrong cell width and thus the wrong column count; re-fit once fonts are
-  // ready so the grid matches the pane on the initial attach too.
-  document.fonts.ready.then(() => { if (gen === attachGen) onResize(); });
+  // wrong cell width and thus the wrong column count; once the face is loaded,
+  // make xterm re-measure (a changed fontFamily string is what triggers it; the
+  // trailing space is the same CSS list) and re-fit so the grid matches the pane.
+  monoReady.then(() => {
+    if (gen !== attachGen || !term) return;
+    if (monoLate) term.options.fontFamily = term.options.fontFamily + " ";
+    onResize();
+  });
 }
 
 function onResize() {
