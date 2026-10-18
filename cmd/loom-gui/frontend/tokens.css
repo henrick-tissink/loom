@@ -238,7 +238,7 @@ body {
 .pj-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pj-row.missing .pj-name, .pj-row.ung .pj-name { color: var(--text-faint); font-style: italic; font-weight: 500; }
 .pj-meta { display: inline-flex; align-items: center; gap: 6px; }
-.pj-count { font-size: var(--t-micro); font-weight: 700; min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px; display: inline-grid; place-items: center; color: var(--on-accent); background: var(--accent); }
+.pj-count { font-size: var(--t-micro); font-weight: 700; line-height: 1; min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px; display: inline-grid; place-items: center; color: var(--on-accent); background: var(--accent); }
 .pj-run { width: 6px; height: 6px; border-radius: 50%; background: var(--st-running); display: inline-block; }
 .pj-div { height: 1px; background: var(--edge); margin: 6px 14px; }
 /* collapsed strip */
@@ -251,7 +251,7 @@ body {
 .pj-tok:hover { background: var(--rail); color: var(--text); }
 .pj-tok.on { background: var(--sel); color: var(--text); }
 .pj-tok .attn-dot { box-shadow: none; width: 10px; height: 10px; }
-.pj-tok .pj-badge { position: absolute; top: -3px; right: -3px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; background: var(--accent); color: var(--on-accent); font-size: var(--t-micro); font-weight: 700; display: grid; place-items: center; border: 2px solid var(--bg); }
+.pj-tok .pj-badge { position: absolute; top: -3px; right: -3px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; background: var(--accent); color: var(--on-accent); font-size: var(--t-micro); font-weight: 700; line-height: 1; display: grid; place-items: center; border: 2px solid var(--bg); }
 .pj-tok .pj-tdot { position: absolute; bottom: 5px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--st-running); }
 .pj-tok.ung { color: var(--text-faint); font-size: var(--t-title); font-weight: 500; }
 
