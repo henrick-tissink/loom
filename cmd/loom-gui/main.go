@@ -124,8 +124,14 @@ func run() error {
 		OnStartup:   func(ctx context.Context) { app.startup(ctx) },
 		Bind:        []interface{}{app},
 		AssetServer: &assetserver.Options{Assets: assets},
+		// A transparent webview over a translucent window: the ground (the
+		// strips between the islands) lets the desktop's vibrancy through,
+		// tinted by tokens.css; the islands themselves stay opaque.
+		BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 0},
 		Mac: &mac.Options{
-			TitleBar: mac.TitleBarHiddenInset(),
+			TitleBar:             mac.TitleBarHiddenInset(),
+			WebviewIsTransparent: true,
+			WindowIsTranslucent:  true,
 		},
 	})
 }
