@@ -47,3 +47,11 @@ func TestSettingsStore_NormalizesEditorAndPartialFile(t *testing.T) {
 		t.Errorf("partial file = %+v, want {zed, true}", got)
 	}
 }
+
+func TestNormalize_TerminalTheme(t *testing.T) {
+	for in, want := range map[string]string{"dark": "dark", "light": "light", "system": "system", "": "dark", "auto": "dark"} {
+		if got := normalize(Settings{TerminalTheme: in}).TerminalTheme; got != want {
+			t.Errorf("normalize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

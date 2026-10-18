@@ -107,7 +107,7 @@ func run() error {
 		}
 		app.hooks = newHookState(l)
 	}
-	session.SetClaudeTheme(app.settings.get().TerminalTheme) // match Claude's theme to the terminal
+	app.applyClaudeTheme() // match Claude's theme to the terminal
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
 	app.briefs = newBriefState(&brief.Service{
 		Store: st, ClaudeConfigDir: cfg.ClaudeConfigDir,

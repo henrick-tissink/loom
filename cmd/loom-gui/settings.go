@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/henricktissink/loom/internal/session"
@@ -16,7 +18,7 @@ type Settings struct {
 	Editor        string `json:"editor"`        // "" = auto-detect; else "cursor" | "code" | "zed"
 	Notifications bool   `json:"notifications"` // fire native needs-you notifications
 	AutoSummarize bool   `json:"autoSummarize"` // background-summarize finished sessions (uses claude quota)
-	TerminalTheme string `json:"terminalTheme"` // "dark" (default) | "light"; themes the chrome, the terminal and Claude
+	TerminalTheme string `json:"terminalTheme"` // "dark" (default) | "light" | "system"; themes the chrome, the terminal and Claude
 }
 
 func defaultSettings() Settings {
@@ -83,7 +85,9 @@ func normalize(v Settings) Settings {
 	default:
 		v.Editor = ""
 	}
-	if v.TerminalTheme != "light" {
+	switch v.TerminalTheme {
+	case "light", "system":
+	default:
 		v.TerminalTheme = "dark"
 	}
 	return v
@@ -107,6 +111,37 @@ func (a *App) SetPrefs(s Settings) error {
 	if err := a.settings.set(s); err != nil {
 		return err
 	}
-	session.SetClaudeTheme(a.settings.get().TerminalTheme)
+	a.applyClaudeTheme()
 	return nil
+}
+
+// applyClaudeTheme sets the Claude theme for new sessions from the setting.
+// "system" resolves to what macOS shows now; the frontend corrects it live
+// through SystemAppearance when the appearance changes.
+func (a *App) applyClaudeTheme() {
+	t := a.settings.get().TerminalTheme
+	if t == "system" {
+		t = systemAppearance()
+	}
+	session.SetClaudeTheme(t)
+}
+
+// SystemAppearance is called by the frontend whenever the macOS appearance
+// resolves or changes ("dark" | "light"). It only matters under "system":
+// a fixed theme ignores it.
+func (a *App) SystemAppearance(mode string) {
+	if a.settings == nil || a.settings.get().TerminalTheme != "system" {
+		return
+	}
+	session.SetClaudeTheme(mode)
+}
+
+// systemAppearance reads the macOS appearance: AppleInterfaceStyle is "Dark"
+// in dark mode and absent (the read fails) in light mode.
+func systemAppearance() string {
+	out, err := exec.Command("defaults", "read", "-g", "AppleInterfaceStyle").Output()
+	if err == nil && strings.TrimSpace(string(out)) == "Dark" {
+		return "dark"
+	}
+	return "light"
 }

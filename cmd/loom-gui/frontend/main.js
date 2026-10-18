@@ -44,7 +44,8 @@ let stageView = { kind: "none" };
 // before the first session opens (@font-face is lazy otherwise).
 const MONO_FACE = '"JetBrains Mono Variable"';
 const monoReady = Promise.all([400, 600].map((w) => document.fonts.load(`${w} 13px ${MONO_FACE}`))).catch(() => {});
-let termThemeMode = "dark"; // "dark" | "light", from preferences (themes the whole chrome)
+let termThemeMode = "dark"; // "dark" | "light", resolved from preferences (themes the whole chrome)
+let termThemePref = "dark"; // "dark" | "light" | "system", as saved
 
 // bound resolves a Wails-bound method by name, or null. Two callers need this:
 // the bindings injected after module-eval (GetPrefs already did this dance),
@@ -56,13 +57,19 @@ function bound(name) {
   return app && typeof app[name] === "function" ? app[name].bind(app) : null;
 }
 
-// Reflect the terminal theme on the DOM (the #terminal pane background) and,
-// live, on any open terminal.
-function applyTermTheme(mode) {
-  termThemeMode = mode === "light" ? "light" : "dark";
-  document.documentElement.setAttribute("data-term-theme", termThemeMode);
-  if (term) term.options.theme = xtermThemeFor(termThemeMode);
+// Reflect the theme on the DOM (the chrome and the #terminal pane) and, live,
+// on any open terminal. "system" follows macOS appearance and tells Go each
+// time it resolves, so new Claude sessions launch in the matching theme.
+const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+function applyTermTheme(pref) {
+  termThemePref = pref === "light" || pref === "system" ? pref : "dark";
+  const mode = termThemePref === "system" ? (darkQuery.matches ? "dark" : "light") : termThemePref;
+  if (termThemePref === "system") { const fn = bound("SystemAppearance"); if (fn) fn(mode).catch(() => {}); }
+  termThemeMode = mode;
+  document.documentElement.setAttribute("data-term-theme", mode);
+  if (term) term.options.theme = xtermThemeFor(mode);
 }
+darkQuery.addEventListener("change", () => { if (termThemePref === "system") applyTermTheme("system"); });
 
 // Load the persisted terminal theme before the first session is opened.
 // Guarded: the Wails binding may not be injected yet at module-eval time.
@@ -1810,7 +1817,7 @@ async function openPrefs() {
   let prefs = { editor: "", notifications: true, autoSummarize: false, terminalTheme: "dark" };
   try { prefs = await window.go.main.App.GetPrefs(); } catch (e) { console.error("prefs", e); }
   const editors = [["", "Auto-detect"], ["cursor", "Cursor"], ["code", "VS Code"], ["zed", "Zed"]];
-  const themes = [["dark", "Dark"], ["light", "Light"]];
+  const themes = [["system", "Match system"], ["dark", "Dark"], ["light", "Light"]];
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
