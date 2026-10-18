@@ -8,6 +8,7 @@ import { statusColor, statusWord, xtermThemeFor } from "./theme.js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebglAddon } from "@xterm/addon-webgl";
 
 const threadsEl = document.getElementById("threads");
 const projectsEl = document.getElementById("projects");
@@ -2062,8 +2063,10 @@ function selectSession(name) {
   term = new Terminal({
     fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim(),
     fontSize: 13,
-    // Line height stays xterm's 1.0: the DOM renderer draws box glyphs as
-    // text, so any extra leading breaks Claude's │ ╭ ╮ frames into dashes.
+    // Line height starts at 1.0 and rises to TALL_LINE once the WebGL
+    // renderer is in: the DOM renderer draws box glyphs as text, so extra
+    // leading breaks Claude's │ ╭ ╮ frames into dashes; WebGL draws them as
+    // shapes that fill the whole cell, so they join at any height.
     fontWeight: 400,
     fontWeightBold: 600,
     theme: xtermThemeFor(termThemeMode),
@@ -2081,6 +2084,7 @@ function selectSession(name) {
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(host);
+  useWebgl(term);
   fit.fit();
 
   dataUnsub = window.runtime.EventsOn("pty:data:" + name, (b64) => term.write(b64ToBytes(b64)));
@@ -2123,7 +2127,23 @@ function selectSession(name) {
   // trailing space is the same CSS list) and re-fit so the grid matches the pane.
   monoReady.then(() => {
     if (gen !== attachGen || !term) return;
-    if (monoLate) term.options.fontFamily = term.options.fontFamily + " ";
+    if (monoLate) { term.options.fontFamily = term.options.fontFamily + " "; term.clearTextureAtlas(); }
+    onResize();
+  });
+}
+
+// useWebgl swaps in the WebGL renderer and the taller line. Without WebGL, or
+// when the GPU drops the context (sleep, a driver reset), the terminal goes
+// back to the DOM renderer at 1.0 so the frames stay whole.
+const TALL_LINE = 1.2;
+function useWebgl(t) {
+  let gl;
+  try { gl = new WebglAddon(); t.loadAddon(gl); } catch (e) { console.warn("webgl unavailable", e); return; }
+  t.options.lineHeight = TALL_LINE;
+  gl.onContextLoss(() => {
+    gl.dispose();
+    if (t !== term) return;
+    t.options.lineHeight = 1;
     onResize();
   });
 }
