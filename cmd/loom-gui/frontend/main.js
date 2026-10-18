@@ -341,11 +341,108 @@ function killButton(name) {
   return b;
 }
 
+// ---- live rail: rows survive the poll ----
+// Both nav panes are rebuilt from the DTOs on every 1.5s poll. Swapping the
+// whole list in each time threw away hover, restarted every animation and
+// made motion impossible, so the rebuild now goes into a detached list and
+// liveCommit swaps in only the rows whose content changed (matched by
+// data-key, compared by data-sig). Rows that moved slide from where they
+// were; rows that are new fade in. Click handlers close over a session's
+// name only, and everything else they read is in the row's HTML, so keeping
+// an unchanged node is safe.
+const reduceMotion = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
+const MOVE_MS = 240, ENTER_MS = 180, FLASH_MS = 1800, BREATHE_MS = 2400;
+
+// Where the append* helpers put rows: the live list, or a detached one while
+// renderThreadsPane builds the next state.
+let rowsTarget = threadsEl;
+// The view the threads list last drew (a project root, or the Attention queue).
+let threadsView = null;
+
+// seal records a row's identity and content; call it once the row is built.
+function seal(el, key) {
+  el.dataset.key = key;
+  el.dataset.sig = el.className + "\u0001" + (el.style.getPropertyValue("--tc") || "") + "\u0001" + (el.title || "") + "\u0001" + el.innerHTML;
+  return el;
+}
+
+// phase locks a looping animation to one wall clock, so a row replaced
+// mid-cycle carries on where the old one was instead of restarting. Applied
+// after seal: the inline delay changes every poll and must not count as
+// content.
+function phase(el, periodMs) { if (el) el.style.animationDelay = `-${Math.round(performance.now() % periodMs)}ms`; }
+
+function liveCommit(parent, next, animate) {
+  const old = new Map();
+  for (const c of parent.children) if (c.dataset.key) old.set(c.dataset.key, c);
+  const tops = new Map();
+  if (animate) for (const [k, c] of old) tops.set(k, c.getBoundingClientRect().top);
+  const want = [];
+  for (const n of [...next.children]) {
+    const k = n.dataset.key, o = k ? old.get(k) : null;
+    want.push(o && o.dataset.sig === n.dataset.sig ? o : n);
+    if (o) old.delete(k);
+  }
+  const keep = new Set(want);
+  for (const c of [...parent.children]) if (!keep.has(c)) c.remove();
+  want.forEach((n, i) => { if (parent.children[i] !== n) parent.insertBefore(n, parent.children[i] || null); });
+  if (!animate || reduceMotion.matches) return;
+  for (const n of want) {
+    const k = n.dataset.key;
+    if (!k || typeof n.animate !== "function") continue;
+    if (tops.has(k)) {
+      const dy = tops.get(k) - n.getBoundingClientRect().top;
+      if (Math.abs(dy) > 1) n.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: MOVE_MS, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
+    } else {
+      n.animate([{ opacity: 0, transform: "translateY(-4px)" }, { opacity: 1, transform: "none" }], { duration: ENTER_MS, easing: "ease-out" });
+    }
+  }
+}
+
+// A session that turns needs-you glows once. Transitions are found by
+// comparing with the statuses the rail last drew; the first render has
+// nothing to compare against, so a restart does not light up the queue.
+let railStatus = null;
+const flashAt = new Map(); // name -> performance.now() when it turned needs-you
+
+function noteTransitions() {
+  const t = performance.now();
+  const prev = railStatus;
+  railStatus = new Map(latestSessions.map((s) => [s.name, s.status]));
+  for (const [n, at] of flashAt) if (t - at > FLASH_MS) flashAt.delete(n);
+  if (!prev) return;
+  for (const [n, st] of railStatus) {
+    if (st === "needs_you" && prev.has(n) && prev.get(n) !== "needs_you") flashAt.set(n, t);
+  }
+}
+
+function applyFlashes(parent) {
+  const t = performance.now();
+  for (const el of parent.children) {
+    const at = flashAt.get(el.dataset.key);
+    if (at == null || el.classList.contains("flash")) continue;
+    el.style.animationDelay = `-${Math.round(t - at)}ms`;
+    el.classList.add("flash");
+    el.addEventListener("animationend", function done(e) {
+      if (e.animationName !== "loom-flash") return;
+      el.classList.remove("flash");
+      el.style.animationDelay = "";
+      el.removeEventListener("animationend", done);
+    });
+  }
+}
+
 function appendGroup(label) {
   const gh = document.createElement("li");
   gh.className = "group";
   gh.textContent = label;
-  threadsEl.appendChild(gh);
+  rowsTarget.appendChild(seal(gh, "g:" + label));
+}
+
+// emptyRow puts a keyed placeholder in the list being built.
+function emptyRow(html) {
+  rowsTarget.innerHTML = html;
+  if (rowsTarget.firstElementChild) seal(rowsTarget.firstElementChild, "empty");
 }
 
 // projLabel overrides the sub-label (the repo basename) — the Attention queue
@@ -360,10 +457,10 @@ function appendLiveRow(s, projLabel) {
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
-  threadsEl.appendChild(li);
+  rowsTarget.appendChild(li);
   // No pane, so nothing to reply into, hand over from, or kill: the row is
   // information only, and its stage says where the claude actually runs.
-  if (s.external) return;
+  if (s.external) { sealLive(li, s); return; }
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
   if (overBudget(s)) {
@@ -373,6 +470,12 @@ function appendLiveRow(s, projLabel) {
     }));
   }
   acts.appendChild(killButton(s.name));
+  sealLive(li, s);
+}
+
+function sealLive(li, s) {
+  seal(li, s.name);
+  if (s.status === "running") phase(li.querySelector(".tglyph"), BREATHE_MS);
 }
 
 function appendFinishedRow(s) {
@@ -408,7 +511,9 @@ function appendFinishedRow(s) {
   acts.appendChild(actionBtn('<path d="M6 6l12 12M18 6L6 18"/>', "Dismiss from history", async () => {
     try { await window.go.main.App.DismissSession(s.name); poll(); } catch (e) { console.error("dismiss", e); }
   }));
-  threadsEl.appendChild(li);
+  // Keyed by name like its live row, so a session that ends slides down
+  // into Finished instead of vanishing and reappearing.
+  rowsTarget.appendChild(seal(li, s.name));
 }
 
 // ---- rail sections (§8) ----
@@ -553,7 +658,7 @@ function renderProjectsPane() {
   const collapsed = effectiveCollapsed();
   const need = totalNeed();
   const projects = orderedProjects();
-  projectsEl.replaceChildren();
+  const out = document.createElement("ul");
 
   if (collapsed) {
     const a = document.createElement("li");
@@ -561,7 +666,7 @@ function renderProjectsPane() {
     a.title = "Attention" + (need ? ` — ${need} need you` : "");
     a.innerHTML = `<span class="attn-dot"></span>` + (need ? `<span class="pj-badge">${need}</span>` : "");
     a.addEventListener("click", openAttention);
-    projectsEl.appendChild(a);
+    out.appendChild(seal(a, "attn"));
     for (const p of projects) {
       const li = document.createElement("li");
       li.className = "pj-tok" + (selProject === p.root ? " on" : "") + (p.ung ? " ung" : "");
@@ -570,8 +675,10 @@ function renderProjectsPane() {
         (p.need ? `<span class="pj-badge">${p.need}</span>` : (p.run ? `<span class="pj-tdot"></span>` : ""));
       li.addEventListener("click", () => selectProject(p.root));
       li.addEventListener("contextmenu", (e) => { e.preventDefault(); projectMenu(p, e.clientX, e.clientY); });
-      projectsEl.appendChild(li);
+      out.appendChild(seal(li, "tok:" + p.root));
+      phase(li.querySelector(".pj-tdot"), BREATHE_MS);
     }
+    liveCommit(projectsEl, out, false);
     return;
   }
 
@@ -579,8 +686,8 @@ function renderProjectsPane() {
   a.className = "pj-attn" + (selProject === ATTENTION ? " on" : "");
   a.innerHTML = `<span class="attn-dot"></span><span class="pj-name">Attention</span>` + (need ? `<span class="pj-count">${need}</span>` : "");
   a.addEventListener("click", openAttention);
-  projectsEl.appendChild(a);
-  const div = document.createElement("li"); div.className = "pj-div"; projectsEl.appendChild(div);
+  out.appendChild(seal(a, "attn"));
+  const div = document.createElement("li"); div.className = "pj-div"; out.appendChild(seal(div, "div"));
   for (const p of projects) {
     const li = document.createElement("li");
     li.className = "pj-row" + (selProject === p.root ? " on" : "") + (p.missing ? " missing" : "") + (p.ung ? " ung" : "");
@@ -589,8 +696,10 @@ function renderProjectsPane() {
       (p.need ? `<span class="pj-count">${p.need}</span>` : "") + `</span>`;
     li.addEventListener("click", () => selectProject(p.root));
     li.addEventListener("contextmenu", (e) => { e.preventDefault(); projectMenu(p, e.clientX, e.clientY); });
-    projectsEl.appendChild(li);
+    out.appendChild(seal(li, "row:" + p.root));
+    phase(li.querySelector(".pj-run"), BREATHE_MS);
   }
+  liveCommit(projectsEl, out, false);
 }
 
 // ---- threads pane (2026-07-24 three-pane nav) ----
@@ -599,8 +708,19 @@ function renderThreadsPane() {
   // The attention capsule is redundant while the queue itself is on screen.
   attnEl.classList.toggle("here", selProject === ATTENTION);
   if (!threadsHeadEl || !threadsEl) return;
-  threadsEl.replaceChildren();
+  noteTransitions();
+  // Motion only within one view: switching project is a new list, not a move.
+  const view = String(selProject);
+  const animate = view === threadsView;
+  threadsView = view;
+  const next = document.createElement("ul");
+  rowsTarget = next;
+  try { buildThreads(); } finally { rowsTarget = threadsEl; }
+  liveCommit(threadsEl, next, animate);
+  applyFlashes(threadsEl);
+}
 
+function buildThreads() {
   if (selProject === ATTENTION) {
     // Freshest ask first: the one you were just working with is at the top,
     // and anything that has waited a day or more sinks under Stale rather
@@ -616,7 +736,7 @@ function renderThreadsPane() {
       `<div class="th-sub"><span>${queue.length} across all projects${stale.length ? ` · ${stale.length} stale` : ""}</span></div>`;
     for (const s of fresh) appendLiveRow(s, s.projectName || "");
     if (stale.length) { appendGroup("Stale · a day or more"); for (const s of stale) appendLiveRow(s, s.projectName || ""); }
-    if (!queue.length) threadsEl.innerHTML = `<div class="th-empty">Nothing needs you right now.<br><span>Walk away — loom pulls you back.</span></div>`;
+    if (!queue.length) emptyRow(`<div class="th-empty">Nothing needs you right now.<br><span>Walk away — loom pulls you back.</span></div>`);
     return;
   }
 
@@ -638,7 +758,7 @@ function renderThreadsPane() {
   // drops a row into the FINISHED section below.
   for (const s of live) appendLiveRow(s);
   if (fin.length) { appendGroup("Finished"); for (const s of fin) appendFinishedRow(s); }
-  if (!live.length && !fin.length) threadsEl.innerHTML = `<div class="th-empty">No threads in ${esc(name)} yet.<br><span>Press + New to start one.</span></div>`;
+  if (!live.length && !fin.length) emptyRow(`<div class="th-empty">No threads in ${esc(name)} yet.<br><span>Press + New to start one.</span></div>`);
 }
 
 function selectProject(root) {

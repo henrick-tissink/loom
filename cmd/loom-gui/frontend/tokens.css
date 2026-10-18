@@ -645,6 +645,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .wordmark:hover .wave i:nth-child(4) { animation-delay: 0.27s; }
   .wordmark:hover .wave i:nth-child(5) { animation-delay: 0.36s; }
   @keyframes blush-wave { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(0.5); } }
+
+  /* The live rail. A running session's ring breathes and the dock's running
+     dots pulse with it (main.js phase-locks both to one clock so a replaced
+     row does not restart). A session that turns needs-you glows once. */
+  .tglyph.i-running { animation: loom-breathe 2.4s ease-in-out infinite; }
+  @keyframes loom-breathe {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--tc) 0%, transparent); }
+    50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--tc) 24%, transparent); }
+  }
+  .pj-run, .pj-tdot { animation: loom-pulse 2.4s ease-in-out infinite; }
+  @keyframes loom-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .thread.flash { animation: loom-flash 1.8s cubic-bezier(0.2, 0.8, 0.2, 1); }
+  @keyframes loom-flash {
+    0% { background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent-line), 0 0 28px -6px var(--glow); }
+    100% { box-shadow: 0 0 0 1px transparent, 0 0 28px -6px transparent; }
+  }
 }
 
 /* ===== Clean-repo dialog ===== */
