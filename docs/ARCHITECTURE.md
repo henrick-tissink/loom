@@ -122,13 +122,14 @@ last status per external row only so the needs-you bell stays once-only. A
 conversation a loom row already tails is not shown twice.
 | `status` | Fuse transcript state with tmux liveness | The reconcile loop. The only writer of live-session status. |
 | `store` | SQLite: schema, sessions, projects, memory index | Migrations are transactional & re-entrant. |
-| `memory` | Index / extract / summarize | Reads the whole Claude archive; the only package that calls out to an LLM. Also records each indexed file's `mcp__` calls (`indexed_files.mcp`) for the diet report, backfilling older files a bounded batch per sweep. |
+| `memory` | Index / extract / summarize | Reads the whole Claude archive; one of the two packages that call out to an LLM (the other is `brief`, §10a). Also records each indexed file's `mcp__` calls (`indexed_files.mcp`) for the diet report, backfilling older files a bounded batch per sweep. |
 | `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. Removing a project (`App.RemoveProject`) kills its live sessions, forgets its rows, deletes the project and records the root in `ignored_roots`; "+ New project" at that root un-ignores it. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
 | `discipline` | The embedded Agent Discipline bundle (rules, hooks, suites, helpers), its generated manifest, the on-machine layout, the read-only doctor, and the installer: plan → stage + gate → commit, uninstall from the receipt, keep/reset of local edits | Source of truth for the handbook from rev 3 on. Revisions are immutable once in the manifest history. Only a human installs (`RefuseIfAgent`). Plan: `docs/DISCIPLINE.md`. |
+| `brief` | Project study briefs: evidence ledger from transcripts + git, the Opus writer, the archive under `~/.loom/briefs`, the HTML page | Go decides what is true (sessions in the window by per-record cwd, commits deduped by SHA and matched by author email, branch state with the forge asked about squash merges); Claude only writes it up, citing evidence ids. §10a. |
 | `jsonedit` | Order-preserving JSON editing for `settings.json` | Keeps every key and byte loom does not own; atomic write through symlinks (temp + fsync + rename in the real file's directory). |
 
 Test mass is deliberate: roughly **8k test lines vs 7.5k source lines.**
@@ -436,7 +437,7 @@ implementation is at the git tag `parked-arcs`.
 
 ---
 
-## 10. Summarization — the one outbound LLM call
+## 10. Summarization — the first outbound LLM call
 
 `memory.Summarizer` runs a **hardened** `claude -p` child over one session's
 indexed docs. The argv is spike-verified and treated as binding
@@ -461,6 +462,78 @@ fallback if user docs alone overflow; UTF-8-safe cuts everywhere. Nothing is
 stored on failure. It is user-triggered from a session's detail; the GUI adds
 an opt-in background auto-summarize that does **one at a time, once per
 session per process**, and skips hidden projects without marking them tried.
+
+
+## 10a. Briefs — the second outbound LLM call
+
+A **brief** is a deep, per-task account of what was done in a project over
+24h / 3d / 5d / 1w, written to be studied at the end of a day (GUI: a project's
+**Brief**; CLI: `loom brief <project> [--window …] [--evidence | --list]`).
+
+The split of work is the point. **Go establishes the facts; Claude writes them up.**
+
+1. **Evidence (Go, no LLM).** `brief.Collect` builds a ledger:
+   - Transcripts: every main and subagent transcript with a record in the
+     window. A record belongs to the project if *its own* `cwd` is under the
+     project (the session row's launch dir is not used).
+   - What is kept per session: typed asks, delegated prompts, every version of
+     the task file, notable commands with their result tails, lava emits,
+     Claude's prose and compact summaries.
+   - Each entry gets an id `S<n>:L<line>`.
+   - Git facts: commits in the window from every repo and worktree, deduped
+     by SHA across clones, split into "yours" and "others" by author email,
+     with stat and patch excerpts; branches whose tip moved, with one honest
+     state each; dirty worktrees.
+   - Merge state: ancestry says "merged" only for merges and fast-forwards. A
+     squash merge is detected by asking the forge (`gh pr list` / `glab mr
+     list`, read-only, at most 20 lookups). Any failure leaves the state
+     unknown, never "unmerged". loom never fetches.
+   - The ledger is trimmed to a ~420k-char budget by water-filling: anchors
+     (task files, commands, commits) are kept, and each session keeps its head
+     and tail.
+2. **Writing (Claude).** `brief.Writer` runs the summarizer's hardened argv
+   (§10), but with `--model opus` and a 15-minute timeout. The ledger goes on
+   stdin.
+   - The prompt requires a fixed structure: Overview, then one
+     `## Task:` section per task (Outcome, Status, problem, how it works now,
+     plan vs shipped, proof, risks, how to explain it, likely questions,
+     provenance).
+   - Every claim cites ids and is tagged `[git]`, `[transcript]`,
+     `[inferred]` or `[unverified]`. Status comes only from git facts.
+3. **Archive.** Each brief lives in
+   `~/.loom/briefs/<name>-<hash of root>/<stamp>-<window>/`:
+   - `brief.md`: the text, followed by the git facts and the evidence index,
+     both verbatim;
+   - `evidence.md`;
+   - `meta.json`;
+   - `brief.html`, written on demand.
+
+   These are files, not a table. Ids are validated before any path is built.
+4. **Reading.** goldmark renders the text with raw HTML escaped; model text
+   never becomes markup. The reader splits the text at `## Task:` headings,
+   ignoring headings inside code fences. **Make artefact** re-renders the same
+   text as a self-contained page with light and dark styles, print styles and
+   a table of contents. No second model call.
+5. **Ask about this / Review** opens an interactive study session for one
+   task, with the **fence** (`Recipe.Fenced`, spike-verified in
+   `docs/spikes/2026-10-18-brief-fence-spike.md`):
+   - Tools: `--tools Read,Grep,Glob`.
+   - MCP: `--strict-mcp-config` with no servers, which removes the claude.ai
+     connectors that `--tools` alone leaves in place.
+   - Settings: `--setting-sources ""`, so no hooks and no settings-defined MCP
+     servers.
+   - Secrets: deny rules in `--settings` for `.env*`, keys, cloud and forge
+     credentials.
+   - Reach: the project's repos plus the brief's directory (`--add-dir`).
+   - Resume: the row is tagged `fenced`, so a resume keeps the fence.
+   - Self-exclusion: the seed carries `[loom brief]`. Sessions whose first ask
+     carries the marker are left out of later briefs, so studying a day does
+     not become part of it.
+
+Hidden projects fail closed: no resolver, or not visible, means no brief and no
+reading of a saved one. The GUI keeps an estimate's bundle for 5 minutes so
+Write uses exactly the evidence the estimate counted, and refuses a second run
+of the same project and window while one is writing.
 
 ---
 

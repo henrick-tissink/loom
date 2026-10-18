@@ -400,7 +400,7 @@ func TestLaunchPersistsAddDirsAndResumeRoundTrips(t *testing.T) {
 	if !ok || rrow.AddDirs != row.AddDirs {
 		t.Fatalf("resumed row.AddDirs = %q, want %q", rrow.AddDirs, row.AddDirs)
 	}
-	cmd := ResumeShellCommand(rrow.ClaudeSessionID, DecodeAddDirs(rrow.AddDirs))
+	cmd := ResumeShellCommand(rrow.ClaudeSessionID, DecodeAddDirs(rrow.AddDirs), false)
 	for _, d := range []string{sib1, sib2} {
 		if !strings.Contains(cmd, "'--add-dir' '"+d+"'") {
 			t.Fatalf("resume command lost %q: %s", d, cmd)

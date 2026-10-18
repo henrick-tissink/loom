@@ -107,6 +107,26 @@ It's real Claude Code — nothing changes. Remember:
 
 Notes: new content appears in search up to one sweep (~10 min) late; deleted transcripts stay searchable forever (the index is the memory); search is text-match, not semantic.
 
+## 6a. Briefs: what did I actually do?
+
+A project's **Brief** button (also on the project's right-click menu and in the palette) opens the brief view.
+
+1. **Pick a window:** 24h, 3d, 5d or 1w. Loom collects the evidence and shows what it found before anything runs: the sessions, your commits, others' commits, and roughly how many tokens it will use. This step costs nothing.
+2. **Write brief.** Opus writes a deep, per-task account from that evidence. It takes a few minutes and uses plan quota.
+   - The brief opens with an overview: shipped / in flight / needs you / blocked / surprises.
+   - Each task then gets its own section: outcome, status (taken from git, including squash-merged PRs), the problem, how it works now, plan vs what shipped, proof, risks, how to explain it, and likely questions.
+   - Claims cite their evidence (`S3:L120` = session 3, line 120; or a commit) and say whether they are `[git]`, `[transcript]`, `[inferred]` or `[unverified]`.
+3. **Each task has two buttons:**
+   - **Ask about this** opens a session about that task, so you can keep asking until you understand it.
+   - **Review** opens an independent review of the task's change.
+
+   Both sessions are fenced. They can read the project's code and the brief, and nothing else: no shell, no edits, no web, no MCP or connectors.
+4. **Make artefact** turns the brief into a polished standalone page in your browser. It is the same text, so you can print it or keep it.
+
+Saved briefs are listed under the window chips. They live in `~/.loom/briefs/` (**Files** reveals the folder): `brief.md`, `evidence.md` (exactly what Claude was given), and the page.
+
+From the terminal: `loom brief <project> --window 3d` writes a brief. `--evidence` prints the facts with no Claude call. `--list` shows the saved briefs.
+
 ## 7. The Wall
 
 **`W` — the wall:** a read-only 2-column grid of every live session's pane tail, refreshing live. `↓/↑` select · `↵` attach · `esc` back. Order is stable (oldest first) so the grid never shuffles under you. Cells are plain-text tails — for full fidelity, attach.
@@ -116,6 +136,7 @@ Notes: new content appears in search up to one sweep (~10 min) late; deleted tra
 | Thing | Where |
 |---|---|
 | Loom's state (index, sessions, projects) | `~/.loom/loom.db` (SQLite) |
+| Briefs | `~/.loom/briefs/<project>/<when>-<window>/` |
 | Sessions | tmux server `-L loom` (`tmux -L loom list-sessions` to inspect raw) |
 | Transcripts (Claude's own, read-only to Loom) | `~/.claude/projects/…` |
 

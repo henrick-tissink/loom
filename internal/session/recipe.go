@@ -27,6 +27,52 @@ type Recipe struct {
 	// Cwd is the primary repo, AddDirs the siblings claude is granted via
 	// --add-dir. Empty for a root launch or a single-repo launch.
 	AddDirs []string
+	// Fenced launches a read-only study session (a brief's "Ask about this"):
+	// only the Read/Grep/Glob tools, no MCP servers or claude.ai connectors,
+	// no user/project/local settings (so no hooks), and deny rules for secret
+	// files. The row is tagged FenceTag so a resume keeps the fence.
+	Fenced bool
+}
+
+// FenceTag marks a fenced session's row (sessions.tags).
+const FenceTag = "fenced"
+
+// fenceDeny keeps a fenced session out of secrets even inside the repos it
+// may read. Read rules cover every built-in tool that reads files.
+var fenceDeny = []string{
+	"Read(**/.env*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(**/id_rsa*)", "Read(**/id_ed25519*)",
+	"Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.netrc)",
+	"Read(~/Library/Keychains/**)", "Read(~/.claude/*.json)", "Read(~/.config/gh/**)", "Read(~/.config/glab-cli/**)",
+}
+
+// fenceArgs is the fence verified by docs/spikes/2026-10-18-brief-fence-spike.md:
+// --tools alone still leaves every MCP tool (the claude.ai connectors among
+// them); --strict-mcp-config with an empty server list removes them, and
+// --setting-sources "" drops settings-defined hooks and MCP config.
+func fenceArgs() []string {
+	return []string{
+		"--tools", "Read,Grep,Glob",
+		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
+		"--setting-sources", "",
+	}
+}
+
+// settingsArg is the --settings JSON: the theme, plus the deny rules when fenced.
+func settingsArg(fenced bool) string {
+	theme := currentThemeSetting()
+	if !fenced {
+		return theme
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(theme), &m) != nil {
+		m = map[string]any{}
+	}
+	m["permissions"] = map[string]any{"deny": fenceDeny}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return theme
+	}
+	return string(b)
 }
 
 // Claude's TUI must match loom's embedded terminal theme, or its 256-color
@@ -75,7 +121,10 @@ func SessionIDFromTmuxName(name string) (string, bool) {
 }
 
 func (r Recipe) Argv(sessionID string) []string {
-	argv := []string{"claude", "--session-id", sessionID, "--settings", currentThemeSetting()}
+	argv := []string{"claude", "--session-id", sessionID, "--settings", settingsArg(r.Fenced)}
+	if r.Fenced {
+		argv = append(argv, fenceArgs()...)
+	}
 	if r.Model != "" {
 		argv = append(argv, "--model", r.Model)
 	}
@@ -145,7 +194,12 @@ func (r Recipe) ShellCommand(sessionID string) string {
 // add-dirs of the original launch: without re-passing them the session comes
 // back seeing only Cwd, and nothing surfaces that until a write to a sibling
 // repo is refused mid-turn (spec §5).
-func ResumeShellCommand(claudeSessionID string, addDirs []string) string {
-	argv := []string{"claude", "--resume", claudeSessionID, "--settings", currentThemeSetting()}
+//
+// fenced re-applies a fenced session's fence: --resume restores none of it.
+func ResumeShellCommand(claudeSessionID string, addDirs []string, fenced bool) string {
+	argv := []string{"claude", "--resume", claudeSessionID, "--settings", settingsArg(fenced)}
+	if fenced {
+		argv = append(argv, fenceArgs()...)
+	}
 	return shellQuote(append(argv, addDirArgs(addDirs)...))
 }

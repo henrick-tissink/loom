@@ -13,6 +13,8 @@
 //	loom setup           install or upgrade the discipline layer behind its gate
 //	loom uninstall       remove exactly what setup installed (from the receipt)
 //	loom discipline …    status, and keep/reset/diff of local edits; restore a backup
+//	loom brief <project> a deep study brief of what was done in a window
+//	                     (--window 24h|3d|5d|1w, --evidence, --list)
 package main
 
 import (
@@ -35,7 +37,8 @@ const usage = `usage: loom ls | attach <name> | kill <name> | search <query>
        loom setup [--plan|--dry-run] [--json] [--yes] [--with env] [--without rules,statusline,deny] [--replace <file>,...]
        loom uninstall [--plan|--dry-run] [--json] [--yes]
        loom discipline status | diff <file> | keep <file> | reset <file> | restore <backup>
-       loom report hooks|tests [--since change|--days N] [--by project] [--json]`
+       loom report hooks|tests [--since change|--days N] [--by project] [--json]
+       loom brief <project> [--window 24h|3d|5d|1w] [--evidence | --list]`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -80,6 +83,8 @@ func run(args []string) error {
 		return disciplineCmd(args[1:])
 	case "report":
 		return report(args[1:])
+	case "brief":
+		return briefCmd(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}

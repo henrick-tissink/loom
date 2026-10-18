@@ -931,6 +931,7 @@ function projectMenu(p, x, y) {
     // The dock's row objects carry counts, not flags; the hidden bit lives on
     // the project detail.
     const hidden = !!(projectByRoot(p.root) || {}).hidden;
+    items.push(["Brief…", () => openBrief(p.root)]);
     items.push([hidden ? "Show" : "Hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !hidden))]);
     items.push(["Remove…", () => removeProjectFlow(p.root), "danger"]);
   }
@@ -987,6 +988,7 @@ function renderProject() {
       ${p.missing ? `<span class="po-tag">missing</span>` : ""}
       <span class="sh-proj">${icon(FOLDER_ICON, 2)}${esc(p.root || "no directory")}</span>
       <span class="po-acts">
+        <button class="sh-btn sh-primary" id="po-brief" title="A deep account of what was done here, written by Claude">Brief</button>
         <button class="sh-btn" id="po-hide">${p.hidden ? "Show" : "Hide"}</button>
         <button class="sh-btn" id="po-solo">${p.solo ? "Leave solo" : "Solo"}</button>
         <button class="sh-btn" id="po-rename">Rename</button>
@@ -1015,11 +1017,12 @@ function renderProject() {
   // Ungrouped is a real row in the model, but it owns no directory: renaming,
   // re-pointing or adding repos to it is meaningless, and soloing it is
   // explicitly suppressed by §6.1.
-  for (const id of ["po-solo", "po-rename", "po-repoint", "po-addrepo", "po-removeproj"]) {
+  for (const id of ["po-brief", "po-solo", "po-rename", "po-repoint", "po-addrepo", "po-removeproj"]) {
     const el = document.getElementById(id);
     if (el && ungrouped) el.disabled = true;
   }
   on("po-clean", () => repoCleanupDialog(p.root));
+  on("po-brief", () => openBrief(p.root));
   on("po-removeproj", () => removeProjectFlow(p.root));
   on("po-hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !p.hidden)));
   on("po-solo", () => projectAction(() => window.go.main.App.SetProjectSolo(p.root, !p.solo)));
@@ -1055,6 +1058,201 @@ function renderProject() {
       projectAction(() => window.go.main.App.RemoveProjectRepo(path)));
   });
   renderProjectWarnings();
+}
+
+// ---- project brief (internal/brief) ----
+//
+// A project's study brief: pick a window, see what evidence it would be
+// written from, have Claude write it (minutes, Opus), then read it here with
+// "Ask about this" / "Review" on every task, or open it as a page. Writing
+// is never automatic; it uses quota, so the estimate comes first.
+
+const briefUI = { root: null, window: "24h", est: null, estErr: "", estGen: 0, list: [], doc: null, docId: null, running: [], err: "" };
+
+function openBrief(root, id) {
+  teardownTerminal();
+  activeName = null;
+  selProject = root;
+  stageView = { kind: "brief", root };
+  if (briefUI.root !== root) Object.assign(briefUI, { root, est: null, estErr: "", list: [], doc: null, docId: null, running: [], err: "" });
+  if (id) briefUI.docId = id;
+  renderBrief();
+  renderRail();
+  refreshBriefList(true);
+  estimateBrief();
+}
+
+async function refreshBriefList(openNewest) {
+  const root = briefUI.root;
+  try {
+    const [list, running] = await Promise.all([window.go.main.App.BriefList(root), window.go.main.App.BriefRunning(root)]);
+    if (stageView.kind !== "brief" || stageView.root !== root) return;
+    briefUI.list = list || [];
+    briefUI.running = running || [];
+    if (openNewest && !briefUI.docId && briefUI.list.length) briefUI.docId = briefUI.list[0].id;
+  } catch (e) { briefUI.err = String(e); }
+  renderBriefSide();
+  if (briefUI.docId && (!briefUI.doc || briefUI.doc.meta.id !== briefUI.docId)) loadBriefDoc(briefUI.docId);
+}
+
+async function estimateBrief() {
+  const root = briefUI.root, win = briefUI.window, gen = ++briefUI.estGen;
+  briefUI.est = null; briefUI.estErr = "";
+  renderBriefSide();
+  try {
+    const est = await window.go.main.App.BriefEstimate(root, win);
+    if (gen !== briefUI.estGen) return;
+    briefUI.est = est;
+  } catch (e) {
+    if (gen !== briefUI.estGen) return;
+    briefUI.estErr = String(e);
+  }
+  renderBriefSide();
+}
+
+async function writeBrief() {
+  const root = briefUI.root, win = briefUI.window;
+  if (briefUI.running.includes(win)) return;
+  briefUI.running = [...briefUI.running, win];
+  briefUI.err = "";
+  renderBriefSide();
+  try {
+    const m = await window.go.main.App.BriefGenerate(root, win);
+    if (stageView.kind === "brief" && stageView.root === root) briefUI.docId = m.id;
+  } catch (e) {
+    if (stageView.kind === "brief" && stageView.root === root) briefUI.err = "Writing failed: " + e;
+  }
+  briefUI.running = briefUI.running.filter((w) => w !== win);
+  if (stageView.kind === "brief" && stageView.root === root) { await refreshBriefList(false); estimateBrief(); }
+}
+
+async function loadBriefDoc(id) {
+  briefUI.docId = id;
+  renderBriefSide();
+  try {
+    const doc = await window.go.main.App.BriefOpen(id);
+    if (stageView.kind !== "brief" || briefUI.docId !== id) return;
+    briefUI.doc = doc;
+  } catch (e) {
+    if (stageView.kind !== "brief" || briefUI.docId !== id) return;
+    // Clear the id too, or the reader waits on "Opening…" forever; the
+    // error shows in the side panel.
+    briefUI.err = "Could not open this brief: " + e; briefUI.doc = null; briefUI.docId = "";
+    renderBriefSide();
+  }
+  renderBriefReader();
+}
+
+function fmtTokens(n) { return n >= 1000 ? Math.round(n / 1000) + "k" : String(n); }
+function fmtDay(sec) { return new Date(sec * 1000).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }); }
+
+function renderBrief() {
+  const stage = document.getElementById("stage");
+  const p = projectByRoot(briefUI.root);
+  stage.replaceChildren();
+  stage.innerHTML = `
+    <div id="stage-header" class="stage-head po-head">
+      <span class="sh-name">${esc(p ? p.name : "Project")}</span>
+      <span class="br-crumb">Brief</span>
+      <span class="po-acts"><button class="sh-btn" id="br-back">Project</button></span>
+    </div>
+    <div class="br">
+      <aside class="br-side" id="br-side"></aside>
+      <div class="br-main" id="br-reader"></div>
+    </div>`;
+  document.getElementById("br-back").addEventListener("click", () => openProject(briefUI.root));
+  renderBriefSide();
+  renderBriefReader();
+}
+
+function renderBriefSide() {
+  const el = document.getElementById("br-side");
+  if (!el || stageView.kind !== "brief") return;
+  const wins = [["24h", "24 hours"], ["3d", "3 days"], ["5d", "5 days"], ["1w", "1 week"]];
+  const writing = briefUI.running.includes(briefUI.window);
+  const est = briefUI.est;
+  let estHtml;
+  if (briefUI.estErr) estHtml = `<div class="modal-error">${esc(briefUI.estErr)}</div>`;
+  else if (!est) estHtml = `<div class="br-est br-dim">Collecting evidence…</div>`;
+  else if (!est.sessions && !est.commits) estHtml = `<div class="br-est br-dim">Nothing happened here in the ${esc(est.label)}.</div>`;
+  else estHtml = `<div class="br-est"><b>${est.sessions}</b> sessions · <b>${est.commits}</b> of your commits${est.otherCommits ? ` · ${est.otherCommits} by others` : ""}<br><span class="br-dim">~${fmtTokens(est.inputTokens)} tokens of evidence · ${esc(est.model)} · a few minutes</span></div>`;
+  const canWrite = est && (est.sessions || est.commits) && !writing;
+  el.innerHTML = `
+    <div class="br-new">
+      <h3>New brief</h3>
+      <div class="br-chips">${wins.map(([k, l]) => `<button class="br-chip${briefUI.window === k ? " on" : ""}" data-w="${k}">${l}</button>`).join("")}</div>
+      ${estHtml}
+      <button class="sh-btn sh-primary br-write" id="br-write"${canWrite ? "" : " disabled"}>${writing ? "Writing…" : "Write brief"}</button>
+      ${writing ? `<div class="br-dim br-note">Claude is reading the evidence. You can leave this view; the brief is saved when it is done.</div>` : ""}
+      ${briefUI.err ? `<div class="modal-error">${esc(briefUI.err)}</div>` : ""}
+    </div>
+    <h3>Saved briefs</h3>
+    ${briefUI.list.length ? `<ul class="br-list">${briefUI.list.map((m) => `
+      <li class="br-item${briefUI.docId === m.id ? " on" : ""}" data-id="${esc(m.id)}">
+        <span class="br-iwin">${esc(m.window)}</span>
+        <span class="br-iday">${esc(fmtDay(m.createdAt))}</span>
+        <span class="br-dim br-imeta">${m.sessions} sessions · ${m.commits} commits</span>
+      </li>`).join("")}</ul>` : `<div class="po-empty">None yet.</div>`}`;
+  el.querySelectorAll(".br-chip").forEach((b) => b.addEventListener("click", () => {
+    briefUI.window = b.getAttribute("data-w");
+    estimateBrief();
+  }));
+  const wb = document.getElementById("br-write");
+  if (wb) wb.addEventListener("click", writeBrief);
+  el.querySelectorAll(".br-item").forEach((li) => li.addEventListener("click", () => loadBriefDoc(li.getAttribute("data-id"))));
+}
+
+function renderBriefReader() {
+  const el = document.getElementById("br-reader");
+  if (!el || stageView.kind !== "brief") return;
+  const doc = briefUI.doc;
+  if (!doc) {
+    el.innerHTML = `<div class="br-empty">${briefUI.docId ? "Opening…" : "Pick a window and write a brief. It reads what your sessions did and what git says, and explains every task in depth: what changed, how it works, what was decided, what proves it, and what is still open."}</div>`;
+    return;
+  }
+  const m = doc.meta;
+  const tasks = doc.parts.filter((p) => p.task > 0);
+  el.innerHTML = `
+    <div class="br-bar">
+      <span class="br-dim">${esc(fmtDay(m.since))} → ${esc(fmtDay(m.until))} · ${m.sessions} sessions · ${m.commits} commits · ${esc(m.model)}</span>
+      <span class="br-bacts">
+        <button class="sh-btn" id="br-page" title="Open as a designed page in your browser">Make artefact</button>
+        <button class="sh-btn" id="br-files" title="brief.md, evidence.md and the page">Files</button>
+      </span>
+    </div>
+    ${tasks.length ? `<nav class="br-toc">${tasks.map((t) => `<a data-t="${t.task}">${esc(t.title)}</a>`).join("")}</nav>` : ""}
+    <div class="br-doc">${doc.parts.map((p) => p.task > 0
+      ? `<section class="br-task" id="br-task-${p.task}">
+          <div class="br-tacts">
+            <button class="sh-btn sh-primary br-ask" data-t="${p.task}" title="A read-only Claude session that has read this task and its evidence">Ask about this</button>
+            <button class="sh-btn br-review" data-t="${p.task}" title="A read-only Claude session that reviews this change independently">Review</button>
+          </div>${p.html}</section>`
+      : `<section class="br-part">${p.html}</section>`).join("")}</div>`;
+  const id = m.id;
+  document.getElementById("br-page").addEventListener("click", () =>
+    window.go.main.App.BriefArtefact(id).catch((e) => { briefUI.err = String(e); renderBriefSide(); }));
+  document.getElementById("br-files").addEventListener("click", () =>
+    window.go.main.App.BriefReveal(id).catch((e) => console.error("brief files", e)));
+  el.querySelectorAll(".br-toc a").forEach((a) => a.addEventListener("click", () => {
+    const t = document.getElementById("br-task-" + a.getAttribute("data-t"));
+    if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+  }));
+  const ask = async (b, mode) => {
+    b.disabled = true;
+    try {
+      const name = await window.go.main.App.BriefAsk(id, parseInt(b.getAttribute("data-t"), 10), mode);
+      selectSession(name);
+      poll();
+    } catch (e) { b.disabled = false; briefUI.err = "Could not open the session: " + e; renderBriefSide(); }
+  };
+  el.querySelectorAll(".br-ask").forEach((b) => b.addEventListener("click", () => ask(b, "explain")));
+  el.querySelectorAll(".br-review").forEach((b) => b.addEventListener("click", () => ask(b, "review")));
+  // Links in a brief open in the browser; nothing navigates the app itself.
+  el.querySelectorAll(".br-doc a[href]").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault();
+    const href = a.getAttribute("href") || "";
+    if (/^https?:\/\//i.test(href)) openURLToken(href);
+  }));
 }
 
 // Warnings are the only place a repo skipped by reconciliation (a label
@@ -2398,6 +2596,7 @@ function buildPaletteItems() {
   for (const p of latestProjects) {
     if (p.ungrouped || !projectVisible(p)) continue;
     items.push({ label: p.name, hint: "project", run: () => openProject(p.root) });
+    items.push({ label: "Brief: " + p.name, hint: "what was done here", run: () => openBrief(p.root) });
   }
   if (latestProjects.some((p) => p.hidden)) {
     items.push({ label: "Hidden projects…", hint: "restore one", run: () => openHiddenProjects() });

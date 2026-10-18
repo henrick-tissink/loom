@@ -167,9 +167,13 @@ func (l *Launcher) Launch(r Recipe, w, h int, now time.Time) (string, error) {
 	if err := l.Tmux.NewSession(name, cwd, r.ShellCommand(id), w, h); err != nil {
 		return "", err
 	}
+	tags := ""
+	if r.Fenced {
+		tags = FenceTag
+	}
 	if err := l.Store.Upsert(store.SessionRow{
 		Name: name, ClaudeSessionID: id, ProjectLabel: r.ProjectLabel,
-		Cwd: cwd, Model: r.Model, Mode: r.Mode, Seed: r.Seed,
+		Cwd: cwd, Model: r.Model, Mode: r.Mode, Seed: r.Seed, Tags: tags,
 		AddDirs:   EncodeAddDirs(addDirs),
 		CreatedAt: now.Unix(), EndedAt: -1, ExitCode: -1,
 		LastStatus: "unknown",
@@ -205,7 +209,7 @@ func (l *Launcher) Resume(old store.SessionRow, w, h int, now time.Time) (string
 	// rows that stored an unresolved cwd and were therefore never matched to
 	// their transcript.
 	cwd, dirs := PhysicalDir(old.Cwd), physicalDirs(dirs)
-	if err := l.Tmux.NewSession(name, cwd, ResumeShellCommand(old.ClaudeSessionID, dirs), w, h); err != nil {
+	if err := l.Tmux.NewSession(name, cwd, ResumeShellCommand(old.ClaudeSessionID, dirs, IsFenced(old.Tags)), w, h); err != nil {
 		return "", err
 	}
 	if err := l.Store.Upsert(store.SessionRow{
@@ -302,4 +306,14 @@ func (l *Launcher) seedWhenReady(name, seed string) {
 		return
 	}
 	_ = l.Store.SetSeedStatus(name, "sent")
+}
+
+// IsFenced reports whether a row's tags mark it as a fenced session.
+func IsFenced(tags string) bool {
+	for _, t := range strings.Split(tags, ",") {
+		if strings.TrimSpace(t) == FenceTag {
+			return true
+		}
+	}
+	return false
 }

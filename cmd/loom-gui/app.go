@@ -39,6 +39,10 @@ type App struct {
 	// that do not set one.
 	hooks *hookState
 
+	// briefs writes and keeps project study briefs (brief.go); nil in tests
+	// that do not set one.
+	briefs *briefState
+
 	// projects is the runtime source of truth for launch targets and for §6's
 	// visibility predicate, queried read-through. It replaced a by-value
 	// registry.Discover snapshot taken at startup, which is why a project
@@ -348,7 +352,7 @@ func (a *App) FreshSession(name string) (string, error) {
 	}
 	return a.launcher.Launch(session.Recipe{
 		ProjectLabel: row.ProjectLabel, Cwd: row.Cwd, Model: row.Model, Mode: row.Mode,
-		AddDirs: session.DecodeAddDirs(row.AddDirs),
+		AddDirs: session.DecodeAddDirs(row.AddDirs), Fenced: session.IsFenced(row.Tags),
 	}, launchCols, launchRows, a.now())
 }
 

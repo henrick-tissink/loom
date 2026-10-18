@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
+	"github.com/henricktissink/loom/internal/brief"
 	"github.com/henricktissink/loom/internal/config"
 	"github.com/henricktissink/loom/internal/diet"
 	"github.com/henricktissink/loom/internal/diet/fromstore"
@@ -107,6 +109,11 @@ func run() error {
 	}
 	session.SetClaudeTheme(app.settings.get().TerminalTheme) // match Claude's theme to the terminal
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
+	app.briefs = newBriefState(&brief.Service{
+		Store: st, ClaudeConfigDir: cfg.ClaudeConfigDir,
+		Archive: brief.Archive{Dir: filepath.Join(cfg.LoomDir, "briefs")},
+		Writer:  brief.Writer{Binary: "claude", WorkDir: cfg.LoomDir},
+	})
 
 	return wails.Run(&options.App{
 		Title:       "loom",

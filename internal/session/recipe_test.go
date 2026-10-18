@@ -74,7 +74,7 @@ func TestShellCommand(t *testing.T) {
 	if got := r.ShellCommand(id); got != want {
 		t.Errorf("ShellCommand = %q, want %q", got, want)
 	}
-	if got := ResumeShellCommand(id, nil); got != "'claude' '--resume' '"+id+"' "+settings {
+	if got := ResumeShellCommand(id, nil, false); got != "'claude' '--resume' '"+id+"' "+settings {
 		t.Errorf("ResumeShellCommand = %q", got)
 	}
 }
@@ -122,10 +122,10 @@ func TestShellCommandAddDirsQuoting(t *testing.T) {
 		t.Errorf("ShellCommand = %q,\n            want %q", got, want)
 	}
 	rwant := "'claude' '--resume' '" + id + "' " + settings + ` '--add-dir' '/w/My Repos/a'`
-	if got := ResumeShellCommand(id, []string{"/w/My Repos/a"}); got != rwant {
+	if got := ResumeShellCommand(id, []string{"/w/My Repos/a"}, false); got != rwant {
 		t.Errorf("ResumeShellCommand = %q, want %q", got, rwant)
 	}
-	if got := ResumeShellCommand(id, nil); got != "'claude' '--resume' '"+id+"' "+settings {
+	if got := ResumeShellCommand(id, nil, false); got != "'claude' '--resume' '"+id+"' "+settings {
 		t.Errorf("ResumeShellCommand(nil dirs) = %q, want the pre-multi-repo shape", got)
 	}
 }
@@ -157,4 +157,41 @@ func TestEncodeDecodeAddDirs(t *testing.T) {
 			t.Errorf("DecodeAddDirs(%q) = %v, want nil", bad, got)
 		}
 	}
+}
+
+// A fenced recipe carries the spike-verified fence and the deny rules, and a
+// resume of a fenced row re-applies it: --resume restores none of it.
+func TestFencedArgvAndResume(t *testing.T) {
+	id := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	argv := Recipe{Model: "opus", Fenced: true}.Argv(id)
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"--tools Read,Grep,Glob", "--strict-mcp-config", `--mcp-config {"mcpServers":{}}`, "--model opus"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("fenced argv lacks %q: %v", want, argv)
+		}
+	}
+	if i := indexOf(argv, "--setting-sources"); i < 0 || argv[i+1] != "" {
+		t.Errorf("fenced argv must pass --setting-sources \"\": %v", argv)
+	}
+	if !strings.Contains(argv[4], `"deny"`) || !strings.Contains(argv[4], `Read(~/.ssh/**)`) || !strings.Contains(argv[4], `"theme"`) {
+		t.Errorf("fenced --settings lacks theme or deny rules: %s", argv[4])
+	}
+	if plain := strings.Join(Recipe{}.Argv(id), " "); strings.Contains(plain, "--tools") || strings.Contains(plain, "deny") {
+		t.Errorf("unfenced argv carries the fence: %s", plain)
+	}
+	if got := ResumeShellCommand(id, nil, true); !strings.Contains(got, "'--strict-mcp-config'") || !strings.Contains(got, "'--setting-sources' ''") {
+		t.Errorf("fenced resume lost the fence: %s", got)
+	}
+	if !IsFenced("x, fenced") || IsFenced("") || IsFenced("unfenced") {
+		t.Error("IsFenced misreads tags")
+	}
+}
+
+func indexOf(xs []string, s string) int {
+	for i, x := range xs {
+		if x == s {
+			return i
+		}
+	}
+	return -1
 }
