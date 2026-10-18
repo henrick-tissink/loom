@@ -772,19 +772,91 @@ function openAttention() {
   teardownTerminal();
   activeName = null;
   stageView = { kind: "attention" };
-  renderAttentionStage();
+  renderAttentionStage(true);
   renderRail();
 }
 
-function renderAttentionStage() {
+// The home: what the stage shows on launch and whenever nothing is selected.
+// It answers "do I need to be here?" first (the headline), then shows the
+// asks themselves, what is still working, and what finished today. The poll
+// re-renders it only when its markup changes, so hover and the breathing
+// glyphs are not reset every 1.5s.
+let homeHtml = "";
+const HOME_ASKS = 6, HOME_LIST = 8;
+
+function renderAttentionStage(force) {
   const stage = document.getElementById("stage");
   if (!stage) return;
-  stage.replaceChildren();
-  const d = document.createElement("div");
-  d.id = "stage-empty";
-  d.textContent = latestSessions.some((s) => s.status === "needs_you")
-    ? "Pick a thread on the left to attend to it." : "Nothing needs you right now.";
-  stage.appendChild(d);
+  const html = homeMarkup();
+  if (!force && html === homeHtml && stage.querySelector(".home")) return;
+  homeHtml = html;
+  stage.innerHTML = html;
+  for (const el of stage.querySelectorAll("[data-sess]")) el.addEventListener("click", () => selectSession(el.dataset.sess));
+  for (const el of stage.querySelectorAll("[data-proj]")) el.addEventListener("click", () => selectProject(el.dataset.proj));
+  for (const el of stage.querySelectorAll(".home .tglyph.i-running")) phase(el, BREATHE_MS);
+  const nb = stage.querySelector(".home-new"); if (nb) nb.addEventListener("click", () => openLauncher());
+}
+
+function homeMarkup() {
+  const now = Math.floor(Date.now() / 1000);
+  const queue = latestSessions.filter((s) => s.status === "needs_you").slice()
+    .sort((a, b) => (b.since || 0) - (a.since || 0));
+  const flight = latestSessions.filter((s) => s.status !== "needs_you");
+  const running = flight.filter((s) => s.status === "running").length;
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  const today = latestRecent.filter((s) => s.endedAt && s.endedAt * 1000 >= midnight.getTime())
+    .sort((a, b) => b.endedAt - a.endedAt);
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+  const head = queue.length
+    ? `${plural(queue.length, "thread needs", "threads need")} you`
+    : running ? `Nothing needs you. ${plural(running, "thread is", "threads are")} working.` : "All quiet.";
+  const counts = [];
+  if (running) counts.push(`${running} running`);
+  const idle = flight.length - running;
+  if (idle) counts.push(`${idle} idle`);
+  if (today.length) counts.push(`${today.length} finished today`);
+  const sub = queue.length ? counts.join(" · ") || "Freshest ask first."
+    : counts.length ? counts.join(" · ") + " — walk away, loom pulls you back." : "Walk away — loom pulls you back.";
+
+  const glyph = (s) => `<span class="tglyph i-${esc(s.status)}" style="--tc:${statusColor(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown, 3)}</span>`;
+  const projOf = (s) => esc(s.projectName || s.project || "");
+  const more = (n, what) => n > 0 ? `<div class="home-more">+${n} more ${what} in the list on the left</div>` : "";
+
+  let body = "";
+  if (queue.length) {
+    const cards = queue.slice(0, HOME_ASKS).map((s) => {
+      const age = s.since ? fmtAge(Math.max(0, now - s.since)) : "";
+      const stale = s.since && now - s.since >= 86400;
+      return `<button class="home-ask${stale ? " stale" : ""}" data-sess="${esc(s.name)}">` +
+        `<span class="ha-top"><span class="ha-proj">${projOf(s)}</span>${age ? `<span class="ha-age">${age}</span>` : ""}</span>` +
+        `<span class="ha-name">${esc(displayName(s))}</span>` +
+        (s.ask ? `<span class="ha-q">${esc(sumPreview(s.ask))}</span>` : `<span class="ha-q ha-none">Waiting at the prompt.</span>`) +
+        `</button>`;
+    }).join("");
+    body += `<section class="home-sec"><div class="group">Waiting on you</div><div class="home-asks">${cards}</div>${more(queue.length - HOME_ASKS, "asks")}</section>`;
+  }
+  if (flight.length) {
+    const rows = flight.slice(0, HOME_LIST).map((s) =>
+      `<li class="home-row" data-sess="${esc(s.name)}">${glyph(s)}<span class="hr-name">${esc(displayName(s))}</span>` +
+      `<span class="hr-proj">${projOf(s)}</span><span class="hr-st" style="color:${statusColor(s.status)}">${esc(statusWord(s.status))}</span></li>`).join("");
+    body += `<section class="home-sec"><div class="group">In flight</div><ul class="home-list">${rows}</ul>${more(flight.length - HOME_LIST, "threads")}</section>`;
+  }
+  if (today.length) {
+    const rows = today.slice(0, HOME_LIST).map((s) => {
+      const line = s.summary || s.outcome || "";
+      const target = projectByRoot(s.projectRoot || "") ? ` data-proj="${esc(s.projectRoot)}"` : "";
+      return `<li class="home-row fin"${target}>${glyph(s)}<span class="hr-name">${esc(displayName(s))}${line ? `<span class="hr-line">${esc(sumPreview(line))}</span>` : ""}</span>` +
+        `<span class="hr-proj">${projOf(s)}</span><span class="hr-st">${fmtAge(Math.max(0, now - s.endedAt))} ago</span></li>`;
+    }).join("");
+    body += `<section class="home-sec"><div class="group">Finished today</div><ul class="home-list">${rows}</ul></section>`;
+  }
+
+  return `<div class="home"><div class="home-inner">` +
+    `<div class="home-hero${queue.length ? " asking" : ""}"><div class="br-empty-mark">${briefWave}</div><h2>${esc(head)}</h2><p>${esc(sub)}</p></div>` +
+    body +
+    `<div class="home-keys"><button class="home-new">+ New thread</button><span><kbd>⌘K</kbd> commands</span><span><kbd>/</kbd> search</span></div>` +
+    `</div></div>`;
 }
 
 // On the first poll (once the DTOs exist) sync the stage to the restored
@@ -2757,6 +2829,7 @@ async function poll() {
     if (stageView.kind === "project") {
       refreshProjectSessions();
     }
+    if (stageView.kind === "attention") renderAttentionStage();
   } catch (e) {
     console.error("poll failed", e);
   }
