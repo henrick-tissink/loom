@@ -58,9 +58,12 @@ type BriefEstimateDTO struct {
 	Model        string `json:"model"`
 }
 
-// BriefPartDTO is one rendered slice of a brief; Task > 0 marks a task.
+// BriefPartDTO is one rendered slice of a brief: its head, a section, a
+// task (Task > 0) or the appendix. HTML is the body; the reader draws the
+// heading itself.
 type BriefPartDTO struct {
 	Task  int    `json:"task"`
+	Kind  string `json:"kind"`
 	Title string `json:"title"`
 	HTML  string `json:"html"`
 }
@@ -216,11 +219,11 @@ func (a *App) BriefOpen(id string) (BriefDTO, error) {
 	if err != nil {
 		return BriefDTO{}, err
 	}
-	parts := brief.Split(src)
+	parts, idx := brief.Split(src), brief.EvidenceIndex(src)
 	out := BriefDTO{Meta: m, Parts: make([]BriefPartDTO, 0, len(parts))}
 	out.Path, _ = a.briefs.svc.Archive.Path(id, brief.FileBrief)
 	for _, p := range parts {
-		out.Parts = append(out.Parts, BriefPartDTO{Task: p.Task, Title: p.Title, HTML: brief.HTML(p.MD)})
+		out.Parts = append(out.Parts, BriefPartDTO{Task: p.Task, Kind: p.Kind, Title: p.Title, HTML: brief.Render(p, idx)})
 	}
 	return out, nil
 }

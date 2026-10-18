@@ -1067,14 +1067,16 @@ function renderProject() {
 // "Ask about this" / "Review" on every task, or open it as a page. Writing
 // is never automatic; it uses quota, so the estimate comes first.
 
-const briefUI = { root: null, window: "24h", est: null, estErr: "", estGen: 0, list: [], doc: null, docId: null, running: [], err: "" };
+const briefUI = { root: null, window: "24h", est: null, estErr: "", estGen: 0, list: [], doc: null, docId: null, running: [], started: {}, err: "" };
+const BRIEF_WINDOWS = [["24h", "24 hours"], ["3d", "3 days"], ["5d", "5 days"], ["1w", "1 week"]];
+let briefTimer = null;
 
 function openBrief(root, id) {
   teardownTerminal();
   activeName = null;
   selProject = root;
   stageView = { kind: "brief", root };
-  if (briefUI.root !== root) Object.assign(briefUI, { root, est: null, estErr: "", list: [], doc: null, docId: null, running: [], err: "" });
+  if (briefUI.root !== root) Object.assign(briefUI, { root, est: null, estErr: "", list: [], doc: null, docId: null, running: [], started: {}, err: "" });
   if (id) briefUI.docId = id;
   renderBrief();
   renderRail();
@@ -1093,6 +1095,7 @@ async function refreshBriefList(openNewest) {
   } catch (e) { briefUI.err = String(e); }
   renderBriefSide();
   if (briefUI.docId && (!briefUI.doc || briefUI.doc.meta.id !== briefUI.docId)) loadBriefDoc(briefUI.docId);
+  else if (!briefUI.docId) renderBriefReader();
 }
 
 async function estimateBrief() {
@@ -1114,6 +1117,7 @@ async function writeBrief() {
   const root = briefUI.root, win = briefUI.window;
   if (briefUI.running.includes(win)) return;
   briefUI.running = [...briefUI.running, win];
+  briefUI.started[win] = Date.now();
   briefUI.err = "";
   renderBriefSide();
   try {
@@ -1123,12 +1127,14 @@ async function writeBrief() {
     if (stageView.kind === "brief" && stageView.root === root) briefUI.err = "Writing failed: " + e;
   }
   briefUI.running = briefUI.running.filter((w) => w !== win);
+  delete briefUI.started[win];
   if (stageView.kind === "brief" && stageView.root === root) { await refreshBriefList(false); estimateBrief(); }
 }
 
 async function loadBriefDoc(id) {
   briefUI.docId = id;
   renderBriefSide();
+  renderBriefReader();
   try {
     const doc = await window.go.main.App.BriefOpen(id);
     if (stageView.kind !== "brief" || briefUI.docId !== id) return;
@@ -1144,7 +1150,36 @@ async function loadBriefDoc(id) {
 }
 
 function fmtTokens(n) { return n >= 1000 ? Math.round(n / 1000) + "k" : String(n); }
-function fmtDay(sec) { return new Date(sec * 1000).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }); }
+function briefWinLabel(k) { return (BRIEF_WINDOWS.find(([w]) => w === k) || [k, k])[1]; }
+// "the 3-day brief": the window as an adjective.
+function briefWinAdj(k) { return { "24h": "24-hour", "3d": "3-day", "5d": "5-day", "1w": "1-week" }[k] || k; }
+function fmtClock(d) { return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }); }
+function fmtDate(sec, withTime) {
+  const d = new Date(sec * 1000);
+  const s = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  return withTime ? s + " " + fmtClock(d) : s;
+}
+// fmtWhen is a saved brief's date as people say it: Today, Yesterday, a
+// weekday this week, else the date.
+function fmtWhen(sec) {
+  const d = new Date(sec * 1000), now = new Date();
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const ago = Math.round((day(now) - day(d)) / 86400000);
+  const t = fmtClock(d);
+  if (ago === 0) return "Today " + t;
+  if (ago === 1) return "Yesterday " + t;
+  if (ago > 1 && ago < 7) return d.toLocaleDateString(undefined, { weekday: "long" }) + " " + t;
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short" }) + " " + t;
+}
+function fmtElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+function fmtTook(ms) {
+  if (!ms) return "";
+  const s = Math.round(ms / 1000);
+  return s < 60 ? s + "s" : Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s";
+}
 
 function renderBrief() {
   const stage = document.getElementById("stage");
@@ -1154,7 +1189,7 @@ function renderBrief() {
     <div id="stage-header" class="stage-head po-head">
       <span class="sh-name">${esc(p ? p.name : "Project")}</span>
       <span class="br-crumb">Brief</span>
-      <span class="po-acts"><button class="sh-btn" id="br-back">Project</button></span>
+      <span class="po-acts"><button class="sh-btn" id="br-back" title="Back to the project">Project</button></span>
     </div>
     <div class="br">
       <aside class="br-side" id="br-side"></aside>
@@ -1165,85 +1200,208 @@ function renderBrief() {
   renderBriefReader();
 }
 
+const briefWave = `<span class="br-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>`;
+
 function renderBriefSide() {
   const el = document.getElementById("br-side");
-  if (!el || stageView.kind !== "brief") return;
-  const wins = [["24h", "24 hours"], ["3d", "3 days"], ["5d", "5 days"], ["1w", "1 week"]];
+  if (!el || stageView.kind !== "brief") { clearInterval(briefTimer); briefTimer = null; return; }
   const writing = briefUI.running.includes(briefUI.window);
   const est = briefUI.est;
   let estHtml;
-  if (briefUI.estErr) estHtml = `<div class="modal-error">${esc(briefUI.estErr)}</div>`;
-  else if (!est) estHtml = `<div class="br-est br-dim">Collecting evidence…</div>`;
-  else if (!est.sessions && !est.commits) estHtml = `<div class="br-est br-dim">Nothing happened here in the ${esc(est.label)}.</div>`;
-  else estHtml = `<div class="br-est"><b>${est.sessions}</b> sessions · <b>${est.commits}</b> of your commits${est.otherCommits ? ` · ${est.otherCommits} by others` : ""}<br><span class="br-dim">~${fmtTokens(est.inputTokens)} tokens of evidence · ${esc(est.model)} · a few minutes</span></div>`;
+  if (briefUI.estErr) estHtml = `<div class="br-est br-esterr"><b>Could not collect the evidence</b><div class="br-cap">${esc(briefUI.estErr)}</div><button class="sh-btn br-retry" id="br-retry">Try again</button></div>`;
+  else if (!est) estHtml = `<div class="br-est br-loading">${briefWave}<span>Reading transcripts and git…</span></div>`;
+  else if (!est.sessions && !est.commits) estHtml = `<div class="br-est br-none">Nothing happened here in the ${esc(est.label)}.</div>`;
+  else estHtml = `
+    <div class="br-est">
+      <div class="br-stats">
+        <div><b>${est.sessions}</b><span>session${est.sessions === 1 ? "" : "s"}</span></div>
+        <div><b>${est.commits}</b><span>your commit${est.commits === 1 ? "" : "s"}</span></div>
+        <div><b>${est.otherCommits}</b><span>by others</span></div>
+        <div><b>~${fmtTokens(est.inputTokens)}</b><span>tokens in</span></div>
+      </div>
+      <div class="br-cap">Written by ${esc(est.model)} · takes a few minutes · uses plan quota</div>
+    </div>`;
   const canWrite = est && (est.sessions || est.commits) && !writing;
+  const started = briefUI.started[briefUI.window];
+  const action = writing
+    ? `<div class="br-writing">${briefWave}<div><b>Writing the ${esc(briefWinAdj(briefUI.window))} brief</b>
+        <div class="br-wmeta">${started ? `<span class="br-clock" id="br-clock">${fmtElapsed(Date.now() - started)}</span> · ` : ""}usually 3–6 minutes</div>
+        <div class="br-cap">You can leave this view; the brief is saved when it is done.</div></div></div>`
+    : `<button class="sh-btn sh-primary br-write" id="br-write"${canWrite ? "" : " disabled"}>Write brief</button>`;
+  // A brief being written for another window shows in the list; the one
+  // for this window already has the card above.
+  const pending = briefUI.running.filter((w) => w !== briefUI.window).map((w) => `
+      <li class="br-item br-pending"><span class="br-iwin">${esc(w)}</span><span class="br-iday">${briefWave} Writing…</span><span class="br-imeta">the ${esc(briefWinAdj(w))} brief</span></li>`).join("");
   el.innerHTML = `
-    <div class="br-new">
+    <section class="br-new">
       <h3>New brief</h3>
-      <div class="br-chips">${wins.map(([k, l]) => `<button class="br-chip${briefUI.window === k ? " on" : ""}" data-w="${k}">${l}</button>`).join("")}</div>
+      <div class="br-chips" role="radiogroup" aria-label="Window">${BRIEF_WINDOWS.map(([k, l]) => `<button class="br-chip${briefUI.window === k ? " on" : ""}" role="radio" aria-checked="${briefUI.window === k}" data-w="${k}">${l}</button>`).join("")}</div>
       ${estHtml}
-      <button class="sh-btn sh-primary br-write" id="br-write"${canWrite ? "" : " disabled"}>${writing ? "Writing…" : "Write brief"}</button>
-      ${writing ? `<div class="br-dim br-note">Claude is reading the evidence. You can leave this view; the brief is saved when it is done.</div>` : ""}
+      ${action}
       ${briefUI.err ? `<div class="modal-error">${esc(briefUI.err)}</div>` : ""}
-    </div>
-    <h3>Saved briefs</h3>
-    ${briefUI.list.length ? `<ul class="br-list">${briefUI.list.map((m) => `
-      <li class="br-item${briefUI.docId === m.id ? " on" : ""}" data-id="${esc(m.id)}">
-        <span class="br-iwin">${esc(m.window)}</span>
-        <span class="br-iday">${esc(fmtDay(m.createdAt))}</span>
-        <span class="br-dim br-imeta">${m.sessions} sessions · ${m.commits} commits</span>
-      </li>`).join("")}</ul>` : `<div class="po-empty">None yet.</div>`}`;
+    </section>
+    <section class="br-saved">
+      <h3>Saved briefs${briefUI.list.length ? ` <span class="br-count">${briefUI.list.length}</span>` : ""}</h3>
+      ${briefUI.list.length || pending ? `<ul class="br-list">${pending}${briefUI.list.map((m) => `
+        <li class="br-item${briefUI.docId === m.id ? " on" : ""}" data-id="${esc(m.id)}" tabindex="0">
+          <span class="br-iwin">${esc(m.window)}</span>
+          <span class="br-iday">${esc(fmtWhen(m.createdAt))}</span>
+          <span class="br-imeta">${m.sessions} session${m.sessions === 1 ? "" : "s"} · ${m.commits} commit${m.commits === 1 ? "" : "s"}</span>
+        </li>`).join("")}</ul>` : `<div class="br-none">None yet. Your briefs are kept here.</div>`}
+    </section>`;
   el.querySelectorAll(".br-chip").forEach((b) => b.addEventListener("click", () => {
+    if (briefUI.window === b.getAttribute("data-w")) return;
     briefUI.window = b.getAttribute("data-w");
     estimateBrief();
   }));
   const wb = document.getElementById("br-write");
   if (wb) wb.addEventListener("click", writeBrief);
-  el.querySelectorAll(".br-item").forEach((li) => li.addEventListener("click", () => loadBriefDoc(li.getAttribute("data-id"))));
+  const rb = document.getElementById("br-retry");
+  if (rb) rb.addEventListener("click", estimateBrief);
+  el.querySelectorAll(".br-item[data-id]").forEach((li) => {
+    const open = () => loadBriefDoc(li.getAttribute("data-id"));
+    li.addEventListener("click", open);
+    li.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
+  });
+  // The clock ticks in place; nothing else re-renders while a brief is written.
+  clearInterval(briefTimer); briefTimer = null;
+  if (writing && started) briefTimer = setInterval(() => {
+    const c = document.getElementById("br-clock");
+    if (!c || stageView.kind !== "brief") { clearInterval(briefTimer); briefTimer = null; return; }
+    c.textContent = fmtElapsed(Date.now() - started);
+  }, 1000);
 }
 
 function renderBriefReader() {
   const el = document.getElementById("br-reader");
   if (!el || stageView.kind !== "brief") return;
-  const doc = briefUI.doc;
+  const doc = briefUI.doc && briefUI.doc.meta.id === briefUI.docId ? briefUI.doc : null;
   if (!doc) {
-    el.innerHTML = `<div class="br-empty">${briefUI.docId ? "Opening…" : "Pick a window and write a brief. It reads what your sessions did and what git says, and explains every task in depth: what changed, how it works, what was decided, what proves it, and what is still open."}</div>`;
+    el.innerHTML = briefUI.docId
+      ? `<div class="br-skel" aria-label="Opening the brief"><i class="w30"></i><i class="w60 tall"></i><i class="w45"></i><b></b><i></i><i></i><i class="w80"></i><b></b><i></i><i class="w70"></i></div>`
+      : `<div class="br-empty">
+          <div class="br-empty-mark">${briefWave}</div>
+          <h2>What did you actually do?</h2>
+          <p>A brief reads what your sessions did and what git says, then explains every task in depth, so you can study it at the end of a day.</p>
+          <ol>
+            <li><b>Pick a window</b> on the left. Loom collects the evidence first; nothing is sent yet.</li>
+            <li><b>Write brief.</b> Claude explains each task: what changed, how it works, what was decided, what proves it, what is still open.</li>
+            <li><b>Ask about any task</b> in a read-only session, or make it a page to keep.</li>
+          </ol>
+        </div>`;
     return;
   }
   const m = doc.meta;
-  const tasks = doc.parts.filter((p) => p.task > 0);
+  const daily = m.window === "24h";
+  const range = `${esc(fmtDate(m.since, daily))} → ${esc(fmtDate(m.until, daily))}`;
+  const stat = (n, one, many) => `<span><b>${n}</b> ${n === 1 ? one : many}</span>`;
+  const took = fmtTook(m.durationMs);
+  const hero = `
+    <header class="br-hero" id="br-top" data-title="${esc("Last " + briefWinLabel(m.window))}">
+      <div class="br-eyebrow">Last ${esc(briefWinLabel(m.window))}</div>
+      <h1>${range}</h1>
+      <div class="br-herostats">
+        ${stat(m.sessions, "session", "sessions")}
+        ${stat(m.commits, "commit of yours", "commits of yours")}
+        ${m.otherCommits ? stat(m.otherCommits, "by others", "by others") : ""}
+        <span><b>~${fmtTokens(m.inputTokens)}</b> tokens of evidence</span>
+      </div>
+      <div class="br-byline">Written by Claude (${esc(m.model)}) ${esc(fmtWhen(m.createdAt).replace(/^(Today|Yesterday)/, (w) => w.toLowerCase()))}${took ? ` in ${took}` : ""}. Every claim cites its evidence; hover a citation to see the session.</div>
+    </header>`;
+  const outline = [];
+  let si = 0;
+  const body = doc.parts.map((p) => {
+    if (p.kind === "head") return p.html.trim() ? `<section class="br-sec br-intro">${p.html}</section>` : "";
+    if (p.kind === "task") {
+      outline.push({ id: "br-task-" + p.task, title: p.title, num: p.task });
+      return `<section class="br-task" id="br-task-${p.task}" data-title="${esc(p.title)}">
+          <header class="br-th">
+            <span class="br-tnum">${String(p.task).padStart(2, "0")}</span>
+            <h2>${esc(p.title)}</h2>
+            <span class="br-tacts">
+              <button class="sh-btn sh-primary br-ask" data-t="${p.task}" title="A read-only Claude session that has read this task and its evidence">Ask about this</button>
+              <button class="sh-btn br-review" data-t="${p.task}" title="A read-only Claude session that reviews this change independently">Review</button>
+            </span>
+          </header>
+          <div class="br-tbody">${p.html}</div>
+        </section>`;
+    }
+    if (p.kind === "appendix") {
+      outline.push({ id: "br-appx", title: p.title, appx: true });
+      return `<details class="br-appx" id="br-appx" data-title="${esc(p.title)}">
+          <summary><span>${esc(p.title)}</span><span class="br-cap">the git facts as collected, and which session each S-number is</span></summary>
+          <div class="br-appx-body">${p.html}</div>
+        </details>`;
+    }
+    const id = "br-sec-" + ++si;
+    const ov = /^overview$/i.test(p.title);
+    outline.push({ id, title: p.title, lead: ov });
+    return `<section class="br-sec${ov ? " br-overview" : ""}" id="${id}" data-title="${esc(p.title)}"><h2 class="br-sh">${esc(p.title)}</h2>${p.html}</section>`;
+  }).join("");
+  const tasks = outline.filter((o) => o.num);
+  const first = outline.findIndex((o) => o.num);
+  const before = outline.filter((o, i) => !o.num && (first < 0 || i < first));
+  const after = outline.filter((o, i) => !o.num && first >= 0 && i > first);
+  const oItem = (o) => `<a class="br-oi${o.num ? " br-onum" : ""}" data-go="${o.id}">${o.num ? `<span>${String(o.num).padStart(2, "0")}</span>` : ""}<b title="${esc(o.title)}">${esc(o.title)}</b></a>`;
   el.innerHTML = `
     <div class="br-bar">
-      <span class="br-dim">${esc(fmtDay(m.since))} → ${esc(fmtDay(m.until))} · ${m.sessions} sessions · ${m.commits} commits · ${esc(m.model)}</span>
+      <button class="br-cur" id="br-cur" title="Contents"><span id="br-cur-t">${esc("Last " + briefWinLabel(m.window))}</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
       <span class="br-bacts">
-        <button class="sh-btn" id="br-page" title="Open as a designed page in your browser">Make artefact</button>
-        <button class="sh-btn" id="br-files" title="brief.md, evidence.md and the page">Files</button>
+        <button class="sh-btn" id="br-page" title="Open as a standalone page in your browser, to print or keep">Make artefact</button>
+        <button class="sh-btn" id="br-files" title="Show brief.md, evidence.md and the page in Finder">Files</button>
       </span>
     </div>
-    ${tasks.length ? `<nav class="br-toc">${tasks.map((t) => `<a data-t="${t.task}">${esc(t.title)}</a>`).join("")}</nav>` : ""}
-    <div class="br-doc">${doc.parts.map((p) => p.task > 0
-      ? `<section class="br-task" id="br-task-${p.task}">
-          <div class="br-tacts">
-            <button class="sh-btn sh-primary br-ask" data-t="${p.task}" title="A read-only Claude session that has read this task and its evidence">Ask about this</button>
-            <button class="sh-btn br-review" data-t="${p.task}" title="A read-only Claude session that reviews this change independently">Review</button>
-          </div>${p.html}</section>`
-      : `<section class="br-part">${p.html}</section>`).join("")}</div>`;
+    <div class="br-body" id="br-body">
+      <article class="br-doc">${hero}${body}</article>
+      <nav class="br-outline" id="br-outline" aria-label="In this brief">
+        <div class="br-oh">In this brief</div>
+        ${before.map(oItem).join("")}
+        ${tasks.length ? `<div class="br-og">Tasks <span>${tasks.length}</span></div>${tasks.map(oItem).join("")}` : ""}
+        ${after.length ? `<div class="br-og"></div>${after.map(oItem).join("")}` : ""}
+      </nav>
+    </div>`;
   const id = m.id;
-  document.getElementById("br-page").addEventListener("click", () =>
-    window.go.main.App.BriefArtefact(id).catch((e) => { briefUI.err = String(e); renderBriefSide(); }));
-  document.getElementById("br-files").addEventListener("click", () =>
-    window.go.main.App.BriefReveal(id).catch((e) => console.error("brief files", e)));
-  el.querySelectorAll(".br-toc a").forEach((a) => a.addEventListener("click", () => {
-    const t = document.getElementById("br-task-" + a.getAttribute("data-t"));
-    if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+  const flash = (b, busy, done, fn) => {
+    const label = b.textContent;
+    b.disabled = true; b.textContent = busy;
+    fn().then(() => { b.textContent = done; setTimeout(() => { b.textContent = label; b.disabled = false; }, 1800); })
+      .catch((e) => { b.textContent = label; b.disabled = false; briefUI.err = String(e); renderBriefSide(); });
+  };
+  const pb = document.getElementById("br-page");
+  pb.addEventListener("click", () => flash(pb, "Opening…", "Opened in browser", () => window.go.main.App.BriefArtefact(id)));
+  const fb = document.getElementById("br-files");
+  fb.addEventListener("click", () => flash(fb, "Opening…", "Shown in Finder", () => window.go.main.App.BriefReveal(id)));
+  const bodyEl = document.getElementById("br-body");
+  // Narrow: the outline is a menu under the bar's title. It is placed from
+  // the button, so it opens in the same spot however far the reader scrolled.
+  const curBtn = document.getElementById("br-cur"), outlineEl = document.getElementById("br-outline");
+  const closeOutline = () => bodyEl.classList.remove("show-outline");
+  curBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (getComputedStyle(curBtn.querySelector("svg")).display === "none") return; // wide: the outline is already beside the text
+    const r = curBtn.getBoundingClientRect();
+    outlineEl.style.left = r.left + "px";
+    outlineEl.style.top = r.bottom + 4 + "px";
+    bodyEl.classList.toggle("show-outline");
+  });
+  // Assigned, not added: the reader element outlives each render.
+  el.onclick = (e) => { if (!outlineEl.contains(e.target)) closeOutline(); };
+  el.onkeydown = (e) => { if (e.key === "Escape") closeOutline(); };
+  el.querySelectorAll(".br-oi").forEach((a) => a.addEventListener("click", () => {
+    const t = document.getElementById(a.getAttribute("data-go"));
+    if (!t) return;
+    if (t.tagName === "DETAILS") t.open = true;
+    bodyEl.classList.remove("show-outline");
+    t.scrollIntoView({ behavior: "smooth", block: "start" });
   }));
   const ask = async (b, mode) => {
-    b.disabled = true;
+    const label = b.textContent;
+    b.disabled = true; b.textContent = "Opening…";
     try {
       const name = await window.go.main.App.BriefAsk(id, parseInt(b.getAttribute("data-t"), 10), mode);
       selectSession(name);
       poll();
-    } catch (e) { b.disabled = false; briefUI.err = "Could not open the session: " + e; renderBriefSide(); }
+    } catch (e) { b.disabled = false; b.textContent = label; briefUI.err = "Could not open the session: " + e; renderBriefSide(); }
   };
   el.querySelectorAll(".br-ask").forEach((b) => b.addEventListener("click", () => ask(b, "explain")));
   el.querySelectorAll(".br-review").forEach((b) => b.addEventListener("click", () => ask(b, "review")));
@@ -1253,6 +1411,26 @@ function renderBriefReader() {
     const href = a.getAttribute("href") || "";
     if (/^https?:\/\//i.test(href)) openURLToken(href);
   }));
+  // Scroll-spy: the bar names the section under it and the outline marks it.
+  const marks = [...el.querySelectorAll(".br-doc [data-title]")];
+  const links = new Map([...el.querySelectorAll(".br-oi")].map((a) => [a.getAttribute("data-go"), a]));
+  const cur = document.getElementById("br-cur-t");
+  let ticking = false;
+  const spy = () => {
+    ticking = false;
+    // At the end the last short sections can never reach the top, so the
+    // line moves down to where the eye is.
+    const box = el.getBoundingClientRect(), end = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+    const top = box.top + (end ? box.height * 0.6 : 72);
+    let at = marks[0];
+    for (const s of marks) { if (s.getBoundingClientRect().top <= top) at = s; else break; }
+    if (!at) return;
+    cur.textContent = at.getAttribute("data-title");
+    links.forEach((a, k) => a.classList.toggle("on", k === at.id));
+  };
+  el.onscroll = () => { if (!ticking) { ticking = true; requestAnimationFrame(spy); } };
+  el.scrollTop = 0;
+  spy();
 }
 
 // Warnings are the only place a repo skipped by reconciliation (a label

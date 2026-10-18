@@ -326,3 +326,57 @@ func TestServiceScopeRefusesHidden(t *testing.T) {
 		t.Error("an empty bundle must not reach the writer")
 	}
 }
+
+// A brief splits into its head, sections, tasks and appendix; the reader
+// draws headings itself, so a body carries none, and titles are plain text.
+func TestSplitKindsAndBody(t *testing.T) {
+	src := "# acme · last 3 days\n\n*Thu → Sun · written by Claude (opus) from 2 sessions.*\n\n## Overview\n- **Shipped:**\n  - x\n\n## Task: Add `export` button\n### Outcome\nok\n\n## Other activity\n- y\n\n---\n\n# Appendix\n\n## Git facts\nz\n## Evidence index\n\n- **S1** · session abc · Export work · `/p/s1.jsonl`\n- **S2** · subagent def · verify it · `/p/s2.jsonl`\n"
+	var got []string
+	parts := Split(src)
+	for _, p := range parts {
+		got = append(got, p.Kind+":"+p.Title)
+	}
+	if want := "head:acme · last 3 days|section:Overview|task:Add export button|section:Other activity|appendix:Appendix"; strings.Join(got, "|") != want {
+		t.Fatalf("parts = %q\nwant    %q", strings.Join(got, "|"), want)
+	}
+	if b := parts[0].Body(); b != "" {
+		t.Errorf("head body must drop the title and stamp: %q", b)
+	}
+	if b := parts[2].Body(); strings.Contains(b, "## Task") || !strings.Contains(b, "### Outcome") {
+		t.Errorf("task body: %q", b)
+	}
+	if strings.Contains(parts[3].MD, "---") {
+		t.Errorf("the rule before the appendix belongs to neither part: %q", parts[3].MD)
+	}
+	if !strings.Contains(parts[4].MD, "## Evidence index") {
+		t.Error("the appendix keeps its own headings")
+	}
+	idx := EvidenceIndex(src)
+	if idx["S1"] != "Export work" || idx["S2"] != "subagent: verify it" {
+		t.Errorf("index = %v", idx)
+	}
+}
+
+// Citations become quiet, titled spans and the overview's lead-ins become
+// buckets; anything that only looks like a citation is left alone.
+func TestRenderDecorates(t *testing.T) {
+	idx := Index{"S1": "Export <work>"}
+	h := Render(Part{Kind: KindSection, MD: "## Overview\n- **Shipped:**\n  - done [git; S1:L5]\n- **Needs Henrick:** merge it [unverified]\n\nsee [x](https://e.x) and `[--json]` and [S9:L1] and [inferred]"}, idx)
+	for _, want := range []string{
+		`<span class="cite" title="S1 · Export &lt;work&gt;">git; S1:L5</span>`,
+		`<span class="cite cite-unv">unverified</span>`,
+		`<span class="cite cite-inf">inferred</span>`,
+		`<span class="cite">S9:L1</span>`,
+		`<li class="bucket b-shipped"><strong class="bucket-label">Shipped</strong>`,
+		`<li class="bucket b-needs"><strong class="bucket-label">Needs Henrick</strong>`,
+		`<code>[--json]</code>`,
+		`<a href="https://e.x">x</a>`,
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("missing %s in\n%s", want, h)
+		}
+	}
+	if strings.Contains(h, "<h2>") {
+		t.Error("the section heading is drawn by the reader, not the body")
+	}
+}
