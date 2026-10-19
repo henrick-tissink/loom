@@ -339,6 +339,7 @@ function prTag(s) {
   if (open && p.checks) bits.push({ passing: "✓ checks", failing: "✗ checks", running: "● checks" }[p.checks] || "");
   if (open && p.review === "changes_requested") bits.push("changes requested");
   if (open && p.review === "approved") bits.push("approved");
+  if (open && p.comments) bits.push(`${p.comments} comment${p.comments === 1 ? "" : "s"}`);
   let cls = "tpill-ext";
   if (open && (p.checks === "failing" || p.review === "changes_requested")) cls = "tpill-bad";
   else if (p.state === "merged" || (open && p.checks === "passing" && p.review === "approved")) cls = "tpill-ok";
@@ -356,6 +357,84 @@ document.addEventListener("click", (e) => {
   e.preventDefault();
   openURLToken(pill.dataset.url);
 }, true);
+
+// hasReview reports whether a row's PR has review feedback to send on.
+function hasReview(s) {
+  const p = s.pr;
+  return !!(p && p.comments && (p.state === "open" || p.state === "draft"));
+}
+
+function reviewButton(s, finished) {
+  return actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/>',
+    finished ? "Resume with the PR's review feedback" : "Send the PR's review feedback to this session",
+    () => openReview(s, finished));
+}
+
+// openReview fetches the PR's open review feedback fresh, shows it composed
+// as a prompt the operator can edit, and sends it only on an explicit click:
+// pasted into a live session as one message, or as the first message of a
+// resumed one. Errors stay in the modal; nothing is sent behind its back.
+function openReview(s, finished) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const p = s.pr;
+  const ref = `${p.kind === "gitlab" ? "MR !" : "PR #"}${p.number}`;
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal review-modal" role="dialog" aria-label="Send review feedback">
+      <h2>Review feedback on ${esc(ref)}</h2>
+      <p class="review-sub">${finished ? "Resumes the session with this as its first message." : `Sent to ${esc(displayName(s))} as one message.`} Edit it as you like first.</p>
+      <div class="field"><textarea id="review-text" spellcheck="false" placeholder="Fetching the feedback…" disabled></textarea></div>
+      <div class="modal-error" id="review-err"></div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="review-cancel">Cancel</button>
+        <button class="btn-launch" id="review-send" disabled>${finished ? "Resume and send" : "Send"}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const text = backdrop.querySelector("#review-text");
+  const errEl = backdrop.querySelector("#review-err");
+  const sendBtn = backdrop.querySelector("#review-send");
+  const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#review-cancel").addEventListener("click", close);
+  window.go.main.App.ReviewPrompt(s.name).then((prompt) => {
+    if (!backdrop.isConnected) return;
+    text.value = prompt;
+    text.disabled = false;
+    sendBtn.disabled = false;
+    text.focus();
+    text.setSelectionRange(0, 0);
+    text.scrollTop = 0;
+  }).catch((e) => { text.placeholder = ""; errEl.textContent = String(e); });
+  sendBtn.addEventListener("click", async () => {
+    if (!text.value.trim()) return;
+    sendBtn.disabled = true;
+    errEl.textContent = "";
+    try {
+      if (finished) {
+        const nn = await window.go.main.App.ResumeWithPrompt(s.name, text.value);
+        close();
+        if (nn) selectSession(nn);
+      } else {
+        await window.go.main.App.SendPrompt(s.name, text.value);
+        close();
+      }
+      poll();
+    } catch (e) {
+      errEl.textContent = String(e);
+      sendBtn.disabled = false;
+    }
+  });
+}
+
+// seedTag marks a session whose first message (a launch seed, or a review
+// sent with a resume) never reached claude.
+function seedTag(s) {
+  return s.seedFailed ? `<span class="tpill tpill-bad" title="Claude's input box never became ready, so the first message was not sent. Attach and send it yourself.">first message not sent</span>` : "";
+}
 
 // worktreeErrs holds a refused "Remove worktree" per finished row, shown on
 // the row until the next attempt: a refusal must be visible, not a console line.
@@ -550,7 +629,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -562,6 +641,8 @@ function appendLiveRow(s, projLabel) {
   if (s.background) { li.querySelector(".tactions").appendChild(killButton(s.name, "Stop")); sealLive(li, s); return; }
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
+  // not while a dialog is open: the paste's Enter would answer it
+  if (hasReview(s) && !(s.waitingFor && s.waitingFor !== "shell")) acts.appendChild(reviewButton(s, false));
   if (overBudget(s)) {
     acts.appendChild(actionBtn('<path d="M12 5v14M5 12h14"/>', "Fresh session from checkpoint (same directory; this one stays open)", async () => {
       try { const nn = await window.go.main.App.FreshSession(s.name); if (nn) selectSession(nn); poll(); }
@@ -608,6 +689,7 @@ function appendFinishedRow(s) {
     try { const nn = await window.go.main.App.ResumeSession(s.name); if (nn) selectSession(nn); poll(); }
     catch (e) { console.error("resume", e); }
   }));
+  if (hasReview(s)) acts.appendChild(reviewButton(s, true));
   if (s.worktree) acts.appendChild(removeWorktreeButton(s.name));
   acts.appendChild(actionBtn('<path d="M6 6l12 12M18 6L6 18"/>', "Dismiss from history", async () => {
     try { await window.go.main.App.DismissSession(s.name); poll(); } catch (e) { console.error("dismiss", e); }

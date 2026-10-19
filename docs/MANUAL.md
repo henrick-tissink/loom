@@ -49,6 +49,8 @@ On first launch the indexer sweeps your entire archive in the background (~10s f
 
 When the branch a session worked on has a pull request (GitHub, via `gh`) or merge request (GitLab, via `glab`), the row shows it: `PR #77 · ✓ checks`, `MR !55 · ● checks`, `PR #12 · merged`. Red means failing checks or changes requested. Click the pill to open it in your browser. `PR ?` means the forge couldn't be asked (hover for why: usually `gh auth login` or `glab auth login`). Status refreshes about once a minute for live sessions.
 
+When the PR has review feedback, the pill counts it (`3 comments`) and the row gets a **Send review** button. The feedback is the unresolved diff threads plus any reviews or comments posted since the last push (bot comments such as coverage reports are left out). The button hides while the session has a permission dialog open. The button fetches it fresh and shows it as a prompt you can edit; **Send** pastes it into the session as one message. On a finished session it reads **Resume and send**, which resumes the conversation with the review as its first message. Nothing is sent until you click.
+
 | Icon | Meaning |
 |---|---|
 | `●` red | **Needs you** — Claude finished, a reply is waiting (floats to the top; you also get a macOS notification with sound) |

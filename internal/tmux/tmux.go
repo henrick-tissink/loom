@@ -224,6 +224,24 @@ func (c *Client) SendLiteral(name, text string) error {
 	return nil
 }
 
+// Paste puts text in the pane's input as one bracketed paste: a multi-line
+// message arrives whole instead of each newline submitting a line, as
+// send-keys would (claude enables bracketed paste; verified on 2.1.303). The
+// buffer is named per session and deleted by the paste (-d).
+func (c *Client) Paste(name, text string) error {
+	buf := "loom-paste-" + name
+	cmd := exec.Command("tmux", "-L", c.Socket, "load-buffer", "-b", buf, "-")
+	cmd.Env = ensureLocale(os.Environ())
+	cmd.Stdin = strings.NewReader(text)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux load-buffer %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+	}
+	if out, err := c.run("paste-buffer", "-p", "-d", "-b", buf, "-t", paneTarget(name)); err != nil {
+		return fmt.Errorf("tmux paste-buffer %s: %s: %w", name, strings.TrimSpace(out), err)
+	}
+	return nil
+}
+
 func (c *Client) SendEnter(name string) error {
 	out, err := c.run("send-keys", "-t", paneTarget(name), "Enter")
 	if err != nil {

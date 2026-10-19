@@ -209,6 +209,12 @@ func (l *Launcher) Launch(r Recipe, w, h int, now time.Time) (string, error) {
 // unlike the brief's original draft, no post-ready correction goroutine is
 // needed or started here; ClaudeSessionID carries over unchanged.
 func (l *Launcher) Resume(old store.SessionRow, w, h int, now time.Time) (string, error) {
+	return l.ResumeWith(old, "", w, h, now)
+}
+
+// ResumeWith is Resume with a first message, delivered once the resumed
+// claude is ready, through the same gate as a launch seed.
+func (l *Launcher) ResumeWith(old store.SessionRow, seed string, w, h int, now time.Time) (string, error) {
 	// Add-dirs are re-passed on resume (--resume does not restore them) but are
 	// filtered to those that still exist: a repo moved or deleted since the
 	// original launch must not make an otherwise fine conversation unresumable.
@@ -232,12 +238,15 @@ func (l *Launcher) Resume(old store.SessionRow, w, h int, now time.Time) (string
 	if err := l.Store.Upsert(store.SessionRow{
 		Name: name, ClaudeSessionID: old.ClaudeSessionID,
 		ProjectLabel: old.ProjectLabel, Cwd: cwd,
-		Model: old.Model, Mode: old.Mode, Tags: old.Tags,
+		Model: old.Model, Mode: old.Mode, Tags: old.Tags, Seed: seed,
 		AddDirs:   EncodeAddDirs(dirs),
 		CreatedAt: now.Unix(), EndedAt: -1, ExitCode: -1,
 		LastStatus: "unknown",
 	}); err != nil {
 		return name, err
+	}
+	if seed != "" {
+		go l.seedWhenReady(name, seed)
 	}
 	return name, nil
 }
@@ -314,7 +323,14 @@ func (l *Launcher) seedWhenReady(name, seed string) {
 		_ = l.Store.SetSeedStatus(name, "failed") // timed out or session gone
 		return
 	}
-	if err := l.Tmux.SendLiteral(name, seed); err != nil {
+	// A multi-line seed (a PR review) goes in as one bracketed paste; typed
+	// with send-keys, each newline would submit a line on its own. A
+	// one-line seed stays typed, so a /slash-command is still a command.
+	send := l.Tmux.SendLiteral
+	if strings.Contains(seed, "\n") {
+		send = l.Tmux.Paste
+	}
+	if err := send(name, seed); err != nil {
 		_ = l.Store.SetSeedStatus(name, "failed")
 		return
 	}

@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/henricktissink/loom/internal/ccsessions"
 	"github.com/henricktissink/loom/internal/forge"
 	"github.com/henricktissink/loom/internal/transcript"
 	"github.com/henricktissink/loom/internal/worktree"
@@ -23,7 +26,10 @@ type PRDTO struct {
 	Checks string `json:"checks"` // passing | failing | running | ""
 	Review string `json:"review"` // approved | changes_requested | review_required | ""
 	Branch string `json:"branch"`
-	Err    string `json:"err,omitempty"`
+	// Comments counts an open PR's review feedback: unresolved threads,
+	// and reviews and comments since its latest commit.
+	Comments int    `json:"comments"`
+	Err      string `json:"err,omitempty"`
 }
 
 // branchOverlap is how far before the last read's end a rescan starts.
@@ -88,13 +94,9 @@ func prTTL(e prEntry, live bool) time.Duration {
 // not come back yet. cwd is where gh/glab run; a removed worktree falls back
 // to its main checkout.
 func (c *prCache) info(cwd, transcriptPath string, live bool) *PRDTO {
-	dir := cwd
-	if !isDir(dir) {
-		repo, _, _, ok := worktree.Parse(cwd)
-		if !ok || !isDir(repo) {
-			return nil
-		}
-		dir = repo
+	dir := forgeDir(cwd)
+	if dir == "" {
+		return nil
 	}
 	branch := c.branch(transcriptPath)
 	if branch == "" {
@@ -143,7 +145,7 @@ func (c *prCache) refresh(key, dir, branch string) {
 		e.dto = nil
 		if pr != nil {
 			e.dto = &PRDTO{Kind: pr.Kind, Number: pr.Number, Title: pr.Title, State: pr.State,
-				URL: pr.URL, Checks: pr.Checks, Review: pr.Review, Branch: branch}
+				URL: pr.URL, Checks: pr.Checks, Review: pr.Review, Branch: branch, Comments: pr.Comments}
 		}
 	}
 	c.prs[key] = e
@@ -183,6 +185,18 @@ func (c *prCache) branch(path string) string {
 	return b
 }
 
+// forgeDir is where gh/glab run for a session: its cwd, or the main
+// checkout of a worktree that has been removed; "" when neither exists.
+func forgeDir(cwd string) string {
+	if isDir(cwd) {
+		return cwd
+	}
+	if repo, _, _, ok := worktree.Parse(cwd); ok && isDir(repo) {
+		return repo
+	}
+	return ""
+}
+
 func isDir(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && fi.IsDir()
@@ -195,4 +209,101 @@ func (a *App) transcriptFor(cwd, sessionID string) string {
 		return ""
 	}
 	return transcript.Path(a.launcher.ClaudeConfigDir, cwd, sessionID)
+}
+
+// ReviewPrompt fetches the open review feedback on the PR of a session's
+// branch, fresh, and composes it into a message for the session. Nothing is
+// sent: the operator reads and edits it first (SendPrompt, ResumeWithPrompt).
+func (a *App) ReviewPrompt(name string) (string, error) {
+	if a.st == nil {
+		return "", fmt.Errorf("store unavailable")
+	}
+	row, ok, err := a.st.Get(name)
+	if err != nil || !ok {
+		return "", fmt.Errorf("no session %q", name)
+	}
+	dir := forgeDir(row.Cwd)
+	if dir == "" {
+		return "", fmt.Errorf("the session's directory %s is gone", row.Cwd)
+	}
+	branch, err := transcript.LastBranch(a.transcriptFor(row.Cwd, row.ClaudeSessionID))
+	if err != nil {
+		return "", err
+	}
+	if branch == "" {
+		return "", fmt.Errorf("the session has no git branch on record")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pr, err := forge.Lookup(ctx, a.forgeRun, dir, branch)
+	if err != nil {
+		return "", err
+	}
+	if pr == nil {
+		return "", fmt.Errorf("no pull or merge request for branch %s", branch)
+	}
+	ts, err := forge.Feedback(ctx, a.forgeRun, dir, pr)
+	if err != nil {
+		return "", err
+	}
+	if len(ts) == 0 {
+		return "", fmt.Errorf("no open review feedback on %s", pr.URL)
+	}
+	return forge.Prompt(pr, ts), nil
+}
+
+// SendPrompt delivers a message to a live session as one bracketed paste
+// and submits it, so a multi-line review arrives as a single turn.
+func (a *App) SendPrompt(name, text string) error {
+	if a.tm == nil {
+		return fmt.Errorf("tmux unavailable")
+	}
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("empty message")
+	}
+	if _, ok := backgroundJobID(name); ok {
+		return fmt.Errorf("a background session has no pane to send into; attach to it")
+	}
+	// With a dialog open (a permission prompt), the paste would land in the
+	// dialog and the Enter would answer it: approving a tool call nobody
+	// chose. claude's registry says when it waits on one.
+	if w := a.dialogOpen(name); w != "" {
+		return fmt.Errorf("the session is waiting on a dialog (%s); attach and answer it first", w)
+	}
+	if err := a.tm.Paste(name, text); err != nil {
+		return err
+	}
+	return a.tm.SendEnter(name)
+}
+
+// ResumeWithPrompt resumes a finished session with text as its first
+// message, delivered once claude is ready (the launch seed gate).
+func (a *App) ResumeWithPrompt(name, text string) (string, error) {
+	if a.launcher == nil || a.st == nil {
+		return "", fmt.Errorf("resume unavailable")
+	}
+	if strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("empty message")
+	}
+	row, ok, err := a.st.Get(name)
+	if err != nil || !ok {
+		return "", fmt.Errorf("session %q not found", name)
+	}
+	return a.launcher.ResumeWith(row, text, 120, 32, a.now())
+}
+
+// dialogOpen returns what a session's claude is waiting on according to its
+// registry entry ("dialog open"), or "" when it waits on nothing.
+func (a *App) dialogOpen(name string) string {
+	if a.launcher == nil {
+		return ""
+	}
+	e, ok := ccsessions.ByTmuxSession(ccsessions.Dir(a.launcher.ClaudeConfigDir))[name]
+	if !ok || e.Status != "waiting" {
+		return ""
+	}
+	if e.WaitingFor == "" {
+		return "a prompt"
+	}
+	return e.WaitingFor
 }

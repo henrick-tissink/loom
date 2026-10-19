@@ -58,6 +58,10 @@ type SessionDTO struct {
 	// unknown). The frontend compares it with the discipline layer's last
 	// hook flip to mark sessions that still run the previous hooks.
 	StartedAt int64 `json:"startedAt"`
+	// SeedFailed is a first message (a launch seed, or a review sent with a
+	// resume) that never reached claude: it timed out waiting for the input
+	// box. The row says so, so the message is not lost silently.
+	SeedFailed bool `json:"seedFailed"`
 	// From the hooks' logs (hooks.go), counted since the current task file
 	// started: holds (blocks and denies), nudges, and the one hold that
 	// repeated 3+ times, if any. Verified is the stop guard's marker for
@@ -106,6 +110,7 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 			Background:   r.Background,
 			JobID:        r.JobID,
 			StartedAt:    r.CreatedAt,
+			SeedFailed:   r.SeedStatus == "failed",
 		})
 	}
 	return out

@@ -141,7 +141,7 @@ no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. Removing a project (`App.RemoveProject`) kills its live sessions, forgets its rows, deletes the project and records the root in `ignored_roots`; "+ New project" at that root un-ignores it. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
-| `forge` | A branch's GitHub PR or GitLab MR, its CI and review state, through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
+| `forge` | A branch's GitHub PR or GitLab MR, its CI and review state and open review feedback (composed into a prompt), through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
 | `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
@@ -234,6 +234,25 @@ deduped by (directory, branch), on a TTL of 1 min for a live session's open
 PR, 5 min for a finished one's and 15 min once merged or closed. A forge that
 cannot be asked shows `PR ?` with the reason; a failed refresh keeps the last
 answer and says so in its tooltip.
+
+**Review feedback back to the agent.** An open PR's lookup also counts its
+review feedback (`forge.Feedback`): unresolved diff threads, plus review
+summaries and PR-level comments posted since the last push (those cannot be
+resolved, so recency is what makes them current). GitLab dates the push by
+the MR's newest diff version; GitHub no longer reports push times, so the
+head commit's first check suite stands in when it is later than the commit.
+GitHub App comments (coverage, previews) are left out; reviews by apps are
+kept. Send review is hidden, and refused, while claude's registry says a
+dialog is open: the paste's Enter would answer it.
+The pill shows the count and the row a Send review action. It fetches the
+feedback fresh, composes it into a prompt (`forge.Prompt`) and shows it in an
+editable preview; nothing is sent until the operator clicks Send (§13:
+nothing silently auto-injects). A live session gets it as one bracketed paste
+(`tmux.Paste`: `load-buffer` + `paste-buffer -p`; claude takes the whole text
+as one message, where `send-keys` would submit each line). A finished one is
+resumed with it as the first message (`Launcher.ResumeWith`, through the seed
+gate, which pastes any multi-line seed). A seed that never reached claude
+shows on the row ("first message not sent").
 
 ### 4.3 The seed gate
 

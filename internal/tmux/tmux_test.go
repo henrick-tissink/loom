@@ -103,6 +103,33 @@ func TestSendLiteralAndCapture(t *testing.T) {
 	}
 }
 
+func TestPaste(t *testing.T) {
+	c := testClient(t)
+	name := "loom-44444444-4444-4444-4444-444444444444"
+	if err := c.NewSession(name, t.TempDir(), "cat", 80, 24); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	// cat never asks for bracketed paste, so tmux pastes plain text; claude
+	// does ask, and gets the whole text as one paste (verified live)
+	if err := c.Paste(name, "first line\nsecond -- line"); err != nil {
+		t.Fatalf("Paste: %v", err)
+	}
+	if err := c.SendEnter(name); err != nil {
+		t.Fatalf("SendEnter: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	out, err := c.CapturePane(name)
+	if err != nil {
+		t.Fatalf("CapturePane: %v", err)
+	}
+	if !strings.Contains(out, "first line") || !strings.Contains(out, "second -- line") {
+		t.Fatalf("capture missing pasted text:\n%s", out)
+	}
+	if bufs, _ := c.run("list-buffers"); strings.Contains(bufs, "loom-paste-") {
+		t.Fatalf("paste buffer left behind: %s", bufs)
+	}
+}
+
 // unsetLocale scrubs every locale var from the test process, mimicking a
 // Finder/Dock-launched app bundle (which inherits no LANG/LC_*). t.Setenv
 // snapshots each var so cleanup restores the original environment.

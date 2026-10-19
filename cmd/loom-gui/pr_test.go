@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,10 @@ import (
 	"time"
 
 	"github.com/henricktissink/loom/internal/forge"
+	"github.com/henricktissink/loom/internal/session"
+	"github.com/henricktissink/loom/internal/store"
+	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/transcript"
 )
 
 func TestPRCache(t *testing.T) {
@@ -105,5 +110,57 @@ func TestPRCacheBranchIncremental(t *testing.T) {
 	f.Close()
 	if b := c.branch(tr); b != "feat/y" {
 		t.Fatalf("new branch appended: %q", b)
+	}
+}
+
+func TestReviewPrompt(t *testing.T) {
+	cfg, cwd := t.TempDir(), t.TempDir()
+	st, err := store.Open(filepath.Join(t.TempDir(), "loom.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	app := newApp(nil, tmux.New(), st, &session.Launcher{ClaudeConfigDir: cfg}, nil, time.Now)
+	sid := "11111111-1111-1111-1111-111111111111"
+	st.Upsert(store.SessionRow{Name: "loom-a", ClaudeSessionID: sid, Cwd: cwd, CreatedAt: 1, EndedAt: 2, LastStatus: "done"})
+	tr := transcript.Path(cfg, cwd, sid)
+	os.MkdirAll(filepath.Dir(tr), 0o755)
+
+	if _, err := app.ReviewPrompt("loom-a"); err == nil || !strings.Contains(err.Error(), "no git branch") {
+		t.Fatalf("no branch on record: %v", err)
+	}
+	os.WriteFile(tr, []byte(`{"type":"user","gitBranch":"feat/x"}`+"\n"), 0o644)
+	answers := map[string]string{
+		"git remote get-url origin": "https://github.com/a/b\n",
+		"git symbolic-ref":          "origin/main\n",
+		"gh pr list":                `[{"number":7,"title":"Fix it","state":"OPEN","url":"https://github.com/a/b/pull/7","statusCheckRollup":[]}]`,
+		"gh api graphql":            `{"data":{"repository":{"pullRequest":{"commits":{"nodes":[]},"reviews":{"nodes":[]},"comments":{"nodes":[]},"reviewThreads":{"nodes":[{"isResolved":false,"path":"a.go","line":3,"comments":{"nodes":[{"author":{"login":"rev"},"body":"nil check"}]}}]}}}}}`,
+	}
+	app.forgeRun = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		for k, v := range answers {
+			if strings.HasPrefix(cmd, k) {
+				return []byte(v), nil
+			}
+		}
+		return nil, errors.New("unexpected " + cmd)
+	}
+	p, err := app.ReviewPrompt("loom-a")
+	if err != nil || !strings.Contains(p, "PR #7 (Fix it)") || !strings.Contains(p, "1. a.go:3\n   rev: nil check") {
+		t.Fatalf("prompt %q, %v", p, err)
+	}
+	answers["gh pr list"] = "[]"
+	if _, err := app.ReviewPrompt("loom-a"); err == nil || !strings.Contains(err.Error(), "no pull or merge request for branch feat/x") {
+		t.Fatalf("no PR: %v", err)
+	}
+	if err := app.SendPrompt("loom-a", "  "); err == nil {
+		t.Fatal("an empty message is refused")
+	}
+	// a pending permission dialog: the paste's Enter would answer it
+	os.MkdirAll(filepath.Join(cfg, "sessions"), 0o755)
+	reg := fmt.Sprintf(`{"pid":%d,"sessionId":"%s","cwd":"%s","tmux":"loom-a:@1.%%1","status":"waiting","waitingFor":"dialog open","updatedAt":1}`, os.Getpid(), sid, cwd)
+	os.WriteFile(filepath.Join(cfg, "sessions", fmt.Sprintf("%d.json", os.Getpid())), []byte(reg), 0o644)
+	if err := app.SendPrompt("loom-a", "review"); err == nil || !strings.Contains(err.Error(), "waiting on a dialog (dialog open)") {
+		t.Fatalf("send into an open dialog: %v", err)
 	}
 }

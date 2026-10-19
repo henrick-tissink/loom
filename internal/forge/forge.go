@@ -24,6 +24,9 @@ type PR struct {
 	URL    string
 	Checks string // passing | failing | running | "" (no CI reported)
 	Review string // approved | changes_requested | review_required | ""
+	// Comments counts an open PR's review feedback (see Feedback); 0 when
+	// there is none or it could not be read.
+	Comments int
 }
 
 // Runner runs name with args in dir and returns its stdout. An error should
@@ -86,6 +89,13 @@ func Lookup(ctx context.Context, run Runner, dir, branch string) (*PR, error) {
 	pr, err := ask(ctx, run, dir, branch)
 	if err != nil {
 		return &PR{Kind: kind}, err
+	}
+	// The count is a hint on the pill; the feedback itself is fetched fresh
+	// when the operator opens it, and a failure shows there.
+	if pr != nil && (pr.State == "open" || pr.State == "draft") {
+		if ts, err := Feedback(ctx, run, dir, pr); err == nil {
+			pr.Comments = len(ts)
+		}
 	}
 	return pr, nil
 }

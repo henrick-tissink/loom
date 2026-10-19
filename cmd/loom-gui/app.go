@@ -68,14 +68,17 @@ type App struct {
 	wt *worktreeCache
 	// prs caches each row's pull or merge request (pr.go).
 	prs *prCache
+	// forgeRun runs gh, glab and git for PR lookups and review feedback.
+	forgeRun forge.Runner
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {
 	a := &App{engine: engine, tm: tm, st: st, launcher: launcher, projects: svc, now: now, notifier: newNotifier(),
-		wt: newWorktreeCache(now),
-		prs: newPRCache(now, func(ctx context.Context, dir, branch string) (*forge.PR, error) {
-			return forge.Lookup(ctx, forge.Exec, dir, branch)
-		})}
+		wt:       newWorktreeCache(now),
+		forgeRun: forge.Exec}
+	a.prs = newPRCache(now, func(ctx context.Context, dir, branch string) (*forge.PR, error) {
+		return forge.Lookup(ctx, a.forgeRun, dir, branch)
+	})
 	// Until startup() wires the real emitter, events go nowhere (safe for tests).
 	a.reg = newPTYRegistry(
 		func(name string) *exec.Cmd {

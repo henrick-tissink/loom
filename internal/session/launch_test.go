@@ -183,6 +183,37 @@ func TestSeedWaitsForTrustThenReady(t *testing.T) {
 	}
 }
 
+// A multi-line seed (a PR review) is pasted, not typed: every line reaches
+// the pane before the one Enter that submits it.
+func TestSeedMultiLinePasted(t *testing.T) {
+	l, dir := testLauncher(t)
+	sink := filepath.Join(dir, "sink.txt")
+	script := filepath.Join(dir, "fake-claude.sh")
+	os.WriteFile(script, []byte(fakeClaudeScript), 0o755)
+	id := NewSessionID()
+	name := TmuxName(id)
+	if err := l.Tmux.NewSession(name, dir, "'"+script+"' '"+sink+"' '"+filepath.Join(dir, "dialog.txt")+"'", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	l.Store.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id, ProjectLabel: "p", Cwd: dir,
+		CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "unknown"})
+	l.seedWhenReady(name, "review line one\nreview line two")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		b, _ := os.ReadFile(sink)
+		if string(b) == "review line one\nreview line two\n" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sink = %q, want both lines", b)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if row, _, _ := l.Store.Get(name); row.SeedStatus != "sent" {
+		t.Fatalf("SeedStatus = %q, want sent", row.SeedStatus)
+	}
+}
+
 // TestSeedWhenReadyRecordsFailureOnTimeout guards finding 4: when the ready
 // marker never appears (session hangs, crashes, or is simply slow), the seed
 // must not vanish silently — the outcome is recorded as 'failed' so the UI
@@ -237,6 +268,20 @@ func TestResumeCreatesFreshTmuxSession(t *testing.T) {
 	if row.ClaudeSessionID != old.ClaudeSessionID {
 		t.Fatalf("ClaudeSessionID = %q, want unchanged %q (--resume appends to the same transcript — spike Finding 4)",
 			row.ClaudeSessionID, old.ClaudeSessionID)
+	}
+}
+
+func TestResumeWithStoresSeed(t *testing.T) {
+	l, dir := testLauncher(t)
+	old := store.SessionRow{Name: "loom-old", ClaudeSessionID: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+		ProjectLabel: "p", Cwd: dir, CreatedAt: 1, EndedAt: 5, ExitCode: 0, LastStatus: "done"}
+	l.Store.Upsert(old)
+	name, err := l.ResumeWith(old, "address the review\nline two", 80, 24, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok, _ := l.Store.Get(name); !ok || row.Seed != "address the review\nline two" {
+		t.Fatalf("row = %+v %v", row, ok)
 	}
 }
 

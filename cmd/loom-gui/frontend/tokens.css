@@ -481,6 +481,9 @@ body {
 .task-ask .tage { color: var(--accent-ink); font-weight: 700; font-family: var(--font-mono); font-size: var(--t-small); }
 .tchip { display: inline-block; align-self: flex-start; padding: 1px 7px; border-radius: 999px; font-family: var(--font-mono); font-size: var(--t-micro); font-weight: 600; }
 .tchip-over { color: var(--over); background: var(--over-bg); border: 0; }
+.review-modal { width: 640px; }
+.review-sub { margin: 0; color: var(--text-dim); font-size: var(--t-small); }
+.review-modal .field textarea { min-height: 300px; max-height: 60vh; font-family: var(--font-mono); font-size: var(--t-small); line-height: 1.5; }
 .reply-ask {
   margin: 0; font-size: var(--t-lead); color: var(--text); line-height: 1.5; font-weight: 500;
   padding: 14px 16px; border-radius: var(--radius); background: var(--accent-soft);
