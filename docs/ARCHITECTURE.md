@@ -141,6 +141,7 @@ no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. Removing a project (`App.RemoveProject`) kills its live sessions, forgets its rows, deletes the project and records the root in `ignored_roots`; "+ New project" at that root un-ignores it. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
+| `forge` | A branch's GitHub PR or GitLab MR, its CI and review state, through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
 | `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
@@ -219,6 +220,20 @@ holds changes, unique commits or a running claude's lock. A lock left by a
 dead claude is released first: loom kills a pane, so claude never runs its
 own exit cleanup. A session whose worktree was removed is not resumable from
 loom (its cwd is gone).
+
+**PR / MR status.** Every row, live or finished, shows the pull request
+(GitHub) or merge request (GitLab) of the branch the session last worked on.
+The branch is observed, not stored: it is the newest `gitBranch` in the
+session's transcript (`transcript.LastBranch` reads only the tail, again only
+when the file changed). `internal/forge` asks through the `gh` and `glab`
+CLIs the operator is logged in to (loom holds no tokens), picks the forge
+from origin's URL, and skips the default branch and any other host. A lookup
+is a network call, so the GUI (`pr.go`) never makes one inside a poll: it
+answers from memory and refreshes in the background, at most four at once,
+deduped by (directory, branch), on a TTL of 1 min for a live session's open
+PR, 5 min for a finished one's and 15 min once merged or closed. A forge that
+cannot be asked shows `PR ?` with the reason; a failed refresh keeps the last
+answer and says so in its tooltip.
 
 ### 4.3 The seed gate
 

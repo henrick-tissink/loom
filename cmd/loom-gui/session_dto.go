@@ -51,6 +51,9 @@ type SessionDTO struct {
 	// Worktree is set when the session runs in a claude worktree
 	// (<repo>/.claude/worktrees/<name>): its branch and what it holds.
 	Worktree *WorktreeDTO `json:"worktree,omitempty"`
+	// PR is the pull or merge request for the branch the session last
+	// worked on (its transcript's gitBranch), when there is one.
+	PR *PRDTO `json:"pr,omitempty"`
 	// StartedAt is when loom launched the session (unix seconds; 0 =
 	// unknown). The frontend compares it with the discipline layer's last
 	// hook flip to mark sessions that still run the previous hooks.
@@ -132,6 +135,9 @@ type FinishedDTO struct {
 	// Worktree is set while the finished session's worktree is still on
 	// disk, so the row can offer to remove it.
 	Worktree *WorktreeDTO `json:"worktree,omitempty"`
+	// PR is the pull or merge request for the branch the session last
+	// worked on (its transcript's gitBranch), when there is one.
+	PR *PRDTO `json:"pr,omitempty"`
 }
 
 // recentToDTOs maps store rows to FinishedDTOs, skipping still-live rows

@@ -323,6 +323,40 @@ function worktreeTag(s) {
   return `<span class="tpill tpill-ext${w.changed || w.unique ? " tpill-wt-work" : ""}" title="${esc(tip)}">⑂ ${esc(bits.join(" · "))}</span>`;
 }
 
+// prTag is the pill for the pull request (GitHub) or merge request (GitLab)
+// of the branch the session last worked on; clicking it opens it in the
+// browser (the capture listener below, so the row isn't selected too). A
+// forge that could not be asked shows as "PR ?", never as no PR.
+function prTag(s) {
+  const p = s.pr;
+  if (!p) return "";
+  const kind = p.kind === "gitlab" ? "MR" : "PR";
+  if (!p.number) return `<span class="tpill tpill-bad" title="${esc(`Could not look up the ${kind} for ${p.branch}: ${p.err}`)}">${kind} ?</span>`;
+  const ref = `${kind} ${p.kind === "gitlab" ? "!" : "#"}${p.number}`;
+  const open = p.state === "open" || p.state === "draft";
+  const bits = [ref];
+  if (p.state !== "open") bits.push(p.state);
+  if (open && p.checks) bits.push({ passing: "✓ checks", failing: "✗ checks", running: "● checks" }[p.checks] || "");
+  if (open && p.review === "changes_requested") bits.push("changes requested");
+  if (open && p.review === "approved") bits.push("approved");
+  let cls = "tpill-ext";
+  if (open && (p.checks === "failing" || p.review === "changes_requested")) cls = "tpill-bad";
+  else if (p.state === "merged" || (open && p.checks === "passing" && p.review === "approved")) cls = "tpill-ok";
+  else if (open && p.checks === "running") cls = "tpill-held";
+  const tip = [`${ref}: ${p.title}`, [p.branch, p.state, p.checks && `checks ${p.checks}`, p.review && p.review.replace(/_/g, " ")].filter(Boolean).join(" · ")];
+  if (p.err) tip.push(`Could not refresh: ${p.err}`);
+  const url = /^https?:\/\//i.test(p.url || "") ? p.url : "";
+  if (url) tip.push("Click to open");
+  return `<span class="tpill tpill-pr ${cls}"${url ? ` data-url="${esc(url)}"` : ""} title="${esc(tip.join("\n"))}">${esc(bits.filter(Boolean).join(" · "))}</span>`;
+}
+document.addEventListener("click", (e) => {
+  const pill = e.target.closest && e.target.closest(".tpill-pr[data-url]");
+  if (!pill) return;
+  e.stopPropagation();
+  e.preventDefault();
+  openURLToken(pill.dataset.url);
+}, true);
+
 // worktreeErrs holds a refused "Remove worktree" per finished row, shown on
 // the row until the next attempt: a refusal must be visible, not a console line.
 const worktreeErrs = new Map();
@@ -516,7 +550,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -558,7 +592,7 @@ function appendFinishedRow(s) {
   if (worktreeErrs.has(s.name)) sumLine = `<span class="tsum tsum-err" title="${esc(worktreeErrs.get(s.name))}">${esc(worktreeErrs.get(s.name))}</span>`;
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}${worktreeTag(s)}</span>${sumLine}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}${worktreeTag(s)}${prTag(s)}</span>${sumLine}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(s.status)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M12 3l1.6 5L19 9.6 13.6 11 12 16l-1.6-5L5 9.6 10.4 8z"/>', s.summary ? "Regenerate summary" : "Summarize", async () => {

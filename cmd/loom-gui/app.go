@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/henricktissink/loom/internal/forge"
 	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/session"
@@ -65,11 +66,16 @@ type App struct {
 
 	// wt caches each worktree row's git state (worktree.go).
 	wt *worktreeCache
+	// prs caches each row's pull or merge request (pr.go).
+	prs *prCache
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {
 	a := &App{engine: engine, tm: tm, st: st, launcher: launcher, projects: svc, now: now, notifier: newNotifier(),
-		wt: newWorktreeCache(now)}
+		wt: newWorktreeCache(now),
+		prs: newPRCache(now, func(ctx context.Context, dir, branch string) (*forge.PR, error) {
+			return forge.Lookup(ctx, forge.Exec, dir, branch)
+		})}
 	// Until startup() wires the real emitter, events go nowhere (safe for tests).
 	a.reg = newPTYRegistry(
 		func(name string) *exec.Cmd {
@@ -108,8 +114,13 @@ func (a *App) ListSessions() (out []SessionDTO) {
 	// join below, so the two can never disagree about what is hidden.
 	res := a.resolver()
 	out = snapshotToDTOs(snap, a.attributor(res))
+	ids := make(map[string]string, len(snap.Live))
+	for _, r := range snap.Live {
+		ids[r.Name] = r.ClaudeSessionID
+	}
 	for i := range out {
 		out[i].Worktree = a.wt.info(out[i].Cwd, false)
+		out[i].PR = a.prs.info(out[i].Cwd, a.transcriptFor(out[i].Cwd, ids[out[i].Name]), true)
 	}
 	if a.hooks != nil {
 		a.hooks.reader.Refresh()
@@ -253,15 +264,19 @@ func (a *App) ListRecent() []FinishedDTO {
 	trFor := func(id string) store.Transcript { return trs[id] }
 	out = recentToDTOs(rows, trFor, a.attributor(res))
 	cwds := make(map[string]string, len(rows))
+	sids := make(map[string]string, len(rows))
 	for _, r := range rows {
 		cwds[r.Name] = r.Cwd
+		sids[r.Name] = r.ClaudeSessionID
 	}
 	if len(out) > recentLimit {
 		out = out[:recentLimit]
 	}
 	// after the trim: git runs only for rows that reach the screen
 	for i := range out {
-		out[i].Worktree = a.wt.info(cwds[out[i].Name], true)
+		cwd := cwds[out[i].Name]
+		out[i].Worktree = a.wt.info(cwd, true)
+		out[i].PR = a.prs.info(cwd, a.transcriptFor(cwd, sids[out[i].Name]), false)
 	}
 	return out
 }

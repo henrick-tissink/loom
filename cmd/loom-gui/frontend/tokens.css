@@ -467,6 +467,8 @@ body {
 .tpill-ok { color: var(--st-running); background: var(--ok-bg); }
 .tpill-consult { font-style: italic; }
 .tpill-ext { background: transparent; box-shadow: inset 0 0 0 1px var(--text-faint); color: var(--text-faint); }
+.tpill-pr[data-url] { cursor: pointer; }
+.tpill-pr[data-url]:hover { text-decoration: underline; }
 .tpill-wt-work { color: var(--over); box-shadow: inset 0 0 0 1px var(--over); }
 .stage-note { text-align: center; line-height: 1.8; max-width: 520px; padding: 0 24px; }
 .stage-note .sn-path { color: var(--text-dim); font-family: var(--font-mono); font-size: var(--t-micro); word-break: break-all; }
