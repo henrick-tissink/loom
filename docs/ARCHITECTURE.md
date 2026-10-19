@@ -141,6 +141,7 @@ no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. Removing a project (`App.RemoveProject`) kills its live sessions, forgets its rows, deletes the project and records the root in `ignored_roots`; "+ New project" at that root un-ignores it. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
+| `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
 | `discipline` | The embedded Agent Discipline bundle (rules, hooks, suites, helpers), its generated manifest, the on-machine layout, the read-only doctor, and the installer: plan → stage + gate → commit, uninstall from the receipt, keep/reset of local edits | Source of truth for the handbook from rev 3 on. Revisions are immutable once in the manifest history. Only a human installs (`RefuseIfAgent`). Plan: `docs/DISCIPLINE.md`. |
@@ -188,7 +189,7 @@ session between projects.
 seeded) spawn `seedWhenReady` goroutine. The argv:
 
 ```
-claude --session-id <uuid> --settings '{"theme":"light"}' [--model X] [--permission-mode Y] [--add-dir …]
+claude --session-id <uuid> --settings '{"theme":"light"}' [--model X] [--permission-mode Y] [--add-dir …] [--worktree loom-<id8>]
 ```
 
 The injected `--settings` theme is a GUI concern leaking down for a real
@@ -200,6 +201,24 @@ an RWMutex so a launch can't race a pref change).
 A multi-repo launch (§5 of the projects spec) keeps the topmost selected repo
 as cwd and passes the rest as `--add-dir`; the row stores them in `add_dirs`,
 and visibility (§8) is evaluated over the whole set.
+
+A **worktree launch** (the launcher's "Own git worktree") adds `--worktree
+loom-<first 8 of the session id>`. Claude creates
+`<repo>/.claude/worktrees/loom-<id8>` on branch `worktree-loom-<id8>` and
+moves the session there, and its transcript, pane directory and registry cwd
+all follow (verified on 2.1.303; documented). So the row stores the worktree
+path as its cwd, which keeps transcript lookup, resume (`claude --resume`
+from inside the worktree re-enters it) and Fresh session working, while
+tmux starts claude in the repo. Only a repository root qualifies; anything
+else is refused before a tmux session exists. Attribution is unchanged: the
+worktree path sits under the repo. `internal/worktree` reads a worktree's
+branch, changed files and commits found on no other branch or remote (the
+GUI caches this for 10 s per worktree) and removes a finished session's
+worktree on an explicit click, keeping the branch and refusing while it
+holds changes, unique commits or a running claude's lock. A lock left by a
+dead claude is released first: loom kills a pane, so claude never runs its
+own exit cleanup. A session whose worktree was removed is not resumable from
+loom (its cwd is gone).
 
 ### 4.3 The seed gate
 

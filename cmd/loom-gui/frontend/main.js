@@ -309,6 +309,24 @@ function externalTag(s) {
   return s.external ? `<span class="tpill tpill-ext" title="Running in a terminal outside loom${s.cwd ? " — " + esc(s.cwd) : ""}">terminal</span>` : "";
 }
 
+// worktreeTag marks a session running in a claude worktree: its branch, and
+// what removing the worktree would lose (changed files, commits found on no
+// other branch or remote). A worktree git could not read says so.
+function worktreeTag(s) {
+  const w = s.worktree;
+  if (!w) return "";
+  if (w.err) return `<span class="tpill tpill-bad" title="Worktree ${esc(w.name)}: ${esc(w.err)}">worktree ?</span>`;
+  const bits = [w.branch || "detached"];
+  if (w.changed) bits.push(`${w.changed} changed`);
+  if (w.unique) bits.push(`${w.unique} unpushed`);
+  const tip = `Worktree ${w.name}${s.cwd ? " — " + s.cwd : ""}${w.unique ? `\n${w.unique} commit${w.unique === 1 ? "" : "s"} on no other branch or remote` : ""}`;
+  return `<span class="tpill tpill-ext${w.changed || w.unique ? " tpill-wt-work" : ""}" title="${esc(tip)}">⑂ ${esc(bits.join(" · "))}</span>`;
+}
+
+// worktreeErrs holds a refused "Remove worktree" per finished row, shown on
+// the row until the next attempt: a refusal must be visible, not a console line.
+const worktreeErrs = new Map();
+
 function actionBtn(pathInner, title, onClick, extraClass) {
   const b = document.createElement("button");
   b.className = "tact" + (extraClass ? " " + extraClass : "");
@@ -321,6 +339,34 @@ function actionBtn(pathInner, title, onClick, extraClass) {
 // Sessions with a pending kill-confirm, keyed by name so the armed state
 // survives the 1.5s poll rail rebuild (which discards the button node).
 const armedKills = new Set();
+
+// removeWorktreeButton removes a finished session's worktree on a second
+// click (the branch is kept). The Go side refuses while the worktree holds
+// changes, unpushed commits or a running claude, and the refusal is shown on
+// the row. The arm key shares armedKills, prefixed so it can't collide.
+function removeWorktreeButton(name) {
+  const key = "wt:" + name;
+  const b = document.createElement("button");
+  b.className = "tact tact-kill";
+  b.title = "Remove worktree (the branch is kept; refused if it holds changes, unpushed commits or a running session; gitignored files in it are deleted)";
+  const glyph = () => { b.innerHTML = icon('<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/><path d="M15 15l6 6M21 15l-6 6"/>'); };
+  if (armedKills.has(key)) { b.classList.add("armed"); b.textContent = "Remove?"; } else glyph();
+  b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!armedKills.has(key)) {
+      armedKills.add(key);
+      b.classList.add("armed"); b.textContent = "Remove?";
+      setTimeout(() => { armedKills.delete(key); if (b.isConnected) { b.classList.remove("armed"); glyph(); } }, 2500);
+      return;
+    }
+    armedKills.delete(key);
+    worktreeErrs.delete(name);
+    try { await window.go.main.App.RemoveWorktree(name); }
+    catch (err) { worktreeErrs.set(name, "Worktree " + String(err)); }
+    poll();
+  });
+  return b;
+}
 
 // Finished sessions with an in-flight summarize, keyed by name so the
 // "Summarizing…" state survives poll rebuilds (same idea as armedKills).
@@ -470,7 +516,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -509,9 +555,10 @@ function appendFinishedRow(s) {
   // No LLM summary (the common case: it costs quota and is opt-in) → the
   // outcome the indexer extracted, so a finished row reads as what it ended with.
   else if (s.outcome) sumLine = `<span class="tsum" title="${esc(s.outcome)}">${esc(sumPreview(s.outcome))}</span>`;
+  if (worktreeErrs.has(s.name)) sumLine = `<span class="tsum tsum-err" title="${esc(worktreeErrs.get(s.name))}">${esc(worktreeErrs.get(s.name))}</span>`;
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}</span>${sumLine}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}${worktreeTag(s)}</span>${sumLine}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(s.status)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M12 3l1.6 5L19 9.6 13.6 11 12 16l-1.6-5L5 9.6 10.4 8z"/>', s.summary ? "Regenerate summary" : "Summarize", async () => {
@@ -527,6 +574,7 @@ function appendFinishedRow(s) {
     try { const nn = await window.go.main.App.ResumeSession(s.name); if (nn) selectSession(nn); poll(); }
     catch (e) { console.error("resume", e); }
   }));
+  if (s.worktree) acts.appendChild(removeWorktreeButton(s.name));
   acts.appendChild(actionBtn('<path d="M6 6l12 12M18 6L6 18"/>', "Dismiss from history", async () => {
     try { await window.go.main.App.DismissSession(s.name); poll(); } catch (e) { console.error("dismiss", e); }
   }));
@@ -2927,6 +2975,9 @@ async function openLauncher(preselect) {
         <select id="f-mode">${optionsHtml(MODES)}</select>
       </div>
       <div class="field">
+        <label class="pf-check"><input type="checkbox" id="f-worktree" /><span>Own git worktree <em>claude --worktree: a fresh branch under .claude/worktrees, so parallel sessions don't collide</em></span></label>
+      </div>
+      <div class="field">
         <label for="f-seed">Seed prompt (optional)</label>
         <textarea id="f-seed" placeholder="Initial prompt or /slash-command"></textarea>
       </div>
@@ -2988,6 +3039,11 @@ async function openLauncher(preselect) {
     multiField.hidden = picker !== "multi";
   });
 
+  // The worktree choice is remembered per viewer, a convenience only.
+  const wtBox = backdrop.querySelector("#f-worktree");
+  try { wtBox.checked = localStorage.getItem("loom.launch.worktree") === "1"; } catch (_) {}
+  wtBox.addEventListener("change", () => { try { localStorage.setItem("loom.launch.worktree", wtBox.checked ? "1" : "0"); } catch (_) {} });
+
   const launchBtn = backdrop.querySelector("#f-launch");
   launchBtn.addEventListener("click", async () => {
     const model = backdrop.querySelector("#f-model").value;
@@ -3007,7 +3063,7 @@ async function openLauncher(preselect) {
     errEl.textContent = "";
     launchBtn.disabled = true;
     try {
-      const name = await window.go.main.App.LaunchSession(path, model, mode, seed, addDirs);
+      const name = await window.go.main.App.LaunchSession(path, model, mode, seed, addDirs, wtBox.checked);
       close();
       selectSession(name);
       poll();

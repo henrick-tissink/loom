@@ -48,6 +48,9 @@ type SessionDTO struct {
 	// terminal) and stoppable, with no pane to reply into.
 	Background bool   `json:"background"`
 	JobID      string `json:"jobId"`
+	// Worktree is set when the session runs in a claude worktree
+	// (<repo>/.claude/worktrees/<name>): its branch and what it holds.
+	Worktree *WorktreeDTO `json:"worktree,omitempty"`
 	// StartedAt is when loom launched the session (unix seconds; 0 =
 	// unknown). The frontend compares it with the discipline layer's last
 	// hook flip to mark sessions that still run the previous hooks.
@@ -126,6 +129,9 @@ type FinishedDTO struct {
 	// Outcome is the last conclusion the indexer extracted from the
 	// transcript — what the session ended with, without an LLM call.
 	Outcome string `json:"outcome"`
+	// Worktree is set while the finished session's worktree is still on
+	// disk, so the row can offer to remove it.
+	Worktree *WorktreeDTO `json:"worktree,omitempty"`
 }
 
 // recentToDTOs maps store rows to FinishedDTOs, skipping still-live rows

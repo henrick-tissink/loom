@@ -32,6 +32,11 @@ type Recipe struct {
 	// no user/project/local settings (so no hooks), and deny rules for secret
 	// files. The row is tagged FenceTag so a resume keeps the fence.
 	Fenced bool
+	// Worktree starts the session in its own git worktree (`claude
+	// --worktree`). Launch names it (worktree.SessionName) and fills
+	// WorktreeName, which is what Argv passes.
+	Worktree     bool
+	WorktreeName string
 }
 
 // FenceTag marks a fenced session's row (sessions.tags).
@@ -135,6 +140,9 @@ func (r Recipe) Argv(sessionID string) []string {
 	// occurrence, and appending after the existing flags keeps every argv the
 	// pre-multi-repo tests pinned byte-identical (spec §5).
 	argv = append(argv, addDirArgs(r.AddDirs)...)
+	if r.WorktreeName != "" {
+		argv = append(argv, "--worktree", r.WorktreeName)
+	}
 	return argv
 }
 

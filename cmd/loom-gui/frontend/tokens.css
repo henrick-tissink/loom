@@ -324,6 +324,7 @@ body {
   line-height: 1.45; max-height: 2.9em; overflow: hidden; text-overflow: ellipsis;
 }
 .tsum-busy { font-style: italic; color: var(--accent-ink); }
+.tsum-err { color: var(--st-error); }
 .pf-check em { color: var(--text-faint); font-style: normal; font-size: var(--t-micro); }
 
 /* status icon chips: kept for the glyph's status class; the ring draws itself */
@@ -466,6 +467,7 @@ body {
 .tpill-ok { color: var(--st-running); background: var(--ok-bg); }
 .tpill-consult { font-style: italic; }
 .tpill-ext { background: transparent; box-shadow: inset 0 0 0 1px var(--text-faint); color: var(--text-faint); }
+.tpill-wt-work { color: var(--over); box-shadow: inset 0 0 0 1px var(--over); }
 .stage-note { text-align: center; line-height: 1.8; max-width: 520px; padding: 0 24px; }
 .stage-note .sn-path { color: var(--text-dim); font-family: var(--font-mono); font-size: var(--t-micro); word-break: break-all; }
 .stage-note .sn-ask { display: block; text-align: left; color: var(--text); font-family: var(--font-ui); font-size: var(--t-body); white-space: pre-wrap; font-weight: 500; }

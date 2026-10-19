@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/tmux"
+	"github.com/henricktissink/loom/internal/worktree"
 )
 
 // Markers verified by the Task-2 spike against claude 2.1.198 ("Fable 5"
@@ -164,6 +166,21 @@ func (l *Launcher) Launch(r Recipe, w, h int, now time.Time) (string, error) {
 	// claude will record — see PhysicalDir.
 	cwd, addDirs := PhysicalDir(r.Cwd), physicalDirs(r.AddDirs)
 	r.Cwd, r.AddDirs = cwd, addDirs
+	// A worktree session runs in <repo>/.claude/worktrees/<name>, and claude
+	// records its transcript there, so that is the cwd the row stores: the
+	// engine finds the transcript by cwd. tmux still starts claude in the
+	// repo, where claude creates the worktree. Only a repository's root
+	// qualifies: from a subdirectory or a multi-repo project root the
+	// worktree path would not be the one computed here.
+	rowCwd := cwd
+	if r.Worktree {
+		top, err := worktree.Toplevel(context.Background(), cwd)
+		if err != nil || PhysicalDir(top) != cwd {
+			return "", fmt.Errorf("session: a worktree needs a git repository's root, and %s is not one", cwd)
+		}
+		r.WorktreeName = worktree.SessionName(id)
+		rowCwd = filepath.Join(cwd, worktree.Dir, r.WorktreeName)
+	}
 	if err := l.Tmux.NewSession(name, cwd, r.ShellCommand(id), w, h); err != nil {
 		return "", err
 	}
@@ -173,7 +190,7 @@ func (l *Launcher) Launch(r Recipe, w, h int, now time.Time) (string, error) {
 	}
 	if err := l.Store.Upsert(store.SessionRow{
 		Name: name, ClaudeSessionID: id, ProjectLabel: r.ProjectLabel,
-		Cwd: cwd, Model: r.Model, Mode: r.Mode, Seed: r.Seed, Tags: tags,
+		Cwd: rowCwd, Model: r.Model, Mode: r.Mode, Seed: r.Seed, Tags: tags,
 		AddDirs:   EncodeAddDirs(addDirs),
 		CreatedAt: now.Unix(), EndedAt: -1, ExitCode: -1,
 		LastStatus: "unknown",

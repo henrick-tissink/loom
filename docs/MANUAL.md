@@ -80,6 +80,7 @@ On first launch the indexer sweeps your entire archive in the background (~10s f
 | **model** | default / opus / sonnet / fable |
 | **mode** | default / plan / acceptEdits / auto / bypassPermissions |
 | **seed** | optional first prompt — plain text or a `/slash-command` |
+| **own git worktree** | `claude --worktree`: the session gets a fresh branch under `.claude/worktrees/`, so parallel sessions in one repo don't collide. The row shows the branch, changed files and unpushed commits; a finished one can **Remove worktree** (the branch is kept; refused while it holds changes, unpushed commits or a running session; gitignored files such as a copied `.env` are deleted with it). |
 
 `tab`/`shift-tab` move fields · `↵` launches · `esc` cancels. The seed is delivered only once Claude's input box is actually ready (and never fired into a first-run trust dialog).
 

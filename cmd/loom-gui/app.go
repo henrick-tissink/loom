@@ -62,10 +62,14 @@ type App struct {
 	sumMu    sync.Mutex
 	sumTried map[string]bool
 	sumBusy  bool
+
+	// wt caches each worktree row's git state (worktree.go).
+	wt *worktreeCache
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {
-	a := &App{engine: engine, tm: tm, st: st, launcher: launcher, projects: svc, now: now, notifier: newNotifier()}
+	a := &App{engine: engine, tm: tm, st: st, launcher: launcher, projects: svc, now: now, notifier: newNotifier(),
+		wt: newWorktreeCache(now)}
 	// Until startup() wires the real emitter, events go nowhere (safe for tests).
 	a.reg = newPTYRegistry(
 		func(name string) *exec.Cmd {
@@ -104,6 +108,9 @@ func (a *App) ListSessions() (out []SessionDTO) {
 	// join below, so the two can never disagree about what is hidden.
 	res := a.resolver()
 	out = snapshotToDTOs(snap, a.attributor(res))
+	for i := range out {
+		out[i].Worktree = a.wt.info(out[i].Cwd, false)
+	}
 	if a.hooks != nil {
 		a.hooks.reader.Refresh()
 		applyHooks(out, snap, a.hooks.reader)
@@ -159,7 +166,10 @@ const launchCols, launchRows = 120, 32
 // LaunchSession starts a new claude session from the form inputs and returns
 // its tmux session name. addDirs carries §5's scoped multi-repo shape: cwd is
 // the primary repo, addDirs the other selected ones.
-func (a *App) LaunchSession(repoPath, model, mode, seed string, addDirs []string) (string, error) {
+//
+// worktree starts claude in its own git worktree (`claude --worktree`); the
+// session.Launcher refuses it for anything but a repository root.
+func (a *App) LaunchSession(repoPath, model, mode, seed string, addDirs []string, worktree bool) (string, error) {
 	if a.launcher == nil {
 		return "", fmt.Errorf("launcher unavailable")
 	}
@@ -167,6 +177,7 @@ func (a *App) LaunchSession(repoPath, model, mode, seed string, addDirs []string
 	if err != nil {
 		return "", err
 	}
+	r.Worktree = worktree
 	return a.launcher.Launch(r, launchCols, launchRows, a.now())
 }
 
@@ -241,8 +252,16 @@ func (a *App) ListRecent() []FinishedDTO {
 	trs, _ := a.st.GetTranscripts(ids)
 	trFor := func(id string) store.Transcript { return trs[id] }
 	out = recentToDTOs(rows, trFor, a.attributor(res))
+	cwds := make(map[string]string, len(rows))
+	for _, r := range rows {
+		cwds[r.Name] = r.Cwd
+	}
 	if len(out) > recentLimit {
 		out = out[:recentLimit]
+	}
+	// after the trim: git runs only for rows that reach the screen
+	for i := range out {
+		out[i].Worktree = a.wt.info(cwds[out[i].Name], true)
 	}
 	return out
 }

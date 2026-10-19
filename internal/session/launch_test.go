@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -556,5 +557,47 @@ func TestLaunchStoresPhysicalCwd(t *testing.T) {
 	// one claude actually writes, which is derived from the physical cwd.
 	if got, want := transcript.ProjectDirName(row.Cwd), transcript.ProjectDirName(real); got != want {
 		t.Errorf("ProjectDirName(row.Cwd) = %q, want %q", got, want)
+	}
+}
+
+// A worktree launch stores the worktree path claude will run in (and record
+// its transcript under) as the row's cwd, and refuses anything that is not a
+// repository root before a tmux session exists.
+func TestLaunchWorktree(t *testing.T) {
+	l, dir := testLauncher(t)
+	if err := exec.Command("git", "-C", dir, "init", "-q").Run(); err != nil {
+		t.Fatal(err)
+	}
+	name, err := l.Launch(Recipe{ProjectLabel: "p", Cwd: dir, Worktree: true}, 80, 24, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := SessionIDFromTmuxName(name)
+	row, _, _ := l.Store.Get(name)
+	if want := filepath.Join(dir, ".claude", "worktrees", "loom-"+id[:8]); row.Cwd != want {
+		t.Fatalf("row cwd = %q, want %q", row.Cwd, want)
+	}
+
+	sub := filepath.Join(dir, "sub")
+	os.Mkdir(sub, 0o755)
+	plain, _ := filepath.EvalSymlinks(t.TempDir())
+	for _, cwd := range []string{sub, plain} {
+		if n, err := l.Launch(Recipe{ProjectLabel: "p", Cwd: cwd, Worktree: true}, 80, 24, time.Now()); err == nil || n != "" {
+			t.Fatalf("worktree launch in %s = %q, %v; want a refusal", cwd, n, err)
+		}
+	}
+	if s, _ := l.Tmux.ListSessions(); len(s) != 1 {
+		t.Fatalf("refused launches must create no session: %v", s)
+	}
+}
+
+func TestArgvWorktree(t *testing.T) {
+	argv := Recipe{Cwd: "/w", AddDirs: []string{"/x"}, WorktreeName: "loom-1a2b3c4d"}.Argv("id")
+	got := strings.Join(argv[len(argv)-4:], " ")
+	if got != "--add-dir /x --worktree loom-1a2b3c4d" {
+		t.Fatalf("argv tail = %q", got)
+	}
+	if strings.Contains(strings.Join(Recipe{Cwd: "/w"}.Argv("id"), " "), "--worktree") {
+		t.Fatal("no worktree flag without a name")
 	}
 }
