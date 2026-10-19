@@ -1,7 +1,9 @@
 package transcript
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -32,7 +34,20 @@ type record struct {
 	IsSidechain bool   `json:"isSidechain"`
 	AiTitle     string `json:"aiTitle"`
 	Timestamp   string `json:"timestamp"` // RFC 3339, written on every turn record
-	Message     *struct {
+	IsMeta      bool   `json:"isMeta"`
+	Subtype     string `json:"subtype"`
+	// Content is a system record's text; raw, so a record whose content is
+	// not a string still parses
+	Content    json.RawMessage `json:"content"`
+	Attachment *struct {
+		Type       string `json:"type"`
+		Met        bool   `json:"met"`
+		Sentinel   bool   `json:"sentinel"`
+		Condition  string `json:"condition"`
+		Reason     string `json:"reason"`
+		Iterations int    `json:"iterations"`
+	} `json:"attachment"`
+	Message *struct {
 		Content json.RawMessage `json:"content"`
 		Usage   *usage          `json:"usage"`
 		// StopReason is the API stop reason on an assistant message. It is the
@@ -59,6 +74,18 @@ type block struct {
 	Text string `json:"text"`
 }
 
+// Goal is the session's /goal as claude records it: a goal_status
+// attachment when it is set (sentinel, not met), after each check (met or
+// not, with the evaluator's reason), and when it is cleared (sentinel,
+// met); and a system notice when claude pauses it.
+type Goal struct {
+	Condition string
+	State     string // active | paused | met | cleared; "" = no goal ever set
+	Checks    int    // evaluator checks since it was set
+	Reason    string // the last check's reason, or the pause notice
+	At        int64  // unix seconds of the last change
+}
+
 // askLimit bounds the captured question: the rail shows one line of it and
 // the reply modal a few, so the rest of a long answer is dead weight.
 const askLimit = 300
@@ -78,6 +105,7 @@ type Classifier struct {
 	// wait age is measured from the ask, not from the last tool call.
 	ask   string
 	askAt int64
+	goal  Goal
 }
 
 func (c *Classifier) Feed(line []byte) {
@@ -90,6 +118,9 @@ func (c *Classifier) Feed(line []byte) {
 			c.title = r.AiTitle
 		}
 		return // sidecar: never a turn boundary
+	}
+	if !r.IsSidechain {
+		c.feedGoal(r)
 	}
 	if r.IsSidechain || (r.Type != "assistant" && r.Type != "user") {
 		return // sidecar or subagent record: not a turn boundary
@@ -138,6 +169,50 @@ func (c *Classifier) Feed(line []byte) {
 		}
 		c.state = StateIdle // human prompt; fusion upgrades to Running while streaming
 	}
+}
+
+// feedGoal folds the goal records; none of them is a turn boundary.
+func (c *Classifier) feedGoal(r record) {
+	at := parseTS(r.Timestamp)
+	switch {
+	case r.Type == "attachment" && r.Attachment != nil && r.Attachment.Type == "goal_status":
+		a := r.Attachment
+		switch {
+		case a.Sentinel && !a.Met:
+			c.goal = Goal{Condition: a.Condition, State: "active"}
+		case a.Sentinel:
+			c.goal.State, c.goal.Reason = "cleared", ""
+		default:
+			c.goal.Condition = a.Condition
+			c.goal.Checks++
+			if a.Iterations > 0 {
+				c.goal.Checks = a.Iterations
+			}
+			c.goal.Reason = oneLine(a.Reason)
+			c.goal.State = "active"
+			if a.Met {
+				c.goal.State = "met"
+			}
+		}
+		c.goal.At = at
+	case r.Type == "system" && c.goal.State == "active" && bytes.HasPrefix(r.Content, []byte(`"Goal paused`)):
+		var s string
+		_ = json.Unmarshal(r.Content, &s)
+		c.goal.State, c.goal.Reason, c.goal.At = "paused", s, at
+	case r.Type == "user" && !r.IsMeta && c.goal.State == "paused":
+		// "send a message to continue": any human message resumes it
+		if _, ok := findBlock(parseBlocks(r), "tool_result"); !ok {
+			c.goal.State, c.goal.At = "active", at
+		}
+	}
+}
+
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if rs := []rune(s); len(rs) > askLimit {
+		return string(rs[:askLimit]) + "…"
+	}
+	return s
 }
 
 func parseBlocks(r record) []block {
@@ -202,3 +277,4 @@ func (c *Classifier) Title() string    { return c.title }
 func (c *Classifier) CtxTokens() int64 { return c.ctxTokens }
 func (c *Classifier) Ask() string      { return c.ask }
 func (c *Classifier) AskAt() int64     { return c.askAt }
+func (c *Classifier) Goal() Goal       { return c.goal }

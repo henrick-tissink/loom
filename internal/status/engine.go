@@ -43,6 +43,8 @@ type Row struct {
 	HasTask bool
 	// Checkpoint is the session's last hand-over note, if any.
 	Checkpoint taskfile.Checkpoint
+	// Goal is the session's /goal as its transcript records it.
+	Goal transcript.Goal
 	// External marks a claude loom did not start and has no pane for: a
 	// process in claude's registry running in some terminal outside loom's
 	// tmux server. Its row is synthesised from the registry and its
@@ -385,7 +387,7 @@ func (e *Engine) row(r store.SessionRow, rs transcript.ReaderSnapshot, st Status
 	activity int64, ent ccsessions.Entry, hasEnt bool) Row {
 	row := Row{SessionRow: r, Status: st, LastTool: rs.LastTool,
 		Activity: activity, Title: r.Title, CtxTokens: rs.CtxTokens,
-		WaitingFor: waitingFor}
+		WaitingFor: waitingFor, Goal: rs.Goal}
 	if st == NeedsYou {
 		// the wait is measured from the ask; a registry "waiting" (a
 		// dialog) is timed by the registry, which is what flipped it.

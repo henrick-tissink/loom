@@ -1,6 +1,9 @@
 package transcript
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Line shapes verified against real ~/.claude transcripts on 2026-07-02.
 const (
@@ -158,5 +161,43 @@ const lineAsstThinkingEndTurn = `{"type":"assistant","message":{"role":"assistan
 func TestThinkingEndTurnIsRunning(t *testing.T) {
 	if s := feed(t, lineUserPrompt, lineAsstThinkingEndTurn).State(); s != StateRunning {
 		t.Fatalf("thinking-only end_turn: state = %v, want Running (text answer still to come)", s)
+	}
+}
+
+// TestGoal follows the record shapes claude 2.1.303 wrote for a real /goal:
+// set, checks, a pause, a resume, met; then a second goal cleared early.
+func TestGoal(t *testing.T) {
+	att := func(ts, body string) string {
+		return `{"type":"attachment","timestamp":"2026-10-19T11:43:` + ts + `Z","attachment":{"type":"goal_status",` + body + `}}`
+	}
+	c := feed(t,
+		att("19.0", `"met":false,"sentinel":true,"condition":"C"`),
+		lineUserPrompt,
+		att("29.0", `"met":false,"condition":"C","reason":"not yet:\n the file is missing"`),
+		att("33.0", `"met":false,"condition":"C","reason":"still missing"`),
+	)
+	if g := c.Goal(); g.State != "active" || g.Checks != 2 || g.Reason != "still missing" || g.Condition != "C" {
+		t.Fatalf("active: %+v", g)
+	}
+	c.Feed([]byte(`{"type":"system","subtype":"informational","timestamp":"2026-10-19T11:43:53Z","content":"Goal paused · goal checks kept finding it unmet this turn · send a message to continue"}`))
+	if g := c.Goal(); g.State != "paused" || !strings.HasPrefix(g.Reason, "Goal paused") {
+		t.Fatalf("paused: %+v", g)
+	}
+	c.Feed([]byte(`{"type":"user","isMeta":true,"message":{"role":"user","content":"meta"}}`))
+	if c.Goal().State != "paused" {
+		t.Fatal("a meta record resumed the goal")
+	}
+	c.Feed([]byte(lineUserPrompt))
+	c.Feed([]byte(att("59.0", `"met":true,"condition":"C","reason":"done","iterations":4`)))
+	if g := c.Goal(); g.State != "met" || g.Checks != 4 {
+		t.Fatalf("met: %+v", g)
+	}
+	c.Feed([]byte(att("59.5", `"met":false,"sentinel":true,"condition":"D"`)))
+	c.Feed([]byte(att("59.9", `"met":true,"sentinel":true,"condition":"D"`)))
+	if g := c.Goal(); g.State != "cleared" || g.Condition != "D" || g.Checks != 0 {
+		t.Fatalf("cleared: %+v", g)
+	}
+	if c.State() != StateIdle {
+		t.Fatalf("goal records moved the turn state: %v", c.State())
 	}
 }

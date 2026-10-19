@@ -34,6 +34,8 @@ type SessionDTO struct {
 	TaskDone    int    `json:"taskDone"`
 	TaskTotal   int    `json:"taskTotal"`
 	TaskOutcome string `json:"taskOutcome"`
+	// Goal is the session's /goal, once one was set.
+	Goal *GoalDTO `json:"goal,omitempty"`
 	// CheckpointAt is when the session last wrote a hand-over checkpoint
 	// (unix seconds; 0 = never) and NextStep its one-line next step.
 	CheckpointAt int64  `json:"checkpointAt"`
@@ -103,6 +105,7 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 			TaskDone:     r.Task.Done,
 			TaskTotal:    r.Task.Total,
 			TaskOutcome:  r.Task.Outcome,
+			Goal:         goalDTO(r.Goal),
 			CheckpointAt: r.Checkpoint.WrittenAt,
 			NextStep:     r.Checkpoint.NextStep,
 			External:     r.External,

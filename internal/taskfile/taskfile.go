@@ -10,6 +10,7 @@ package taskfile
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,6 +27,10 @@ type Task struct {
 	Done    int    // ticked Done-when checks
 	Total   int    // all Done-when checks
 	Outcome string // first paragraph of ## Outcome, whitespace-folded
+	// Checks are the Done-when checks' text as written (without the box),
+	// and Open says which of them are not ticked yet.
+	Checks []string
+	Open   []bool
 	// StartedAt is the Started: header as unix seconds (0 when absent or
 	// unparsable). A new task file in the same session has a new start,
 	// which is what "the current task file version" means to the hooks
@@ -103,9 +108,12 @@ func ParseTask(text string) (t Task, ok bool) {
 			continue // not a check, or the template placeholder
 		}
 		t.Total++
-		if strings.EqualFold(m[1], "x") {
+		done := strings.EqualFold(m[1], "x")
+		if done {
 			t.Done++
 		}
+		t.Checks = append(t.Checks, m[2])
+		t.Open = append(t.Open, !done)
 	}
 	t.Outcome = firstParagraph(sections["outcome"])
 	switch t.Status {
@@ -263,4 +271,47 @@ func read[T any](m map[string]entry[T], sid, path string, parse func([]byte, os.
 	val, ok := parse(b, fi)
 	m[sid] = entry[T]{size: fi.Size(), mtime: fi.ModTime().UnixNano(), val: val, ok: ok}
 	return val, ok
+}
+
+// GoalTurns is the default turn cap of a goal: under claude's limit of 9
+// consecutive stop-hook blocks in one turn, so the cap is what ends it.
+const GoalTurns = 8
+
+// GoalMaxLen is the longest message claude still reads as a slash command
+// when it arrives as one paste: longer, it becomes pasted text and /goal is
+// never run (claude 2.1.303: 800 sets a goal, 801 does not).
+const GoalMaxLen = 800
+
+// GoalCondition is a /goal condition for the task's finish line: its
+// Done-when checks verbatim (a ticked check's evidence after "#" is
+// dropped, the check itself is kept) plus a turn cap. The goal's evaluator
+// reads the transcript and runs nothing, so the condition asks for each
+// check's command and output to be shown there. One line, naming the file:
+// "the task file" alone left a live claude guessing which one. When the
+// verbatim form would make "/goal …" longer than GoalMaxLen, the checks are
+// named only, to be run as the file writes them; ok is false when even that
+// does not fit.
+func GoalCondition(t Task, path string, turns int) (cond string, ok bool) {
+	checks := make([]string, len(t.Checks))
+	names := make([]string, len(t.Checks))
+	for i, c := range t.Checks {
+		if !t.Open[i] {
+			if j := strings.LastIndex(c, " # "); j >= 0 {
+				c = strings.TrimSpace(c[:j])
+			}
+		}
+		c = strings.TrimSpace(strings.TrimSuffix(c, " #")) // an empty evidence slot
+		checks[i] = fmt.Sprintf("(%d) %s", i+1, c)
+		name, _, _ := strings.Cut(c, ":")
+		names[i] = fmt.Sprintf("(%d) %s", i+1, strings.TrimSpace(name))
+	}
+	tail := fmt.Sprintf("; and that file says Status: done, or stop after %d turns", turns)
+	cond = fmt.Sprintf("every Done-when check of the task file %s holds, each shown in this transcript by its command and that command's output (or, for a check with no command, the observation it names): %s%s",
+		path, strings.Join(checks, "; "), tail)
+	if len("/goal ")+len(cond) <= GoalMaxLen {
+		return cond, true
+	}
+	cond = fmt.Sprintf("every Done-when check of the task file %s holds, each shown in this transcript by running its command exactly as that file writes it, with the output (or the observation it names): %s%s",
+		path, strings.Join(names, "; "), tail)
+	return cond, len("/goal ")+len(cond) <= GoalMaxLen
 }

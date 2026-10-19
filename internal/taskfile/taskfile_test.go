@@ -3,6 +3,7 @@ package taskfile
 import (
 	"fmt"
 	"os"
+	"strings"
 	"path/filepath"
 	"testing"
 	"time"
@@ -170,5 +171,33 @@ func TestStartedAtAndVerifiedMarker(t *testing.T) {
 	}
 	if tk, _ := c.Task("sid"); tk.Verified {
 		t.Fatal("junk marker must read as unverified")
+	}
+}
+
+func TestGoalCondition(t *testing.T) {
+	tk, _ := ParseTask(sample)
+	if len(tk.Checks) != 3 || tk.Open[0] || !tk.Open[1] {
+		t.Fatalf("checks %q open %v", tk.Checks, tk.Open)
+	}
+	got, ok := GoalCondition(tk, "/s/tasks/x.md", 5)
+	want := "(1) build: $ go build ./...; (2) tests: $ go test ./...; (3) docs: updated; and that file says Status: done, or stop after 5 turns"
+	if !ok || !strings.HasPrefix(got, "every Done-when check of the task file /s/tasks/x.md holds,") || !strings.HasSuffix(got, want) || strings.Contains(got, "\n") {
+		t.Fatalf("condition %q", got)
+	}
+	// too long verbatim: the checks are named, and it fits
+	long := tk
+	long.Checks = append([]string(nil), tk.Checks...)
+	long.Checks[1] = "tests: $ " + strings.Repeat("go test ./x/... && ", 40)
+	got, ok = GoalCondition(long, "/s/tasks/x.md", 5)
+	if !ok || len("/goal ")+len(got) > GoalMaxLen || !strings.Contains(got, "(1) build; (2) tests; (3) docs; and that file") {
+		t.Fatalf("named form %v %d %q", ok, len(got), got)
+	}
+	many := Task{}
+	for i := 0; i < 60; i++ {
+		many.Checks = append(many.Checks, "a check with a long name: $ true")
+		many.Open = append(many.Open, true)
+	}
+	if _, ok := GoalCondition(many, "/s/tasks/x.md", 5); ok {
+		t.Fatal("60 checks fit")
 	}
 }

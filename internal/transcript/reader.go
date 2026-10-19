@@ -26,13 +26,14 @@ type ReaderSnapshot struct {
 	CtxTokens int64
 	Ask       string // the text claude last ended a turn with
 	AskAt     int64  // unix seconds it was written; 0 = unknown
+	Goal      Goal
 }
 
 func (r *Reader) snap() ReaderSnapshot {
 	return ReaderSnapshot{
 		State: r.cls.State(), LastTool: r.cls.LastTool(),
 		Title: r.cls.Title(), CtxTokens: r.cls.CtxTokens(),
-		Ask: r.cls.Ask(), AskAt: r.cls.AskAt(),
+		Ask: r.cls.Ask(), AskAt: r.cls.AskAt(), Goal: r.cls.Goal(),
 	}
 }
 

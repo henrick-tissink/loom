@@ -370,6 +370,33 @@ The usage view shows the plan's rate-limit windows and the tokens spent.
 
 ---
 
+### 5.3 Goals (`/goal`)
+
+claude's `/goal <condition>` keeps a session working: after each turn a
+separate check reads the transcript and either lets it stop or sends it on.
+Loom ties it to the finish line. A live, resting session whose task file is
+open with Done-when checks gets **Run to goal**: `GoalPrompt` composes
+`/goal` from the task file's checks verbatim (a ticked check's `# evidence`
+dropped), names the file's path, asks for each check's command and output
+to be shown in the transcript (the evaluator runs nothing) and caps it at
+`taskfile.GoalTurns` (8) turns, under claude's limit of 9 consecutive
+stop-hook blocks in a turn. It is one line of at most 800 characters:
+claude reads a longer paste as pasted text and never runs the command (800
+sets a goal, 801 does not; typing it with `send-keys -l` is read as a paste
+too). When the verbatim checks do not fit, the condition names them and
+asks for each to be run as the file writes it; `SendPrompt` refuses an
+edited `/goal` over the limit. It is shown for editing; Send pastes it
+through `SendPrompt`, so the click is the explicit ask and a dialog blocks
+it as for a review.
+
+The state is read, not kept: claude writes a `goal_status` attachment when
+a goal is set (`sentinel`, not met), after each check (`met`, `reason`,
+`iterations` on met) and when it is cleared (`sentinel`, met), and a system
+notice "Goal paused …" when it gives up on a turn. The classifier folds
+these into `transcript.Goal` (active | paused | met | cleared, checks, last
+reason), which rides the row as `goal`. A human message resumes a paused
+goal, as claude's notice says. Verified on 2.1.303.
+
 ## 6. Data model (`~/.loom/loom.db`)
 
 SQLite via `modernc.org/sqlite` (pure Go, no cgo), `journal_mode=WAL`,

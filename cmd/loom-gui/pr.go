@@ -10,6 +10,7 @@ import (
 
 	"github.com/henricktissink/loom/internal/ccsessions"
 	"github.com/henricktissink/loom/internal/forge"
+	"github.com/henricktissink/loom/internal/taskfile"
 	"github.com/henricktissink/loom/internal/transcript"
 	"github.com/henricktissink/loom/internal/worktree"
 )
@@ -263,6 +264,10 @@ func (a *App) SendPrompt(name, text string) error {
 	}
 	if _, ok := backgroundJobID(name); ok {
 		return fmt.Errorf("a background session has no pane to send into; attach to it")
+	}
+	if strings.HasPrefix(text, "/goal ") && len(text) > taskfile.GoalMaxLen {
+		// claude would take it as pasted text, and no goal would be set
+		return fmt.Errorf("a /goal is at most %d characters to reach claude as a command; this one is %d", taskfile.GoalMaxLen, len(text))
 	}
 	// With a dialog open (a permission prompt), the paste would land in the
 	// dialog and the Enter would answer it: approving a tool call nobody

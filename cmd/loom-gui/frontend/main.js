@@ -375,20 +375,77 @@ function reviewButton(s, finished) {
 // pasted into a live session as one message, or as the first message of a
 // resumed one. Errors stay in the modal; nothing is sent behind its back.
 function openReview(s, finished) {
-  if (document.querySelector(".modal-backdrop")) return;
   const p = s.pr;
   const ref = `${p.kind === "gitlab" ? "MR !" : "PR #"}${p.number}`;
+  openPromptModal(s, {
+    label: "Send review feedback",
+    title: `Review feedback on ${ref}`,
+    sub: finished ? "Resumes the session with this as its first message." : `Sent to ${displayName(s)} as one message.`,
+    fetch: () => window.go.main.App.ReviewPrompt(s.name),
+    placeholder: "Fetching the feedback…",
+    finished,
+  });
+}
+
+// openGoal composes a /goal from the session's task file (its Done-when
+// checks verbatim plus a turn cap) for the operator to read, edit and send.
+// claude then keeps working until its goal check finds the condition met,
+// the cap is reached, or someone runs /goal clear. Sending is the ask.
+function openGoal(s) {
+  openPromptModal(s, {
+    label: "Run to goal",
+    title: "Run to goal",
+    sub: `Sent to ${displayName(s)} as one message. After each turn claude checks the transcript against this condition and keeps working until it holds; /goal clear stops it early.`,
+    fetch: () => window.go.main.App.GoalPrompt(s.name),
+    placeholder: "Reading the task file…",
+    sendLabel: "Start goal",
+  });
+}
+
+// canGoal: a live session with an open finish line and no goal running yet,
+// at rest (a paste into a busy session would only queue) and with no dialog
+// open (the paste's Enter would answer it).
+function canGoal(s) {
+  const g = s.goal;
+  return s.taskStatus === "open" && s.taskTotal > 0 && !(g && (g.state === "active" || g.state === "paused")) &&
+    (s.status === "needs_you" || s.status === "idle") && !(s.waitingFor && s.waitingFor !== "shell");
+}
+
+function goalButton(s) {
+  return actionBtn('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2"/>',
+    "Run to goal: keep working until the Done-when checks hold", () => openGoal(s));
+}
+
+// goalPillHtml is the session's /goal as claude recorded it: running (with
+// how many checks it has had), paused, or met. A cleared goal says nothing.
+function goalPillHtml(s) {
+  const g = s.goal;
+  if (!g || g.state === "cleared") return "";
+  const tip = [`Goal: ${g.condition}`];
+  if (g.reason) tip.push(g.state === "paused" ? g.reason : `Last check: ${g.reason}`);
+  if (g.state === "active") tip.push("/goal clear in the session stops it");
+  const word = { active: `goal · ${g.checks} check${g.checks === 1 ? "" : "s"}`, paused: "goal paused", met: "goal met" }[g.state] || `goal ${g.state}`;
+  const cls = { active: "tpill-held", paused: "tpill-bad", met: "tpill-ok" }[g.state] || "";
+  return `<span class="tpill ${cls}" title="${esc(tip.join("\n"))}">${esc(word)}</span>`;
+}
+
+// openPromptModal shows a composed prompt fetched fresh, editable, and sends
+// it only on an explicit click: pasted into a live session as one message,
+// or as the first message of a resumed one (finished). Errors stay in the
+// modal; nothing is sent behind its back.
+function openPromptModal(s, o) {
+  if (document.querySelector(".modal-backdrop")) return;
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
-    <div class="modal review-modal" role="dialog" aria-label="Send review feedback">
-      <h2>Review feedback on ${esc(ref)}</h2>
-      <p class="review-sub">${finished ? "Resumes the session with this as its first message." : `Sent to ${esc(displayName(s))} as one message.`} Edit it as you like first.</p>
-      <div class="field"><textarea id="review-text" spellcheck="false" placeholder="Fetching the feedback…" disabled></textarea></div>
+    <div class="modal review-modal" role="dialog" aria-label="${esc(o.label)}">
+      <h2>${esc(o.title)}</h2>
+      <p class="review-sub">${esc(o.sub)} Edit it as you like first.</p>
+      <div class="field"><textarea id="review-text" spellcheck="false" placeholder="${esc(o.placeholder)}" disabled></textarea></div>
       <div class="modal-error" id="review-err"></div>
       <div class="modal-actions">
         <button class="btn-ghost" id="review-cancel">Cancel</button>
-        <button class="btn-launch" id="review-send" disabled>${finished ? "Resume and send" : "Send"}</button>
+        <button class="btn-launch" id="review-send" disabled>${esc(o.sendLabel || (o.finished ? "Resume and send" : "Send"))}</button>
       </div>
     </div>`;
   document.body.appendChild(backdrop);
@@ -400,7 +457,7 @@ function openReview(s, finished) {
   document.addEventListener("keydown", onKey, true);
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
   backdrop.querySelector("#review-cancel").addEventListener("click", close);
-  window.go.main.App.ReviewPrompt(s.name).then((prompt) => {
+  o.fetch().then((prompt) => {
     if (!backdrop.isConnected) return;
     text.value = prompt;
     text.disabled = false;
@@ -414,7 +471,7 @@ function openReview(s, finished) {
     sendBtn.disabled = true;
     errEl.textContent = "";
     try {
-      if (finished) {
+      if (o.finished) {
         const nn = await window.go.main.App.ResumeWithPrompt(s.name, text.value);
         close();
         if (nn) selectSession(nn);
@@ -629,7 +686,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -643,6 +700,7 @@ function appendLiveRow(s, projLabel) {
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
   // not while a dialog is open: the paste's Enter would answer it
   if (hasReview(s) && !(s.waitingFor && s.waitingFor !== "shell")) acts.appendChild(reviewButton(s, false));
+  if (canGoal(s)) acts.appendChild(goalButton(s));
   if (overBudget(s)) {
     acts.appendChild(actionBtn('<path d="M12 5v14M5 12h14"/>', "Fresh session from checkpoint (same directory; this one stays open)", async () => {
       try { const nn = await window.go.main.App.FreshSession(s.name); if (nn) selectSession(nn); poll(); }
@@ -1064,12 +1122,13 @@ function renderStageHeader(name) {
   // session is over budget) and Reply, the primary one.
   const wait = s && s.status === "needs_you" && s.since ? ` · ${fmtAge(Math.max(0, Math.floor(Date.now() / 1000) - s.since))}` : "";
   const task = s && s.taskStatus ? `<span class="sh-chip">task ${s.taskStatus === "consultation" ? "consult" : s.taskTotal > 0 ? `${s.taskDone}/${s.taskTotal}` : esc(s.taskStatus)}</span>` : "";
+  const goal = s && s.goal && s.goal.state !== "cleared" ? `<span class="sh-chip${s.goal.state === "paused" ? " over" : ""}" title="${esc(s.goal.condition)}">goal ${esc(s.goal.state === "active" ? `· ${s.goal.checks} check${s.goal.checks === 1 ? "" : "s"}` : s.goal.state)}</span>` : "";
   const ctx = s && s.ctxTokens ? `<span class="sh-chip${overBudget(s) ? " over" : ""}">${Math.round(s.ctxTokens / 1000)}k${overBudget(s) ? " · over budget" : ""}</span>` : "";
   el.innerHTML =
     `<span class="sh-name">${esc(label)}</span>` +
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON)}${esc(project)}</span>` : "") +
     `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}${wait}</span></span>` +
-    task + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
+    task + goal + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
     (s && (s.external || s.background) ? "" :
       `<span class="sh-acts">` +
       `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +

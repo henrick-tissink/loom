@@ -51,6 +51,8 @@ When the branch a session worked on has a pull request (GitHub, via `gh`) or mer
 
 When the PR has review feedback, the pill counts it (`3 comments`) and the row gets a **Send review** button. The feedback is the unresolved diff threads plus any reviews or comments posted since the last push (bot comments such as coverage reports are left out). The button hides while the session has a permission dialog open. The button fetches it fresh and shows it as a prompt you can edit; **Send** pastes it into the session as one message. On a finished session it reads **Resume and send**, which resumes the conversation with the review as its first message. Nothing is sent until you click.
 
+When a session's task file is open and has Done-when checks, and the session is waiting on you, the row gets **Run to goal** (the target icon). It shows a `/goal` built from the task file's checks, with a cap of 8 turns, for you to edit; **Start goal** sends it. Claude then keeps working until a check of its transcript finds every Done-when check shown passing and the task file done, or the cap is hit. The row shows `goal · 3 checks` while it runs (hover for the last check's reason), `goal paused` when claude gave up on a turn (send any message to continue), and `goal met` at the end. Type `/goal clear` in the session to stop it early.
+
 | Icon | Meaning |
 |---|---|
 | `●` red | **Needs you** — Claude finished, a reply is waiting (floats to the top; you also get a macOS notification with sound) |
