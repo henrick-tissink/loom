@@ -53,6 +53,8 @@ When the PR has review feedback, the pill counts it (`3 comments`) and the row g
 
 When a session's task file is open and has Done-when checks, and the session is waiting on you, the row gets **Run to goal** (the target icon). It shows a `/goal` built from the task file's checks, with a cap of 8 turns, for you to edit; **Start goal** sends it. Claude then keeps working until a check of its transcript finds every Done-when check shown passing and the task file done, or the cap is hit. The row shows `goal · 3 checks` while it runs (hover for the last check's reason), `goal paused` when claude gave up on a turn (send any message to continue), and `goal met` at the end. Type `/goal clear` in the session to stop it early.
 
+**Control from phone** (the phone icon, on a session waiting on you) sends `/remote-control` to the session and shows its terminal. If claude asks whether to enable Remote Control (it does the first time), answer there. While it is on, the row shows a `phone` pill: click it to open the session at claude.ai/code, or open the Code tab in the Claude app. `/remote-control` in the session disconnects it. To get pinged on your phone when a session waits on you, turn on push notifications in claude's `/config`; that setting is claude's, not loom's.
+
 | Icon | Meaning |
 |---|---|
 | `●` red | **Needs you** — Claude finished, a reply is waiting (floats to the top; you also get a macOS notification with sound) |

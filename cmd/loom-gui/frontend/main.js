@@ -351,12 +351,43 @@ function prTag(s) {
   return `<span class="tpill tpill-pr ${cls}"${url ? ` data-url="${esc(url)}"` : ""} title="${esc(tip.join("\n"))}">${esc(bits.filter(Boolean).join(" · "))}</span>`;
 }
 document.addEventListener("click", (e) => {
-  const pill = e.target.closest && e.target.closest(".tpill-pr[data-url]");
+  const pill = e.target.closest && e.target.closest(".tpill[data-url], .sh-chip[data-url]");
   if (!pill) return;
   e.stopPropagation();
   e.preventDefault();
   openURLToken(pill.dataset.url);
 }, true);
+
+// phoneTag marks a session under Remote Control: it is reachable from the
+// Claude app and claude.ai/code. Click opens it there.
+const PHONE_ALERTS = "Phone alerts come from claude itself: turn on push notifications in /config.";
+// phoneErrs holds a refused "Control from phone" per row for a short while,
+// shown on the row: a refusal must be visible, not a console line.
+const phoneErrs = new Map();
+function phoneTag(s) {
+  const err = phoneErrs.get(s.name);
+  if (err && Date.now() - err.at < 20000) return `<span class="tpill tpill-bad" title="${esc(err.msg)}">phone: not sent</span>`;
+  if (!s.remoteUrl) return "";
+  return `<span class="tpill tpill-ext" data-url="${esc(s.remoteUrl)}" title="${esc(`Under Remote Control: open it in the Claude app or at ${s.remoteUrl}\nClick to open · /remote-control in the session disconnects\n${PHONE_ALERTS}`)}">phone</span>`;
+}
+
+// canPhone: a live loom session, at rest and with no dialog open (the
+// paste's Enter would answer it), not under Remote Control yet.
+function canPhone(s) {
+  return !s.remoteUrl && (s.status === "needs_you" || s.status === "idle") && !(s.waitingFor && s.waitingFor !== "shell");
+}
+
+// phoneButton sends /remote-control and brings the session's terminal
+// forward: claude asks there whether to enable it, and the operator answers.
+function phoneButton(s) {
+  return actionBtn('<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/>',
+    `Control from phone: sends /remote-control to this session and shows its terminal; if claude asks to enable it, answer there. ${PHONE_ALERTS}`, async () => {
+      phoneErrs.delete(s.name);
+      try { await window.go.main.App.ControlFromPhone(s.name); selectSession(s.name); }
+      catch (e) { phoneErrs.set(s.name, { msg: String(e), at: Date.now() }); }
+      poll();
+    });
+}
 
 // hasReview reports whether a row's PR has review feedback to send on.
 function hasReview(s) {
@@ -686,7 +717,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -701,6 +732,7 @@ function appendLiveRow(s, projLabel) {
   // not while a dialog is open: the paste's Enter would answer it
   if (hasReview(s) && !(s.waitingFor && s.waitingFor !== "shell")) acts.appendChild(reviewButton(s, false));
   if (canGoal(s)) acts.appendChild(goalButton(s));
+  if (canPhone(s)) acts.appendChild(phoneButton(s));
   if (overBudget(s)) {
     acts.appendChild(actionBtn('<path d="M12 5v14M5 12h14"/>', "Fresh session from checkpoint (same directory; this one stays open)", async () => {
       try { const nn = await window.go.main.App.FreshSession(s.name); if (nn) selectSession(nn); poll(); }
@@ -1128,7 +1160,7 @@ function renderStageHeader(name) {
     `<span class="sh-name">${esc(label)}</span>` +
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON)}${esc(project)}</span>` : "") +
     `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}${wait}</span></span>` +
-    task + goal + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
+    task + goal + (s && s.remoteUrl ? `<span class="sh-chip" data-url="${esc(s.remoteUrl)}" title="${esc(`Under Remote Control: ${s.remoteUrl}\nClick to open`)}">phone</span>` : "") + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
     (s && (s.external || s.background) ? "" :
       `<span class="sh-acts">` +
       `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +

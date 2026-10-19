@@ -3,8 +3,8 @@ package taskfile
 import (
 	"fmt"
 	"os"
-	"strings"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )

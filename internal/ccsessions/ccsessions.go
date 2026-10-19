@@ -45,6 +45,26 @@ type Entry struct {
 	// `claude attach|stop <id>` take; "" for every other kind.
 	Kind  string
 	JobID string
+	// BridgeSessionID is set while the session is under Remote Control
+	// (/remote-control): its claude.ai/code session id, "session_…".
+	// claude removes it on disconnect.
+	BridgeSessionID string
+}
+
+// RemoteURL is where a session under Remote Control is opened on the web
+// and in the Claude app, or "" when it is not under Remote Control (or the
+// id is not one claude writes, so no odd string ever becomes a link).
+func (e Entry) RemoteURL() string {
+	id := e.BridgeSessionID
+	if !strings.HasPrefix(id, "session_") || len(id) > 100 {
+		return ""
+	}
+	for _, c := range id {
+		if !(c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return ""
+		}
+	}
+	return "https://claude.ai/code/" + id
 }
 
 // Dir is the registry directory under a claude config dir.
@@ -121,13 +141,15 @@ func readFile(path string) (Entry, bool) {
 		StartedAt  int64  `json:"startedAt"`
 		Kind       string `json:"kind"`
 		JobID      string `json:"jobId"`
+		Bridge     string `json:"bridgeSessionId"`
 	}
 	if err := json.Unmarshal(raw, &f); err != nil || f.SessionID == "" {
 		return Entry{}, false
 	}
 	e := Entry{PID: f.PID, SessionID: f.SessionID, Cwd: f.Cwd, TmuxTarget: f.Tmux,
 		Status: f.Status, WaitingFor: f.WaitingFor, Name: f.Name, UpdatedAt: f.UpdatedAt,
-		StatusUpdatedAt: f.StatusAt, StartedAt: f.StartedAt, Kind: f.Kind, JobID: f.JobID}
+		StatusUpdatedAt: f.StatusAt, StartedAt: f.StartedAt, Kind: f.Kind, JobID: f.JobID,
+		BridgeSessionID: f.Bridge}
 	if i := strings.IndexByte(f.Tmux, ':'); i > 0 {
 		e.TmuxSession = f.Tmux[:i]
 	} else {

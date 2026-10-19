@@ -94,3 +94,26 @@ func TestListReadsKindAndJobID(t *testing.T) {
 		t.Fatalf("entry = %+v", got)
 	}
 }
+
+// TestRemoteURL follows the registry as claude 2.1.303 writes it under
+// Remote Control: bridgeSessionId while connected, gone after disconnect.
+func TestRemoteURL(t *testing.T) {
+	dir := t.TempDir()
+	orig := pidAlive
+	pidAlive = func(int) bool { return true }
+	t.Cleanup(func() { pidAlive = orig })
+	writeEntry(t, dir, "1.json", `{"pid":1,"sessionId":"s1","tmux":"loom-A:@0.%0","status":"idle","bridgeSessionId":"session_011x1P7baC48u6YF45infKEv"}`)
+	writeEntry(t, dir, "2.json", `{"pid":2,"sessionId":"s2","tmux":"loom-B:@0.%0","status":"idle"}`)
+	got := ByTmuxSession(dir)
+	if u := got["loom-A"].RemoteURL(); u != "https://claude.ai/code/session_011x1P7baC48u6YF45infKEv" {
+		t.Fatalf("connected: %q", u)
+	}
+	if u := got["loom-B"].RemoteURL(); u != "" {
+		t.Fatalf("not connected: %q", u)
+	}
+	for _, bad := range []string{"session_a/../x", "javascript:x", "session_a?b", ""} {
+		if u := (Entry{BridgeSessionID: bad}).RemoteURL(); u != "" {
+			t.Fatalf("%q became a link: %q", bad, u)
+		}
+	}
+}

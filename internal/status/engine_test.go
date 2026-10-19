@@ -513,6 +513,16 @@ func TestPollMergesRegistryStatus(t *testing.T) {
 	if len(snap.NewlyNeedsYou) != 1 {
 		t.Fatalf("waiting must ring once: %v", snap.NewlyNeedsYou)
 	}
+	if snap.Live[0].RemoteURL != "" {
+		t.Fatalf("no Remote Control, yet a link: %q", snap.Live[0].RemoteURL)
+	}
+
+	// under Remote Control, the registry carries the bridge session
+	body := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"tmux":%q,"status":"idle","updatedAt":2,"bridgeSessionId":"session_x1"}`, os.Getpid(), id, name+":@1.%1")
+	os.WriteFile(filepath.Join(regDir, "1.json"), []byte(body), 0o644)
+	if snap, _ = e.Poll(now); snap.Live[0].RemoteURL != "https://claude.ai/code/session_x1" {
+		t.Fatalf("remote: got %q", snap.Live[0].RemoteURL)
+	}
 }
 
 const fakeTranscriptAsk = `{"type":"user","message":{"role":"user","content":"hi"}}

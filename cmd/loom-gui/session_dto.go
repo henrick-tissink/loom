@@ -36,6 +36,9 @@ type SessionDTO struct {
 	TaskOutcome string `json:"taskOutcome"`
 	// Goal is the session's /goal, once one was set.
 	Goal *GoalDTO `json:"goal,omitempty"`
+	// RemoteURL is the session's claude.ai/code link while it is under
+	// Remote Control, else "".
+	RemoteURL string `json:"remoteUrl"`
 	// CheckpointAt is when the session last wrote a hand-over checkpoint
 	// (unix seconds; 0 = never) and NextStep its one-line next step.
 	CheckpointAt int64  `json:"checkpointAt"`
@@ -106,6 +109,7 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 			TaskTotal:    r.Task.Total,
 			TaskOutcome:  r.Task.Outcome,
 			Goal:         goalDTO(r.Goal),
+			RemoteURL:    r.RemoteURL,
 			CheckpointAt: r.Checkpoint.WrittenAt,
 			NextStep:     r.Checkpoint.NextStep,
 			External:     r.External,

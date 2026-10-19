@@ -397,6 +397,22 @@ these into `transcript.Goal` (active | paused | met | cleared, checks, last
 reason), which rides the row as `goal`. A human message resumes a paused
 goal, as claude's notice says. Verified on 2.1.303.
 
+### 5.4 Phone hand-off (Remote Control)
+
+claude's `/remote-control` makes a session reachable from the Claude app
+and claude.ai/code while it keeps running here. **Control from phone** on
+a resting row pastes `/remote-control` (`ControlFromPhone`, refused while a
+dialog is open or when it is already on) and brings the stage terminal
+forward: when claude asks there whether to enable it (it does on first
+use), the operator answers. Loom never answers claude's consent dialog. While it is on, claude's
+registry entry carries `bridgeSessionId` ("session_…"), which the row turns
+into its claude.ai/code link (`Entry.RemoteURL`, only for ids of that
+shape); claude removes the key on disconnect, and the pill goes with it.
+Nothing is recorded in the transcript. Phone alerts are claude's own: its
+`inputNeededNotifEnabled` setting ("push to mobile when a permission prompt
+or question is waiting"), set in `/config`, which also tells the account;
+loom points to it rather than writing it. Verified on 2.1.303.
+
 ## 6. Data model (`~/.loom/loom.db`)
 
 SQLite via `modernc.org/sqlite` (pure Go, no cgo), `journal_mode=WAL`,

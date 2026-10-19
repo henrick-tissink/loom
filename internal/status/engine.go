@@ -45,6 +45,9 @@ type Row struct {
 	Checkpoint taskfile.Checkpoint
 	// Goal is the session's /goal as its transcript records it.
 	Goal transcript.Goal
+	// RemoteURL is the session's claude.ai/code link while it is under
+	// Remote Control (claude's registry), else "".
+	RemoteURL string
 	// External marks a claude loom did not start and has no pane for: a
 	// process in claude's registry running in some terminal outside loom's
 	// tmux server. Its row is synthesised from the registry and its
@@ -395,6 +398,9 @@ func (e *Engine) row(r store.SessionRow, rs transcript.ReaderSnapshot, st Status
 		if hasEnt && ent.Status == "waiting" && ent.StatusUpdatedAt > 0 {
 			row.Since = ent.StatusUpdatedAt / 1000
 		}
+	}
+	if hasEnt {
+		row.RemoteURL = ent.RemoteURL()
 	}
 	row.Task, row.HasTask = e.tasks.Task(r.ClaudeSessionID)
 	row.Checkpoint, _ = e.tasks.Checkpoint(r.ClaudeSessionID)
