@@ -136,12 +136,20 @@ From the terminal: `loom brief <project> --window 3d` writes a brief. `--evidenc
 
 **`W` — the wall:** a read-only 2-column grid of every live session's pane tail, refreshing live. `↓/↑` select · `↵` attach · `esc` back. Order is stable (oldest first) so the grid never shuffles under you. Cells are plain-text tails — for full fidelity, attach.
 
+## 7a. Usage
+
+The gauge button in the sidebar opens **Usage**. Its dot turns amber at 70% and red at 90% of your tightest plan window.
+
+- **Plan limits**: your 5-hour and 7-day windows, with when each resets. Claude only reports them to its status line, so the first time, click **Track plan limits**. Loom wraps your status line command in a small script that saves what claude reports and then runs your command as before; your status line looks the same. settings.json is backed up first, and **Stop tracking** puts the original back. The numbers update whenever any claude session redraws its status line.
+- **Tokens**: what you spent in the last 5 hours and 7 days, by model and by project, read from the transcripts (subagents included). "out" is output, "in" is input plus cache writes, and "cache" is cache reads, which are cheap and make up most of a long session's input.
+
 ## 8. Under the hood
 
 | Thing | Where |
 |---|---|
 | Loom's state (index, sessions, projects) | `~/.loom/loom.db` (SQLite) |
 | Briefs | `~/.loom/briefs/<project>/<when>-<window>/` |
+| Usage tap (when on) | `~/.loom/usage/` (the script and the last status line capture) |
 | Sessions | tmux server `-L loom` (`tmux -L loom list-sessions` to inspect raw) |
 | Transcripts (Claude's own, read-only to Loom) | `~/.claude/projects/…` |
 

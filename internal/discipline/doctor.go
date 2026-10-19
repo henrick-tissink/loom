@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/henricktissink/loom/internal/diet"
+	"github.com/henricktissink/loom/internal/usage"
 	"io"
 	"io/fs"
 	"os"
@@ -615,6 +616,7 @@ func (r *Report) settings(l Layout, regs Registrations, settings map[string]any)
 	}
 	if sl, ok := settings["statusLine"].(map[string]any); ok {
 		cmd, _ := sl["command"].(string)
+		cmd, _ = usage.Untap(cmd) // loom's usage tap is not a status line of its own
 		r.Settings.StatusLineSet = cmd != ""
 		r.Settings.StatusLine = cmd
 		r.Settings.StatusLineOurs = strings.Contains(cmd, "context-bar.sh")

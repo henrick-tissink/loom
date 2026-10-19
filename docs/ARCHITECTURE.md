@@ -142,6 +142,7 @@ no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
 | `forge` | A branch's GitHub PR or GitLab MR, its CI and review state and open review feedback (composed into a prompt), through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
+| `usage` | Plan rate-limit windows from the opt-in status-line tap, token totals from transcripts | Writes settings.json only on the explicit Track / Stop click, after a backup; §5.2. |
 | `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
@@ -340,6 +341,32 @@ One pass, mutex-serialized end to end:
    what makes the notification naturally once-only.
 
 The GUI polls every 1.5s via `ListSessions()` from JS; `loom ls` polls once.
+
+### 5.2 Usage (`internal/usage`)
+
+The usage view shows the plan's rate-limit windows and the tokens spent.
+
+- **Limits** reach exactly one place loom can observe without credentials:
+  the JSON claude pipes to the `statusLine` command on every render
+  (`rate_limits.five_hour` / `seven_day`: `used_percentage`, `resets_at` in
+  unix seconds; verified on 2.1.303). Loom offers an opt-in tap, one click in
+  the usage view: the command becomes `sh ~/.loom/usage/statusline-tap.sh
+  '<original>'`, and the script saves its input to
+  `~/.loom/usage/statusline.json`, then runs the original on the same input,
+  so the status line looks as before. settings.json is backed up
+  (`.bak-loom-usage-<time>`) before each change, and off restores the
+  original. The windows are account-wide, so whichever session drew last
+  speaks for all; a window whose `resets_at` has passed is shown as reset,
+  not as its stale percentage. The Discipline layer still recognises a
+  tapped context bar as its own, and uninstall sees through the tap
+  (`usage.Untap`).
+- **Tokens** come from the transcripts, subagents' included: assistant
+  usage over the last 5 hours and 7 days, by model and by project (a
+  worktree folds into its repo). claude writes one record per content block
+  with the message's full usage, so a message counts once, by id. The
+  scanner re-parses a file only when it changed and skips files last written
+  before the window; cold 7 days ≈ 2 s, warm ≈ 10 ms. The GUI rescans in
+  the background at most once a minute and never inside a poll.
 
 ---
 

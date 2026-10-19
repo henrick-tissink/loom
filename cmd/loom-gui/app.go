@@ -70,6 +70,9 @@ type App struct {
 	prs *prCache
 	// forgeRun runs gh, glab and git for PR lookups and review feedback.
 	forgeRun forge.Runner
+	// usage is the usage view's state (usage.go); nil when the claude
+	// config dir is unknown.
+	usage *usageState
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {

@@ -139,6 +139,19 @@ func TestMergeStatusLineEnvDeny(t *testing.T) {
 	if !UnmergeStatusLine(parse(t, `{"statusLine":{"type":"command","command":"X"}}`), "X") {
 		t.Fatal("status line not removed")
 	}
+	// wrapped by loom's usage tap, it is still the one loom wrote
+	tapped := `{"statusLine":{"type":"command","command":"sh '/h/.loom/usage/statusline-tap.sh' 'X'"}}`
+	tdoc := parse(t, tapped)
+	if !UnmergeStatusLine(tdoc, "X") || tdoc.Path("statusLine", "command").Str() != "sh '/h/.loom/usage/statusline-tap.sh' ''" {
+		t.Fatalf("tapped status line: %s", tdoc.Marshal(""))
+	}
+	// the tap with nothing inside is an empty slot: loom's command goes in it
+	if MergeStatusLine(tdoc, "X") != "X" || string(tdoc.Marshal("")) != string(parse(t, tapped).Marshal("")) {
+		t.Fatalf("merge into empty tap: %s", tdoc.Marshal(""))
+	}
+	if UnmergeStatusLine(parse(t, `{"statusLine":{"type":"command","command":"Y"}}`), "X") {
+		t.Fatal("another tool's status line removed")
+	}
 }
 
 func TestClaudeMdReplaceInlineAndUndo(t *testing.T) {

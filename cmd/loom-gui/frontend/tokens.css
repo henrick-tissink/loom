@@ -152,17 +152,17 @@ body {
 .tb-right { --wails-draggable: no-drag; display: flex; align-items: center; gap: 6px; }
 
 /* ---- dock tokens (the projects strip, New, search, prefs) ---- */
-#new-session, #search-btn, #prefs-btn, #disc-btn, #pp-collapse {
+#new-session, #search-btn, #prefs-btn, #disc-btn, #usage-btn, #pp-collapse {
   --wails-draggable: no-drag;
   display: grid; place-items: center;
   width: 40px; height: 40px; border-radius: 12px; cursor: pointer;
   color: var(--text-faint); background: transparent; border: 0; padding: 0;
   transition: color 0.12s ease, background 0.12s ease;
 }
-#new-session:hover, #search-btn:hover, #prefs-btn:hover, #disc-btn:hover, #pp-collapse:hover { color: var(--text); background: var(--sel); }
+#new-session:hover, #search-btn:hover, #prefs-btn:hover, #disc-btn:hover, #usage-btn:hover, #pp-collapse:hover { color: var(--text); background: var(--sel); }
 .ic { stroke-linecap: round; stroke-linejoin: round; }
 .ic * { stroke-width: var(--icon-stroke); vector-effect: non-scaling-stroke; }
-#new-session svg, #search-btn svg, #prefs-btn svg, #disc-btn svg { width: 16px; height: 16px; }
+#new-session svg, #search-btn svg, #prefs-btn svg, #disc-btn svg, #usage-btn svg { width: 16px; height: 16px; }
 #new-session { color: var(--accent-ink); background: var(--accent-soft); }
 #new-session:hover { color: var(--on-accent); background: var(--accent); }
 #pp-collapse { font-size: var(--t-lead); line-height: 1; }
@@ -745,8 +745,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .psec-add:hover, .prow-add:hover { color: var(--accent); }
 
 /* agent discipline: the dock dot, the island and the gate sheet */
-#disc-btn { position: relative; }
-#disc-btn.on { color: var(--text); background: var(--sel); }
+#disc-btn, #usage-btn { position: relative; }
+#disc-btn.on, #usage-btn.on { color: var(--text); background: var(--sel); }
 .disc-dot { position: absolute; right: 8px; bottom: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); box-shadow: 0 0 0 2px var(--rail); }
 .disc-dot.hollow { background: transparent !important; box-shadow: inset 0 0 0 1.5px var(--text-faint); }
 .tpill-restart { color: var(--over); background: var(--over-bg); }
@@ -1004,3 +1004,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .br-doc { animation: blush-fade 0.2s ease-out; }
   @keyframes br-pulse { 50% { opacity: 0.45; } }
 }
+
+/* ---- usage view ---- */
+.usg-win { display: grid; grid-template-columns: 70px 1fr 54px; align-items: center; gap: 10px; font-size: var(--t-small); }
+.usg-win .usg-name { color: var(--text-dim); font-weight: 600; }
+.usg-bar { height: 8px; border-radius: 999px; background: var(--inset); overflow: hidden; }
+.usg-bar i { display: block; height: 100%; border-radius: 999px; background: var(--st-running); }
+.usg-pct { text-align: right; font-family: var(--font-mono); color: var(--text); }
+.usg-reset { grid-column: 2 / 4; margin-top: -6px; color: var(--text-faint); font-size: var(--t-micro); }
+.usg-note { margin: 0; color: var(--text-dim); font-size: var(--t-small); line-height: 1.5; }
+.usg-note code { font-family: var(--font-mono); font-size: var(--t-micro); background: var(--inset); padding: 1px 5px; border-radius: 6px; word-break: break-all; }
+.usg-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; }
+.usg-table { border-collapse: collapse; font-size: var(--t-small); width: 100%; }
+.usg-table th { text-align: right; font-weight: 600; color: var(--text-faint); font-size: var(--t-micro); padding: 2px 0 4px 10px; }
+.usg-table th:first-child, .usg-table td:first-child { text-align: left; padding-left: 0; }
+.usg-table td { text-align: right; padding: 3px 0 3px 10px; font-family: var(--font-mono); color: var(--text); white-space: nowrap; }
+.usg-table td:first-child { font-family: var(--font-ui); max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.usg-table tr.usg-total td { font-weight: 700; border-bottom: 1px solid var(--sel); }
+.usg-act { align-self: flex-start; }

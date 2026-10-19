@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/henricktissink/loom/internal/jsonedit"
+	"github.com/henricktissink/loom/internal/usage"
 )
 
 // The settings.json merge. Loom touches exactly four things in that file:
@@ -152,10 +153,19 @@ func (l Layout) StatusLineCommand(regs Registrations) string {
 }
 
 // MergeStatusLine sets the status line only when none is set. Returns the
-// command written, or "" when nothing changed.
+// command written, or "" when nothing changed. loom's usage tap with no
+// command inside counts as none set; the command goes inside the tap.
 func MergeStatusLine(doc *jsonedit.Node, cmd string) string {
-	if sl := doc.Get("statusLine"); sl != nil && sl.Get("command").Str() != "" {
-		return ""
+	if sl := doc.Get("statusLine"); sl != nil {
+		cur := sl.Get("command").Str()
+		if orig, tapped := usage.Untap(cur); tapped && orig == "" {
+			w, _ := usage.Retap(cur, cmd)
+			sl.Set("command", jsonedit.String(w))
+			return cmd
+		}
+		if cur != "" {
+			return ""
+		}
 	}
 	sl := jsonedit.NewObject()
 	sl.Set("type", jsonedit.String("command"))
@@ -169,8 +179,18 @@ func UnmergeStatusLine(doc *jsonedit.Node, written string) bool {
 	if written == "" {
 		return false
 	}
-	if sl := doc.Get("statusLine"); sl != nil && sl.Get("command").Str() == written {
-		return doc.Delete("statusLine")
+	// loom's usage tap may wrap it; the wrapped command is still loom's
+	if sl := doc.Get("statusLine"); sl != nil {
+		cur := sl.Get("command").Str()
+		if cmd, tapped := usage.Untap(cur); cmd == written {
+			if tapped {
+				// the tap stays; only loom's command leaves it
+				w, _ := usage.Retap(cur, "")
+				sl.Set("command", jsonedit.String(w))
+				return true
+			}
+			return doc.Delete("statusLine")
+		}
 	}
 	return false
 }

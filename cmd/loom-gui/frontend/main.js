@@ -2459,6 +2459,7 @@ function renderDiscDot() {
   dot.style.background = discColor(disc);
   dot.classList.toggle("hollow", !disc || !disc.report || disc.report.rev.layout === "none");
   btn.classList.toggle("on", stageView.kind === "discipline");
+  renderUsageDot();
   btn.title = "Agent Discipline — " + (disc ? disc.headline : "checking…");
 }
 
@@ -2468,6 +2469,118 @@ async function discPoll(force) {
   try { disc = await fn(!!force); } catch (e) { console.error("discipline", e); return; }
   renderDiscDot();
   if (stageView.kind === "discipline") renderDiscipline();
+}
+
+// ---- usage ----
+// The plan's rate-limit windows (from the opt-in status line tap) and the
+// tokens spent, by model and project (from the transcripts).
+let usage = null;
+const USAGE_POLL_MS = 30000;
+
+function usageLevel(pct) {
+  return pct >= 90 ? "var(--st-error)" : pct >= 70 ? "var(--over)" : "var(--st-running)";
+}
+
+function fmtTok(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return Math.round(n / 1e3) + "k";
+  return String(n);
+}
+
+function fmtIn(secs) {
+  if (secs <= 0) return "now";
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
+  if (h >= 24) return `${Math.floor(h / 24)}d ${h % 24}h`;
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+const WINDOW_LABEL = { five_hour: "5-hour", seven_day: "7-day" };
+
+function renderUsageDot() {
+  const dot = document.getElementById("usage-dot");
+  const btn = document.getElementById("usage-btn");
+  if (!dot || !btn) return;
+  btn.classList.toggle("on", stageView.kind === "usage");
+  const now = Date.now() / 1000;
+  // a window that has reset since the capture says nothing about now
+  const live = usage && usage.windows ? usage.windows.filter((w) => w.resetsAt > now) : [];
+  const top = live.reduce((m, w) => Math.max(m, w.usedPct), -1);
+  dot.classList.toggle("hollow", top < 0);
+  dot.style.background = top < 0 ? "" : usageLevel(top);
+  btn.title = "Usage" + (live.length ? " — " + live.map((w) => `${WINDOW_LABEL[w.name] || w.name} ${Math.round(w.usedPct)}%`).join(" · ") : "");
+}
+
+async function usagePoll() {
+  const fn = bound("Usage");
+  if (!fn) return;
+  try { usage = await fn(); } catch (e) { console.error("usage", e); return; }
+  renderUsageDot();
+  if (stageView.kind === "usage") renderUsage();
+}
+
+function openUsage() {
+  teardownTerminal();
+  activeName = null;
+  stageView = { kind: "usage" };
+  renderUsage();
+  renderRail();
+  renderUsageDot();
+  usagePoll();
+}
+
+function usageTableHtml(title, rows, total) {
+  if (!rows || !rows.length) return `<div class="po-empty">No tokens in this window.</div>`;
+  const tr = (r, cls) => `<tr${cls ? ` class="${cls}"` : ""}><td title="${esc(r.name)}">${esc(r.name)}</td><td>${fmtTok(r.output)}</td><td>${fmtTok(r.input + r.cacheWrite)}</td><td>${fmtTok(r.cacheRead)}</td></tr>`;
+  return `<table class="usg-table"><tr><th>${esc(title)}</th><th title="Output tokens">out</th><th title="Input tokens, including cache writes">in</th><th title="Cache reads: cheap, and most of a long session's input">cache</th></tr>${total ? tr(total, "usg-total") : ""}${rows.map((r) => tr(r)).join("")}</table>`;
+}
+
+function renderUsage() {
+  const stage = document.getElementById("stage");
+  if (!stage || stageView.kind !== "usage") return;
+  const u = usage;
+  const now = Date.now() / 1000;
+  let limits;
+  if (!u) {
+    limits = `<div class="po-empty">Loading…</div>`;
+  } else if (!u.tapOn && !u.capturedAt) {
+    limits = `<p class="usg-note">Your plan's 5-hour and 7-day limits reach loom only through claude's status line. <b>Track plan limits</b> wraps your status line command${u.statusLine ? ` (<code>${esc(u.statusLine)}</code>)` : ""} in a small script that saves what claude reports to <code>~/.loom/usage</code> and then runs it as before; settings.json is backed up first, and turning it off restores the original.</p>
+      <button class="sh-btn sh-primary usg-act" id="usg-tap-on">Track plan limits</button>`;
+  } else {
+    const wins = (u.windows || []).map((w) => {
+      const reset = w.resetsAt > now;
+      const pct = Math.max(0, Math.min(100, w.usedPct));
+      return `<div class="usg-win"><span class="usg-name">${esc(WINDOW_LABEL[w.name] || w.name)}</span>
+        <span class="usg-bar"><i style="width:${reset ? pct : 0}%;background:${usageLevel(pct)}"></i></span>
+        <span class="usg-pct">${reset ? Math.round(w.usedPct) + "%" : "—"}</span>
+        <span class="usg-reset">${reset ? `resets in ${fmtIn(w.resetsAt - now)} (${new Date(w.resetsAt * 1000).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })})` : "reset since the last report; a new one arrives with claude's next status line"}</span></div>`;
+    }).join("");
+    const age = u.capturedAt ? `As of ${fmtIn(now - u.capturedAt)} ago, from the last status line any claude session drew.` : "";
+    limits = (wins || `<div class="po-empty">${u.tapOn ? "Waiting for a claude session to draw its status line (any session, any project)." : "No plan limits in the last capture (an API-key login has none)."}</div>`) +
+      `<p class="usg-note">${age} ${u.tapOn ? `<a href="#" id="usg-tap-off">Stop tracking</a> (restores <code>${esc(u.statusLine || "no status line")}</code>)` : `Tracking is off; this is the last capture. <a href="#" id="usg-tap-on">Track again</a>`}</p>`;
+  }
+  const tok = (t, label) => t ? `<div class="po-block"><h3>${label}</h3>${usageTableHtml("model", t.byModel, t.all)}${usageTableHtml("project", t.byProject)}</div>` : "";
+  const tokens = u && u.fiveHour ? `<div class="usg-cols">${tok(u.fiveHour, "Last 5 hours")}${tok(u.sevenDay, "Last 7 days")}</div>` : `<div class="po-empty">Reading transcripts…</div>`;
+  const sig = JSON.stringify([u, Math.floor(now / 60)]);
+  if (stage.dataset.usageSig === sig && stage.querySelector("#usg-root")) return;
+  stage.dataset.usageSig = sig;
+  stage.innerHTML = `
+    <div id="stage-header" class="stage-head po-head"><span class="sh-name">Usage</span></div>
+    <div class="po" id="usg-root">
+      <div class="modal-error" id="usg-error">${u && u.err ? esc(u.err) : ""}</div>
+      <div class="po-block"><h3>Plan limits</h3>${limits}</div>
+      <div class="po-block"><h3>Tokens</h3><p class="usg-note">From the transcripts, subagents included; a message counts once. Refreshed every minute.</p>${tokens}</div>
+    </div>`;
+  const tap = async (on) => {
+    const fn = bound("SetUsageTap");
+    if (!fn) return;
+    try { await fn(on); } catch (e) { const el = document.getElementById("usg-error"); if (el) el.textContent = String(e); return; }
+    usagePoll();
+  };
+  for (const id of ["usg-tap-on", "usg-tap-off"]) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", (e) => { e.preventDefault(); tap(id === "usg-tap-on"); });
+  }
 }
 
 // A session started before the last hook flip still runs the previous
@@ -3012,8 +3125,11 @@ async function openGateSheet(action) {
 }
 
 document.getElementById("disc-btn").addEventListener("click", openDiscipline);
+document.getElementById("usage-btn").addEventListener("click", openUsage);
 discPoll(false);
 setInterval(() => discPoll(false), DISC_POLL_MS);
+usagePoll();
+setInterval(usagePoll, USAGE_POLL_MS);
 
 async function poll() {
   try {
