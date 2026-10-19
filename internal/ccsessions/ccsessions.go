@@ -39,6 +39,12 @@ type Entry struct {
 	// waiting pane, how long it has been waiting.
 	StatusUpdatedAt int64
 	StartedAt       int64 // unix milliseconds the process started
+	// Kind is how claude was started: "interactive", or "bg" for a
+	// background session run by claude's own supervisor (`claude --bg`,
+	// agent view). JobID is a background session's short id, the one
+	// `claude attach|stop <id>` take; "" for every other kind.
+	Kind  string
+	JobID string
 }
 
 // Dir is the registry directory under a claude config dir.
@@ -113,13 +119,15 @@ func readFile(path string) (Entry, bool) {
 		UpdatedAt  int64  `json:"updatedAt"`
 		StatusAt   int64  `json:"statusUpdatedAt"`
 		StartedAt  int64  `json:"startedAt"`
+		Kind       string `json:"kind"`
+		JobID      string `json:"jobId"`
 	}
 	if err := json.Unmarshal(raw, &f); err != nil || f.SessionID == "" {
 		return Entry{}, false
 	}
 	e := Entry{PID: f.PID, SessionID: f.SessionID, Cwd: f.Cwd, TmuxTarget: f.Tmux,
 		Status: f.Status, WaitingFor: f.WaitingFor, Name: f.Name, UpdatedAt: f.UpdatedAt,
-		StatusUpdatedAt: f.StatusAt, StartedAt: f.StartedAt}
+		StatusUpdatedAt: f.StatusAt, StartedAt: f.StartedAt, Kind: f.Kind, JobID: f.JobID}
 	if i := strings.IndexByte(f.Tmux, ':'); i > 0 {
 		e.TmuxSession = f.Tmux[:i]
 	} else {

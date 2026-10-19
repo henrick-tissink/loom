@@ -70,7 +70,7 @@ The app is the frontend:
 `loom` is a thin command line over the same engine, for a shell or a script:
 
     go build -o loom ./cmd/loom
-    ./loom ls               # live sessions with their fused status
+    ./loom ls               # live sessions with their fused status, plus claude's background sessions (bg-<id>)
     ./loom attach <name>    # hand this terminal to the session's tmux pane
     ./loom kill <name>
     ./loom search <query>   # full-text search over indexed session history

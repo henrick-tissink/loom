@@ -49,6 +49,12 @@ type Row struct {
 	// transcript each poll and is never stored; there is nothing to attach
 	// to, reply into, or kill.
 	External bool
+	// Background marks a session claude's own supervisor runs (`claude
+	// --bg`, agent view): no loom pane, but attachable through `claude
+	// attach <JobID>` and stoppable through `claude stop <JobID>`, whether
+	// or not a process runs it right now. Never stored, like External.
+	Background bool
+	JobID      string
 }
 
 type Snapshot struct {
@@ -84,6 +90,10 @@ type Engine struct {
 	// extStatus is the last status per external row, which the store holds
 	// for loom's own rows: it is what makes the needs-you bell once-only.
 	extStatus map[string]string
+	// agents lists claude's background sessions, including the ones its
+	// supervisor has stopped; nil means only background sessions with a
+	// live process (seen in the registry) are shown.
+	agents func(time.Time) []ccsessions.Agent
 
 	// mu serializes Poll end-to-end. Defense in depth against finding 1: the
 	// UI must never fire two concurrent Poll goroutines against the same
@@ -109,6 +119,31 @@ func NewEngine(tm *tmux.Client, st *store.Store, claudeConfigDir string) *Engine
 		readers:   map[string]*transcript.Reader{},
 		tasks:     taskfile.NewCache(taskfile.Dir(claudeConfigDir)),
 		extStatus: map[string]string{}}
+}
+
+// SetAgents wires the source of claude's background sessions (see
+// ccsessions.AgentsCache). Call before the first Poll.
+func (e *Engine) SetAgents(f func(time.Time) []ccsessions.Agent) { e.agents = f }
+
+// BackgroundPrefix names a background session's row: "bg-" + its job id,
+// the id `claude attach|stop` take, so a frontend can act on the name alone.
+const BackgroundPrefix = "bg-"
+
+// agentStatus maps a background session's supervisor state onto loom's
+// statuses for a session no process runs: a stopped or finished one is
+// waiting for your next prompt, and attaching or replying restarts it.
+func agentStatus(state string) Status {
+	switch state {
+	case "blocked":
+		return NeedsYou
+	case "working":
+		return Running
+	case "done", "stopped":
+		return Idle
+	case "failed":
+		return Error
+	}
+	return Unknown
 }
 
 func (e *Engine) Poll(now time.Time) (Snapshot, error) {
@@ -252,38 +287,77 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 	// transcript its state, so there is nothing for the store to retire.
 	// A conversation a loom row already tails (the same id resumed in a
 	// terminal) is not shown twice.
+	//
+	// A background session (kind "bg") is the same shape with a job id: it
+	// gets a bg- row instead, and so does one the supervisor has stopped,
+	// which has no registry entry and is known only to `claude agents`.
 	keep := append([]string(nil), aliveNames...)
 	seen := map[string]bool{}
+	bgIDs := map[string]bool{}
+	// external synthesises one unstored row from what claude reports and the
+	// session's transcript; regStatus and hasEnt are false/empty for a
+	// stopped background session, whose status comes from fallback instead.
+	external := func(name, sessionID, cwd, label string, startedAt int64, ent ccsessions.Entry, hasEnt bool, fallback Status) Row {
+		seen[name] = true
+		keep = append(keep, name)
+		r := store.SessionRow{Name: name, ClaudeSessionID: sessionID,
+			ProjectLabel: filepath.Base(cwd), Cwd: cwd,
+			CreatedAt: startedAt / 1000, EndedAt: -1, ExitCode: -1,
+			LastStatus: e.extStatus[name]}
+		rd, ok := e.readers[name]
+		if !ok {
+			rd = transcript.NewReader(transcript.Path(e.ccd, cwd, sessionID))
+			e.readers[name] = rd
+		}
+		rs, _ := rd.Poll()
+		r.Title = rs.Title
+		if r.Title == "" {
+			r.Title = label
+		}
+		st, waitingFor := fallback, ""
+		if hasEnt {
+			st, waitingFor = Merge(Fuse(rs.State, false), ent.Status, ent.WaitingFor)
+		}
+		if st == NeedsYou && e.extStatus[name] != string(NeedsYou) {
+			newly = append(newly, name)
+		}
+		e.extStatus[name] = string(st)
+		r.LastStatus = string(st)
+		return e.row(r, rs, st, waitingFor, 0, ent, hasEnt)
+	}
 	for _, ent := range entries {
 		if _, loom := session.SessionIDFromTmuxName(ent.TmuxSession); loom || ent.Cwd == "" || liveIDs[ent.SessionID] {
+			continue
+		}
+		if ent.Kind == "bg" && ent.JobID != "" {
+			name := BackgroundPrefix + ent.JobID
+			if seen[name] {
+				continue
+			}
+			bgIDs[ent.SessionID] = true
+			row := external(name, ent.SessionID, ent.Cwd, ent.Name, ent.StartedAt, ent, true, Unknown)
+			row.Background, row.JobID = true, ent.JobID
+			live = append(live, row)
 			continue
 		}
 		name := "ext-" + ent.SessionID
 		if seen[name] {
 			continue
 		}
-		seen[name] = true
-		keep = append(keep, name)
-		r := store.SessionRow{Name: name, ClaudeSessionID: ent.SessionID,
-			ProjectLabel: filepath.Base(ent.Cwd), Cwd: ent.Cwd,
-			CreatedAt: ent.StartedAt / 1000, EndedAt: -1, ExitCode: -1,
-			LastStatus: e.extStatus[name]}
-		rd, ok := e.readers[name]
-		if !ok {
-			rd = transcript.NewReader(transcript.Path(e.ccd, ent.Cwd, ent.SessionID))
-			e.readers[name] = rd
-		}
-		rs, _ := rd.Poll()
-		r.Title = rs.Title
-		st, waitingFor := Merge(Fuse(rs.State, false), ent.Status, ent.WaitingFor)
-		if st == NeedsYou && e.extStatus[name] != string(NeedsYou) {
-			newly = append(newly, name)
-		}
-		e.extStatus[name] = string(st)
-		r.LastStatus = string(st)
-		row := e.row(r, rs, st, waitingFor, 0, ent, true)
+		row := external(name, ent.SessionID, ent.Cwd, "", ent.StartedAt, ent, true, Unknown)
 		row.External = true
 		live = append(live, row)
+	}
+	if e.agents != nil {
+		for _, a := range e.agents(now) {
+			name := BackgroundPrefix + a.ID
+			if seen[name] || bgIDs[a.SessionID] || liveIDs[a.SessionID] || a.Cwd == "" {
+				continue
+			}
+			row := external(name, a.SessionID, a.Cwd, a.Name, a.StartedAt, ccsessions.Entry{}, false, agentStatus(a.State))
+			row.Background, row.JobID = true, a.ID
+			live = append(live, row)
+		}
 	}
 	for name := range e.extStatus {
 		if !seen[name] {

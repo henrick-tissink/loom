@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/henricktissink/loom/internal/brief"
+	"github.com/henricktissink/loom/internal/ccsessions"
 	"github.com/henricktissink/loom/internal/config"
 	"github.com/henricktissink/loom/internal/diet"
 	"github.com/henricktissink/loom/internal/diet/fromstore"
@@ -90,6 +91,9 @@ func run() error {
 	go ix.Run(ixCtx, 10*time.Minute)
 
 	engine := status.NewEngine(tm, st, cfg.ClaudeConfigDir)
+	// claude's background sessions, including the ones its supervisor has
+	// stopped, at most once per 5 s (ccsessions.AgentsCache).
+	engine.SetAgents((&ccsessions.AgentsCache{Run: ccsessions.RunAgents, Every: 5 * time.Second}).List)
 	app := newApp(engine, tm, st, launcher, svc, time.Now)
 	app.settings = newSettingsStore(cfg.LoomDir)
 	if home, err := os.UserHomeDir(); err == nil {

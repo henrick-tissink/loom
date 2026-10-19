@@ -82,3 +82,15 @@ func TestDir(t *testing.T) {
 		t.Fatalf("Dir = %q", got)
 	}
 }
+
+func TestListReadsKindAndJobID(t *testing.T) {
+	dir := t.TempDir()
+	orig := pidAlive
+	pidAlive = func(int) bool { return true }
+	t.Cleanup(func() { pidAlive = orig })
+	writeEntry(t, dir, "7.json", `{"pid":7,"sessionId":"s-bg","cwd":"/w","kind":"bg","jobId":"908c2218","status":"busy"}`)
+	got := List(dir)
+	if len(got) != 1 || got[0].Kind != "bg" || got[0].JobID != "908c2218" {
+		t.Fatalf("entry = %+v", got)
+	}
+}

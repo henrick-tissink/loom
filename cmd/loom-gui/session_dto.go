@@ -43,6 +43,11 @@ type SessionDTO struct {
 	// place on the stage.
 	External bool   `json:"external"`
 	Cwd      string `json:"cwd"`
+	// Background is a session claude's own supervisor runs (`claude --bg`,
+	// agent view): attachable (`claude attach <JobID>` in the stage
+	// terminal) and stoppable, with no pane to reply into.
+	Background bool   `json:"background"`
+	JobID      string `json:"jobId"`
 	// StartedAt is when loom launched the session (unix seconds; 0 =
 	// unknown). The frontend compares it with the discipline layer's last
 	// hook flip to mark sessions that still run the previous hooks.
@@ -92,6 +97,8 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 			NextStep:     r.Checkpoint.NextStep,
 			External:     r.External,
 			Cwd:          r.Cwd,
+			Background:   r.Background,
+			JobID:        r.JobID,
 			StartedAt:    r.CreatedAt,
 		})
 	}

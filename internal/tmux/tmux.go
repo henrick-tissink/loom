@@ -276,6 +276,15 @@ func (c *Client) KillServer() error {
 // left untouched.
 func (c *Client) AttachCmd(name string) *exec.Cmd {
 	cmd := exec.Command("tmux", "-L", c.Socket, "attach-session", "-t", target(name))
+	cmd.Env = ClientEnv()
+	return cmd
+}
+
+// ClientEnv is the environment for a terminal client loom runs under its own
+// pty or hands the user's terminal to (AttachCmd above, and `claude attach`
+// for a background session): this process's environment without TMUX and
+// TMUX_PANE, with TERM and a UTF-8 locale defaulted, for the reasons above.
+func ClientEnv() []string {
 	var env []string
 	hasTERM := false
 	for _, e := range os.Environ() {
@@ -290,6 +299,5 @@ func (c *Client) AttachCmd(name string) *exec.Cmd {
 	if !hasTERM {
 		env = append(env, "TERM=xterm-256color")
 	}
-	cmd.Env = ensureLocale(env)
-	return cmd
+	return ensureLocale(env)
 }

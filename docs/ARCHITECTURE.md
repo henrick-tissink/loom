@@ -74,7 +74,8 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.loom/loom.db` | Loom (rw) | sessions, projects, transcripts index, FTS |
 | `~/.loom/settings.json` | GUI (rw, atomic) | editor, notifications, auto-summarize, theme (dark default) |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
-| `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status |
+| `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status, kind and background job id |
+| `claude agents --json --all` | Claude (Loom: runs it, read-only) | background sessions, including the ones the supervisor has stopped |
 | `~/.claude/state/{tasks,checkpoints}/<sid>.md` | the operator's hooks (Loom: read-only) | a session's pinned finish line and its hand-over checkpoint |
 | `~/.claude/discipline/r<N>/`, `~/.claude/hooks/enforce`, `~/.local/bin/deadline`, `~/.claude/settings.json` hook entries, `~/.claude/CLAUDE.md` | the Agent Discipline bundle. `internal/discipline` is the one writer (`loom setup`, `uninstall`, `discipline keep|reset|restore`), by explicit human action only: every writing command refuses inside a Claude session or without a terminal. The doctor reads. Receipt, ledger and backups live under `~/.loom/{discipline,backups}` | hooks, rules, helpers; see `docs/DISCIPLINE.md` |
 | `~/.claude.json` | Claude (Loom: read-only) | per-project trust flags |
@@ -108,7 +109,7 @@ frontend.
 | `tmux` | Every interaction with the `-L loom` server | Only place that shells out to `tmux`. Exact-match targets (`=name`), locale defense. |
 | `session` | Launch recipe + the launch/resume sequence | Owns tmux naming, argv construction, the ready/trust gate, seed delivery, multi-repo `--add-dir`. |
 | `transcript` | Locate + interpret Claude's JSONL | Path encoding, incremental `Reader`, turn-boundary `Classifier`. |
-| `ccsessions` | Read Claude's own session registry | The only way to learn a pane's *current* session id after `/clear` or an in-pane resume. |
+| `ccsessions` | Read Claude's own session registry and its background sessions | The only way to learn a pane's *current* session id after `/clear` or an in-pane resume. Also lists background sessions (`claude agents --json --all`, throttled) and stops one (`claude stop`). |
 | `taskfile` | Read the hooks' task file and checkpoint | Finish line (status, Done-when ticks, outcome, `Started:` time, the stop guard's `.verified` marker) and hand-over age per session; stat-cached per poll. |
 | `diet` | The context-diet report: plugins at user scope, MCP servers and connectors per project, commands to copy | Pure and read-only over Claude's own files; `diet/fromstore` is its only tie to loom.db. Nothing is applied. |
 | `hooklog` | Read the hooks' decision and allow logs | Incremental `(inode, offset)` reader with truncation restart; legacy dirs read once. Per session: holds, nudges, the held group, the last stop verdict. Per hook: rates split at change marks (ledger, or inferred from `rev` transitions and old edit times), never summed across a mark. Test re-runs per project. |
@@ -120,6 +121,20 @@ the registry file is its liveness, so there is nothing to retire — and with
 no pane there is nothing to attach, reply into, or kill; the engine keeps the
 last status per external row only so the needs-you bell stays once-only. A
 conversation a loom row already tails is not shown twice.
+
+**Background sessions.** A session Claude's own supervisor runs (`claude --bg`,
+agent view) is a `bg-<job id>` row, never stored either. While a process runs
+it, it is a registry entry with `kind: "bg"` and a `jobId`, and its status is
+fused like an external row's. The supervisor stops a finished or idle one after
+about an hour; it then has no registry entry and is known only to
+`claude agents --json --all` (the supported interface; `~/.claude/jobs/*` is
+documented as unstable), which `ccsessions.AgentsCache` runs at most every 5 s,
+keeping the last good list when a run fails. Such a row's status is the
+supervisor's state: blocked → needs you, done/stopped → idle, failed → error.
+Naming the row by job id keeps it the same row across the stop and restart.
+Attach runs `claude attach <id>` under the stage pty (which restarts a stopped
+one) and kill runs `claude stop <id>`, which keeps the conversation; there is
+no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `status` | Fuse transcript state with tmux liveness | The reconcile loop. The only writer of live-session status. |
 | `store` | SQLite: schema, sessions, projects, memory index | Migrations are transactional & re-entrant. |
 | `memory` | Index / extract / summarize | Reads the whole Claude archive; one of the two packages that call out to an LLM (the other is `brief`, §10a). Also records each indexed file's `mcp__` calls (`indexed_files.mcp`) for the diet report, backfilling older files a bounded batch per sweep. |

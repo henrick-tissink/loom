@@ -297,12 +297,15 @@ const GROUPS = [
 // otherwise a short id, so the rail never displays a raw uuid.
 function displayName(s) {
   if (s.title && s.title.trim()) return s.title.trim();
-  return "session " + s.name.replace(/^(loom|ext)-/, "").slice(0, 8);
+  return "session " + s.name.replace(/^(loom|ext|bg)-/, "").slice(0, 8);
 }
 
 // externalTag marks a claude running in a terminal outside loom: loom sees
 // its status, question and finish line, but has no pane for it.
+// A background session (claude --bg, agent view) is run by claude's own
+// supervisor: loom attaches to it with `claude attach` and can stop it.
 function externalTag(s) {
+  if (s.background) return `<span class="tpill tpill-ext" title="Claude Code background session ${esc(s.jobId)}${s.cwd ? " — " + esc(s.cwd) : ""}">background</span>`;
   return s.external ? `<span class="tpill tpill-ext" title="Running in a terminal outside loom${s.cwd ? " — " + esc(s.cwd) : ""}">terminal</span>` : "";
 }
 
@@ -327,12 +330,14 @@ const summarizing = new Set();
 function sumPreview(text) { return String(text).replace(/\s+/g, " ").trim(); }
 
 // killButton needs a two-step confirm so a stray click can't nuke an agent.
-function killButton(name) {
+// verb is "Kill" for a loom pane and "Stop" for a background session, whose
+// conversation claude keeps (attaching reopens it).
+function killButton(name, verb = "Kill") {
   const b = document.createElement("button");
   b.className = "tact tact-kill";
-  b.title = "Kill session";
+  b.title = verb === "Stop" ? "Stop (the conversation is kept; attach to reopen)" : "Kill session";
   const glyph = () => { b.innerHTML = icon('<path d="M6 6l12 12M18 6L6 18"/>'); };
-  if (armedKills.has(name)) { b.classList.add("armed"); b.textContent = "Kill?"; }
+  if (armedKills.has(name)) { b.classList.add("armed"); b.textContent = verb + "?"; }
   else { glyph(); }
   b.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -342,7 +347,7 @@ function killButton(name) {
       poll();
     } else {
       armedKills.add(name);
-      b.classList.add("armed"); b.textContent = "Kill?";
+      b.classList.add("armed"); b.textContent = verb + "?";
       setTimeout(() => {
         armedKills.delete(name);
         if (b.isConnected) { b.classList.remove("armed"); glyph(); }
@@ -472,6 +477,9 @@ function appendLiveRow(s, projLabel) {
   // No pane, so nothing to reply into, hand over from, or kill: the row is
   // information only, and its stage says where the claude actually runs.
   if (s.external) { sealLive(li, s); return; }
+  // A background session has no loom pane to reply into or hand over from;
+  // it is attached by selecting it, and stopped from here.
+  if (s.background) { li.querySelector(".tactions").appendChild(killButton(s.name, "Stop")); sealLive(li, s); return; }
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
   if (overBudget(s)) {
@@ -898,7 +906,7 @@ function renderStageHeader(name) {
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON)}${esc(project)}</span>` : "") +
     `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}${wait}</span></span>` +
     task + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
-    (s && s.external ? "" :
+    (s && (s.external || s.background) ? "" :
       `<span class="sh-acts">` +
       `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
       (s && overBudget(s) ? `<button class="sh-btn" id="sh-fresh" title="Fresh session from checkpoint (same directory; this one stays open)">Fresh session</button>` : "") +
@@ -1087,7 +1095,9 @@ function wireProjectSessions(host) {
   });
   const root = stageView.root;
   armAction(host.querySelector("#po-killall"), "Kill all?", async () => {
-    for (const s of latestSessions.filter((s) => (s.projectRoot || "") === root)) {
+    // loom's own panes only: a terminal claude cannot be killed from here,
+    // and a background session is stopped one at a time from its row.
+    for (const s of latestSessions.filter((s) => (s.projectRoot || "") === root && !s.external && !s.background)) {
       try { await window.go.main.App.KillSession(s.name); } catch (e) { console.error("killall", e); }
     }
     poll();
@@ -1863,6 +1873,7 @@ async function openPrefs() {
 function openReply(name) {
   if (document.querySelector(".modal-backdrop")) return;
   const s = latestSessions.find((x) => x.name === name);
+  if (s && (s.external || s.background)) return; // no pane to type into
   const label = s ? displayName(s) : name;
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
@@ -2089,7 +2100,10 @@ function selectSession(name) {
 
   dataUnsub = window.runtime.EventsOn("pty:data:" + name, (b64) => term.write(b64ToBytes(b64)));
   exitUnsub = window.runtime.EventsOn("pty:exit:" + name, () => {
-    term.write("\r\n\x1b[2m[session ended]\x1b[0m\r\n");
+    // `claude attach` exits on a detach (Ctrl+Z) while the supervisor keeps
+    // the background session; reselecting the row attaches again.
+    term.write(name.startsWith("bg-") ? "\r\n\x1b[2m[detached — the background session keeps running]\x1b[0m\r\n"
+      : "\r\n\x1b[2m[session ended]\x1b[0m\r\n");
   });
   term.onData((data) => window.go.main.App.SendInput(name, data));
   registerFileLinks(term);
@@ -3025,7 +3039,7 @@ function buildPaletteItems() {
   for (const s of latestSessions) {
     items.push({
       label: displayName(s),
-      hint: `${s.project} · ${statusWord(s.status)}${s.waitingFor ? " · " + s.waitingFor : ""}${s.external ? " · terminal" : ""}`,
+      hint: `${s.project} · ${statusWord(s.status)}${s.waitingFor ? " · " + s.waitingFor : ""}${s.external ? " · terminal" : s.background ? " · background" : ""}`,
       run: () => selectSession(s.name),
     });
   }

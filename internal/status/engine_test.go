@@ -2,6 +2,7 @@ package status
 
 import (
 	"fmt"
+	"github.com/henricktissink/loom/internal/ccsessions"
 	"os"
 	"path/filepath"
 	"sync"
@@ -623,6 +624,72 @@ func TestPollShowsExternalSessionsOnce(t *testing.T) {
 	for _, r := range snap.Live {
 		if r.External {
 			t.Fatalf("external row outlived its registry entry: %+v", r)
+		}
+	}
+}
+
+func TestPollShowsBackgroundSessions(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	running := "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	tpath := transcript.Path(ccd, cwd, running)
+	if err := os.MkdirAll(filepath.Dir(tpath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tpath, []byte(fakeTranscriptAsk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	regDir := filepath.Join(ccd, "sessions")
+	if err := os.MkdirAll(regDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// a background session with a process: the registry says kind "bg"
+	body := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"cwd":%q,"kind":"bg","jobId":"eeeeeeee","name":"probe","status":"idle","startedAt":5000}`, os.Getpid(), running, cwd)
+	if err := os.WriteFile(filepath.Join(regDir, "8.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(tm, st, ccd)
+	e.SetAgents(func(time.Time) []ccsessions.Agent {
+		return []ccsessions.Agent{
+			// the same running session, also listed by `claude agents`: shown once
+			{ID: "eeeeeeee", SessionID: running, Cwd: cwd, Name: "probe", State: "done", PID: os.Getpid()},
+			// stopped by the supervisor: no process, no transcript here
+			{ID: "ffffffff", SessionID: "ffffffff-0000", Cwd: cwd, Name: "Fix the captcha", State: "done", StartedAt: 9000},
+			{ID: "aaaaaaaa", SessionID: "aaaaaaaa-0000", Cwd: cwd, Name: "Broke", State: "failed"},
+		}
+	})
+	snap, err := e.Poll(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Row{}
+	for _, r := range snap.Live {
+		byName[r.Name] = r
+	}
+	if len(snap.Live) != 3 {
+		t.Fatalf("live = %+v", snap.Live)
+	}
+	r := byName["bg-eeeeeeee"]
+	if !r.Background || r.External || r.JobID != "eeeeeeee" || r.Status != NeedsYou || r.Ask != "Done. Merge it?" || r.CreatedAt != 5 {
+		t.Fatalf("running background row: %+v", r)
+	}
+	r = byName["bg-ffffffff"]
+	if !r.Background || r.JobID != "ffffffff" || r.Status != Idle || r.Title != "Fix the captcha" || r.CreatedAt != 9 {
+		t.Fatalf("stopped background row: %+v", r)
+	}
+	if r := byName["bg-aaaaaaaa"]; r.Status != Error {
+		t.Fatalf("failed background row: %+v", r)
+	}
+	if rows, _ := st.Live(); len(rows) != 0 {
+		t.Fatalf("background rows must not be stored: %+v", rows)
+	}
+}
+
+func TestAgentStatus(t *testing.T) {
+	for state, want := range map[string]Status{"blocked": NeedsYou, "working": Running, "done": Idle,
+		"stopped": Idle, "failed": Error, "": Unknown, "new-word": Unknown} {
+		if got := agentStatus(state); got != want {
+			t.Errorf("agentStatus(%q) = %s, want %s", state, got, want)
 		}
 	}
 }

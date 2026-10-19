@@ -68,7 +68,12 @@ func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *s
 	a := &App{engine: engine, tm: tm, st: st, launcher: launcher, projects: svc, now: now, notifier: newNotifier()}
 	// Until startup() wires the real emitter, events go nowhere (safe for tests).
 	a.reg = newPTYRegistry(
-		func(name string) *exec.Cmd { return tm.AttachCmd(name) },
+		func(name string) *exec.Cmd {
+			if id, ok := backgroundJobID(name); ok {
+				return backgroundAttachCmd(id)
+			}
+			return tm.AttachCmd(name)
+		},
 		func(event string, data ...any) {
 			if a.ctx != nil {
 				wruntime.EventsEmit(a.ctx, event, data...)
@@ -182,6 +187,9 @@ func (a *App) SendReply(name, text string) error {
 	}
 	if strings.TrimSpace(text) == "" {
 		return fmt.Errorf("empty reply")
+	}
+	if _, ok := backgroundJobID(name); ok {
+		return fmt.Errorf("a background session has no pane to reply into; attach to it")
 	}
 	if err := a.tm.SendLiteral(name, text); err != nil {
 		return err
@@ -315,6 +323,9 @@ func (a *App) maybeAutoSummarize(rows []store.SessionRow, res *projects.Resolver
 
 // KillSession terminates a live tmux session (a running/needs-you agent).
 func (a *App) KillSession(name string) error {
+	if id, ok := backgroundJobID(name); ok {
+		return stopBackground(id)
+	}
 	if a.tm == nil {
 		return fmt.Errorf("tmux unavailable")
 	}
