@@ -113,6 +113,7 @@ frontend.
 | `taskfile` | Read the hooks' task file and checkpoint | Finish line (status, Done-when ticks, outcome, `Started:` time, the stop guard's `.verified` marker) and hand-over age per session; stat-cached per poll. |
 | `diet` | The context-diet report: plugins at user scope, MCP servers and connectors per project, commands to copy | Pure and read-only over Claude's own files; `diet/fromstore` is its only tie to loom.db. Nothing is applied. |
 | `hooklog` | Read the hooks' decision and allow logs | Incremental `(inode, offset)` reader with truncation restart; legacy dirs read once. Per session: holds, nudges, the held group, the last stop verdict. Per hook: rates split at change marks (ledger, or inferred from `rev` transitions and old edit times), never summed across a mark. Test re-runs per project. |
+| `rules` | Rules from repeated failures: hook holds and transcript tool errors mined into proposals, the adopted-rules file's format (parse, add, renew, remove) | Pure; `discipline.PlanRule`/`ApplyRule` write a reviewed change; §5.5. |
 
 **External sessions.** Every live registry entry that is not in a loom pane (a
 `claude` started in some terminal) is shown as an `ext-<id>` row: status from
@@ -412,6 +413,40 @@ Nothing is recorded in the transcript. Phone alerts are claude's own: its
 `inputNeededNotifEnabled` setting ("push to mobile when a permission prompt
 or question is waiting"), set in `/config`, which also tells the account;
 loom points to it rather than writing it. Verified on 2.1.303.
+
+### 5.5 Rules from repeated failures (`internal/rules`)
+
+The Agent Discipline island's Rules tab turns failures that keep repeating
+into proposed rules. The evidence is what loom already reads: every hold in
+the hook logs plus test re-runs with no change (`rules.FromHooks`), and the
+tool calls that returned an error in the last 30 days of transcripts
+(`rules.ScanErrors`, a byte test for `"is_error":true` and then a second
+pass for the failing tools' names only when a file has any; the GUI caches
+each file's events by size and mtime). An error is reduced to its first line
+without paths or numbers, so one failure on many files counts once. Left out:
+a Bash command's own non-zero exit (a failing test is work), the user
+declining a call, interruptions, the permission classifier, model outages,
+and the hooks' own denials, which the hook log already counts. A failure
+becomes a proposal at 5 times in 3 or more sessions within 14 days; hook
+holds count only from the last hook change (§D10 of docs/DISCIPLINE.md).
+Hide/solo applies by each failure's cwd. Loom offers a draft wording for the
+holds the bundled hooks make and for the common tool errors; otherwise the
+person writes it.
+
+Adopted rules live in `<ccd>/discipline/rules.md`, beside the revisions but
+never inside one, and `CLAUDE.md` imports the file with `@discipline/rules.md`,
+added with the first rule. Each rule is a list item followed by
+`Why: … · since <adopted> · lapses <day> · key <failure>`. Loom parses only
+items with that line, so the person's own text in the file is left alone.
+Adopt, renew and drop are planned first (`discipline.PlanRule`: the diffs and
+a token that fingerprints both files). `ApplyRule` re-plans under the install
+lock and refuses if the token moved. It then backs up the files, writes them
+atomically and appends a ledger entry with op `rule`. Rules change what the
+agent is told, not the hooks, so a rule is not a change mark for the rates. An
+adopted rule shows how often its failure happened since adoption and in the
+14 days before. A lapsed one is flagged and offered for renewal or removal;
+nothing is applied or removed automatically. Changing a hook's behaviour stays
+a bundle revision through the install gate.
 
 ## 6. Data model (`~/.loom/loom.db`)
 

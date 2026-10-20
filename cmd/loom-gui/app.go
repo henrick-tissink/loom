@@ -40,6 +40,10 @@ type App struct {
 	// that do not set one.
 	hooks *hookState
 
+	// rules proposes and applies rules from repeated failures (rules.go);
+	// nil in tests that do not set one.
+	rules *rulesState
+
 	// briefs writes and keeps project study briefs (brief.go); nil in tests
 	// that do not set one.
 	briefs *briefState

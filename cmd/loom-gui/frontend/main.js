@@ -2769,9 +2769,11 @@ function discFileRows(d) {
     </li>`).join("")}</ul>`;
 }
 
-// ---- Rates and Re-runs tabs (phase 4): the hooks' own logs ----
+// ---- Rates, Re-runs and Rules tabs: the hooks' own logs, and rules
+// proposed from failures that repeat ----
+const DISC_TABS = { checks: "Checks", rates: "Rates", reruns: "Re-runs", rules: "Rules" };
 let discTab = "checks";
-try { const v = localStorage.getItem("loom.discTab"); if (["checks", "rates", "reruns"].includes(v)) discTab = v; } catch { /* storage off */ }
+try { const v = localStorage.getItem("loom.discTab"); if (v in DISC_TABS) discTab = v; } catch { /* storage off */ }
 let discWindow = "change"; // change | 7d | 30d | all
 
 function fmtPct(n, of) {
@@ -2842,6 +2844,7 @@ function rerunsHtml(dto) {
 async function renderDiscTab() {
   const el = document.getElementById("dsc-tab");
   if (!el) return;
+  if (discTab === "rules") return renderRulesTab(el);
   const fn = bound(discTab === "rates" ? "HookRates" : "HookReruns");
   if (!fn) { el.innerHTML = `<div class="po-empty">Not available in this build.</div>`; return; }
   let dto;
@@ -2850,6 +2853,127 @@ async function renderDiscTab() {
   el.innerHTML = discTab === "rates" ? ratesHtml(dto) : rerunsHtml(dto);
   for (const b of el.querySelectorAll("#dsc-win .seg-b")) b.addEventListener("click", () => { discWindow = b.dataset.win; renderDiscTab(); });
   for (const b of el.querySelectorAll(".dsc-cmds")) b.addEventListener("click", (e) => { e.stopPropagation(); const l = b.parentElement.querySelector(".dsc-cmdlist"); if (l) l.hidden = !l.hidden; });
+}
+
+// The Rules tab: failures that repeat become proposed rules; adopting,
+// renewing or dropping one goes through a sheet that shows the diff, and
+// only its Apply writes. A lapsed rule is flagged, never removed by loom.
+let rulesDto = null;
+
+async function renderRulesTab(el) {
+  const fn = bound("RuleProposals");
+  if (!fn) { el.innerHTML = `<div class="po-empty">Not available in this build.</div>`; return; }
+  el.innerHTML = `<div class="po-empty">Reading the hook logs and the last month of transcripts…</div>`;
+  let dto;
+  try { dto = await fn(); } catch (e) { el.innerHTML = `<div class="modal-error">${esc(String(e))}</div>`; return; }
+  if (stageView.kind !== "discipline" || discTab !== "rules" || document.getElementById("dsc-tab") !== el) return;
+  rulesDto = dto;
+  el.innerHTML = rulesHtml(dto);
+  for (const b of el.querySelectorAll(".dsc-cmds")) b.addEventListener("click", (e) => { e.stopPropagation(); const l = b.parentElement.querySelector(".dsc-cmdlist"); if (l) l.hidden = !l.hidden; });
+  for (const b of el.querySelectorAll("[data-rule-op]")) b.addEventListener("click", () => openRuleSheet(b.dataset.ruleOp, Number(b.dataset.i)));
+}
+
+function rulesHtml(dto) {
+  const home = (dto.path || "").match(/^\/Users\/[^/]+|^\/home\/[^/]+/);
+  const short = (p) => home ? p.replace(home[0], "~") : p;
+  const ago = (ts) => fmtAge(Math.max(0, Math.floor((Date.now() - new Date(ts).getTime()) / 1000))) + " ago";
+  const props = dto.proposals.map((p, i) => `
+    <li class="po-repo dsc-rerun">
+      <span class="po-rlabel">${esc(p.title)}</span>
+      <span class="dsc-num hold"><b>${p.count}</b> times</span>
+      <span class="dsc-num"><b>${p.sessions}</b> sessions</span>
+      <span class="dsc-num">last <b>${esc(ago(p.last))}</b></span>
+      ${p.samples.length ? `<button class="tact dsc-cmds">evidence</button>` : ""}
+      <button class="tact" data-rule-op="adopt" data-i="${i}">Adopt…</button>
+      <div class="po-rpath dsc-top">${esc(p.projects.map(short).join(" · "))}</div>
+      <div class="dsc-cmdlist" hidden>${p.samples.map((c) => `<code>${esc(c)}</code>`).join("")}</div>
+    </li>`).join("");
+  const adopted = dto.rules.map((r, i) => `
+    <li class="po-repo dsc-rerun">
+      <span class="po-rlabel">${esc(r.text)}</span>
+      <span class="po-tag${r.lapsed ? " dsc-lapsed" : ""}" title="Adopted ${esc(r.since)}">${r.lapsed ? "lapsed" : "until"} ${esc(r.lapses)}</span>
+      <span class="dsc-num${r.after ? " hold" : ""}"><b>${r.after}</b> since adopted${r.after ? ` <small>${r.afterSessions} sessions</small>` : ""}</span>
+      <span class="dsc-num"><b>${r.before}</b> in the 14 days before</span>
+      <button class="tact" data-rule-op="renew" data-i="${i}">Renew…</button>
+      <button class="tact" data-rule-op="drop" data-i="${i}">Drop…</button>
+      <div class="po-rpath dsc-top">${esc(r.why)}</div>
+    </li>`).join("");
+  const hook = dto.hookSince ? `; hook holds since the last hook change, ${esc(fmtTS(dto.hookSince * 1000))}` : "";
+  return (dto.err ? `<div class="modal-error">${esc(dto.err)}</div>` : "") +
+    `<p class="po-empty">A failure is proposed when it happened at least 5 times in 3 or more sessions in the last 14 days${hook}. Sources: hook holds, test re-runs with no change, and tool errors in ${dto.scanned} transcripts${dto.hidden ? " · hidden projects' failures left out" : ""}.</p>` +
+    `<section class="po-block"><div class="po-bhead"><h3>Proposed</h3></div>${props ? `<ul class="po-list">${props}</ul>` : `<div class="po-empty">Nothing repeats often enough to propose a rule.</div>`}</section>` +
+    `<section class="po-block"><div class="po-bhead"><h3>Adopted</h3><span class="po-empty">${esc(short(dto.path))}, imported from CLAUDE.md</span></div>${adopted ? `<ul class="po-list">${adopted}</ul>` : `<div class="po-empty">No rules adopted yet.</div>`}</section>` +
+    `<p class="po-empty">Nothing is written until you review a change's diff and apply it. Loom never removes a lapsed rule: renew it or drop it.</p>`;
+}
+
+// openRuleSheet: adopt (edit the wording and the lapse day), renew (a new
+// lapse day) or drop. Review plans the change and shows its diff; Apply is
+// enabled only for the plan on screen, and any edit after it disables Apply
+// until it is reviewed again.
+async function openRuleSheet(op, i) {
+  if (document.querySelector(".modal-backdrop") || !rulesDto) return;
+  const planFn = bound("RulePlan"), applyFn = bound("RuleApply");
+  if (!planFn || !applyFn) return;
+  const item = op === "adopt" ? rulesDto.proposals[i] : rulesDto.rules[i];
+  if (!item) return;
+  const titles = { adopt: "Adopt a rule", renew: "Renew a rule", drop: "Drop a rule" };
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal disc-sheet" role="dialog" aria-label="${titles[op]}">
+      <h2>${titles[op]}</h2>
+      <div class="dsc-sheet-body">
+        ${op === "adopt" ? `
+          <p class="po-empty">${esc(item.why)}</p>
+          <div class="field"><label for="rs-text">Rule</label><textarea id="rs-text" spellcheck="false" placeholder="Loom has no wording for this one: write the rule the agent should follow.">${esc(item.draft)}</textarea></div>` : `
+          <p class="dsc-headline">${esc(item.text)}</p><p class="po-empty">${esc(item.why)} · adopted ${esc(item.since)}</p>`}
+        ${op !== "drop" ? `<div class="field"><label for="rs-lapses">Lapses after</label><input id="rs-lapses" type="date" value="${esc(rulesDto.lapse)}"></div>` : ""}
+        <div id="rs-diff"></div>
+      </div>
+      <div class="modal-error" id="rs-error"></div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="rs-cancel">Cancel</button>
+        <button class="btn-launch" id="rs-review">Review</button>
+        <button class="btn-launch" id="rs-apply" disabled title="Enabled once the change is reviewed">Apply</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const $ = (id) => backdrop.querySelector("#" + id);
+  const errEl = $("rs-error"), diffEl = $("rs-diff"), applyBtn = $("rs-apply"), reviewBtn = $("rs-review");
+  let plan = null, busy = false;
+  const close = () => { if (busy) return; document.removeEventListener("keydown", onEsc, true); backdrop.remove(); };
+  const onEsc = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onEsc, true);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  $("rs-cancel").addEventListener("click", close);
+  const change = () => ({ op, key: item.key, text: op === "adopt" ? $("rs-text").value.trim() : "", why: op === "adopt" ? item.why : "", lapses: op !== "drop" ? $("rs-lapses").value : "" });
+  const invalidate = () => { plan = null; applyBtn.disabled = true; diffEl.innerHTML = ""; };
+  for (const id of ["rs-text", "rs-lapses"]) { const el = $(id); if (el) el.addEventListener("input", invalidate); }
+  const review = async () => {
+    errEl.textContent = "";
+    invalidate();
+    try { plan = await planFn(change()); } catch (e) { errEl.textContent = String(e); return; }
+    diffEl.innerHTML = plan.files.map((f) => `<section class="po-block"><div class="po-bhead"><h3>${esc(f.path)}</h3></div><div class="diff-patch">${renderPatch(f.diff)}</div></section>`).join("");
+    applyBtn.disabled = false;
+  };
+  reviewBtn.addEventListener("click", review);
+  applyBtn.addEventListener("click", async () => {
+    if (!plan || busy) return;
+    busy = true;
+    applyBtn.disabled = true;
+    errEl.textContent = "";
+    try {
+      const msg = await applyFn(plan.change, plan.token);
+      busy = false;
+      close();
+      // The ledger grew, so the island re-renders (and this tab with it);
+      // the message goes in after, or the re-render would wipe it.
+      await discPoll(true);
+      flashDisc(msg);
+    } catch (e) { busy = false; errEl.textContent = String(e); invalidate(); }
+  });
+  if (op === "drop") review();
+  else ($("rs-text") || $("rs-lapses")).focus();
 }
 
 // ---- per-session: finish-line marks, the held chip, the hooks panel ----
@@ -2945,7 +3069,7 @@ function renderDiscipline() {
     <div class="po" id="dsc-root">
       <div class="modal-error" id="dsc-error"></div>
       <p class="dsc-headline">${esc(d.headline)}</p>
-      <div class="seg dsc-tabs" id="dsc-tabs">${["checks", "rates", "reruns"].map((t) => `<button class="seg-b${discTab === t ? " active" : ""}" data-tab="${t}">${{ checks: "Checks", rates: "Rates", reruns: "Re-runs" }[t]}</button>`).join("")}</div>
+      <div class="seg dsc-tabs" id="dsc-tabs">${Object.entries(DISC_TABS).map(([t, l]) => `<button class="seg-b${discTab === t ? " active" : ""}" data-tab="${t}">${l}</button>`).join("")}</div>
       <div id="dsc-tab" class="dsc-tab">${discTab === "checks" ? discChecksHtml(d) : `<div class="po-empty">Loading…</div>`}</div>
     </div>`;
   for (const b of stage.querySelectorAll("#dsc-tabs .seg-b")) b.addEventListener("click", () => { discTab = b.dataset.tab; try { localStorage.setItem("loom.discTab", discTab); } catch { /* storage off */ } renderDiscipline(); });

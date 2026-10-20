@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -59,7 +60,7 @@ type ReceiptClaudeMD struct {
 // marks the reports split on.
 type LedgerEntry struct {
 	TS      time.Time         `json:"ts"`
-	Op      string            `json:"op"` // setup | upgrade | uninstall | reset | keep | restore
+	Op      string            `json:"op"` // setup | upgrade | uninstall | reset | keep | restore | rule
 	FromRev string            `json:"fromRev,omitempty"`
 	ToRev   string            `json:"toRev,omitempty"`
 	Backup  string            `json:"backup,omitempty"`
@@ -157,6 +158,13 @@ func ReadLedger(l Layout) ([]LedgerEntry, error) {
 // twenty. Returns the directory ("" when nothing existed to back up).
 func Backup(l Layout, op string, now time.Time, paths ...string) (string, error) {
 	dir := filepath.Join(l.BackupsDir(), now.Format("20060102-150405")+"-"+op)
+	// Two writes in one second (two rule changes) each keep their own copy.
+	for i, base := 2, dir; ; i++ {
+		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		dir = fmt.Sprintf("%s-%d", base, i)
+	}
 	made := false
 	origins := map[string]string{} // backup name → original path
 	for _, p := range paths {
@@ -223,7 +231,11 @@ func ListBackups(l Layout) []string {
 func RestoreBackup(l Layout, name string, now time.Time) ([]string, error) {
 	var dir string
 	for _, n := range ListBackups(l) {
-		if n == name || strings.HasPrefix(n, name+"-") || strings.HasPrefix(n, name) {
+		if n == name { // an exact name wins over a longer one it prefixes
+			dir = filepath.Join(l.BackupsDir(), n)
+			break
+		}
+		if strings.HasPrefix(n, name+"-") || strings.HasPrefix(n, name) {
 			dir = filepath.Join(l.BackupsDir(), n)
 		}
 	}
@@ -274,15 +286,26 @@ func pruneBackups(dir string, keep int) {
 	if err != nil {
 		return
 	}
-	var names []string
+	// Rule changes are kept apart from the rest, so a run of them never
+	// prunes the backup a setup made of the person's original files.
+	var rule, other []string
 	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
+		if !e.IsDir() {
+			continue
+		}
+		if ruleBackupRe.MatchString(e.Name()) {
+			rule = append(rule, e.Name())
+		} else {
+			other = append(other, e.Name())
 		}
 	}
-	sort.Strings(names)
-	for len(names) > keep {
-		os.RemoveAll(filepath.Join(dir, names[0]))
-		names = names[1:]
+	for _, names := range [][]string{rule, other} {
+		sort.Strings(names)
+		for len(names) > keep {
+			os.RemoveAll(filepath.Join(dir, names[0]))
+			names = names[1:]
+		}
 	}
 }
+
+var ruleBackupRe = regexp.MustCompile(`^\d{8}-\d{6}-rule(-\d+)?$`)

@@ -111,6 +111,7 @@ func run() error {
 			return &rep
 		}
 		app.hooks = newHookState(l)
+		app.rules = newRulesState(l)
 	}
 	app.applyClaudeTheme() // match Claude's theme to the terminal
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}

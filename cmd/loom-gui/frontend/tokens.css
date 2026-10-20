@@ -773,6 +773,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .disc-sheet { width: min(720px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
 .dsc-sheet-body { overflow-y: auto; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
 #dsc-patch { white-space: pre; overflow: auto; max-height: 320px; }
+#rs-diff { display: flex; flex-direction: column; gap: 10px; }
+#rs-diff .diff-patch { white-space: pre; overflow: auto; max-height: 260px; }
+.dsc-lapsed { color: var(--st-error); background: var(--bad-bg); }
+.field input[type="date"] { font: inherit; }
 
 /* hooks: finish-line marks, held chip, hooks panel, rates and re-runs tabs */
 .tmark { font-weight: 700; }
