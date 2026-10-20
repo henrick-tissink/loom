@@ -1033,3 +1033,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .jb-out pre { margin: 0; height: 160px; overflow: auto; padding: 8px; border-radius: 6px; background: var(--inset); color: var(--text); font-family: var(--font-mono); font-size: var(--t-small); line-height: 1.4; white-space: pre-wrap; word-break: break-all; }
 .review-modal .field textarea.sc-text { min-height: 90px; }
 .review-sub code { font-family: var(--font-mono); }
+
+/* Best of N: the compare view's attempt cards and aligned file rows. */
+.bo { gap: 12px; }
+.bo-grid { display: grid; gap: 10px; }
+.bo-card { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 8px; background: var(--inset); min-width: 0; }
+.bo-title { display: flex; align-items: center; gap: 8px; }
+.bo-meta { font-size: var(--t-small); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bo-acts { display: flex; gap: 6px; margin-top: 4px; }
+.bo-st { font-size: var(--t-small); }
+.bo-file .bo-grid { margin-top: 6px; }
+.bo-cell { min-width: 0; overflow: auto; max-height: 60vh; }
+.bo-cell .diff-patch { margin: 0; }
+.bo-none { color: var(--text-faint); font-size: var(--t-small); padding: 8px; }
+.bo-seed pre { white-space: pre-wrap; font-family: var(--font-mono); font-size: var(--t-small); background: var(--inset); padding: 8px; border-radius: 6px; margin: 6px 0 0; }
+.bo-seed summary { cursor: pointer; color: var(--text-dim); font-size: var(--t-small); }
+.bo-lose { margin: 8px 0; padding-left: 18px; }
+.f-hint { font-size: var(--t-small); color: var(--text-dim); margin-top: 4px; }

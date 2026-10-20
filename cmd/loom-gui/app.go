@@ -48,6 +48,10 @@ type App struct {
 	// jobs (scripts.go); nil in tests that do not set one.
 	scripts *scriptsState
 
+	// bestof holds the best-of-N groups (bestof.go); nil in tests that do
+	// not set one.
+	bestof *bestofState
+
 	// briefs writes and keeps project study briefs (brief.go); nil in tests
 	// that do not set one.
 	briefs *briefState
@@ -135,7 +139,9 @@ func (a *App) ListSessions() (out []SessionDTO) {
 	if a.scripts != nil {
 		a.scripts.setJobs(snap.Jobs)
 	}
+	places := a.bestof.places()
 	for i := range out {
+		out[i].BestOf = placeDTO(places, out[i].Name)
 		out[i].Worktree = a.wt.info(out[i].Cwd, false)
 		out[i].PR = a.prs.info(out[i].Cwd, a.transcriptFor(out[i].Cwd, ids[out[i].Name]), true)
 		out[i].Jobs = a.scripts.info(out[i].Cwd)
@@ -295,7 +301,9 @@ func (a *App) ListRecent() []FinishedDTO {
 		out = out[:recentLimit]
 	}
 	// after the trim: git runs only for rows that reach the screen
+	places := a.bestof.places()
 	for i := range out {
+		out[i].BestOf = placeDTO(places, out[i].Name)
 		cwd := cwds[out[i].Name]
 		out[i].Worktree = a.wt.info(cwd, true)
 		out[i].PR = a.prs.info(cwd, a.transcriptFor(cwd, sids[out[i].Name]), false)

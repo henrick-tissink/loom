@@ -74,6 +74,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.loom/loom.db` | Loom (rw) | sessions, projects, transcripts index, FTS |
 | `~/.loom/settings.json` | GUI (rw, atomic) | editor, notifications, auto-summarize, theme (dark default) |
 | `~/.loom/scripts.json` | GUI (rw, atomic) | each project's setup and run scripts, and each workspace's port block (§5.6) |
+| `~/.loom/bestof.json` | GUI (rw, atomic) | best-of-N groups: repo, base commit, seed, attempts, the kept one (§4.5) |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status, kind and background job id |
 | `claude agents --json --all` | Claude (Loom: runs it, read-only) | background sessions, including the ones the supervisor has stopped |
@@ -146,6 +147,7 @@ no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `forge` | A branch's GitHub PR or GitLab MR, its CI and review state and open review feedback (composed into a prompt), through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
 | `usage` | Plan rate-limit windows from the opt-in status-line tap, token totals from transcripts | Writes settings.json only on the explicit Track / Stop click, after a backup; §5.2. |
 | `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
+| `bestof` | Best-of-N groups (the same seed launched as 2–3 worktree sessions) | Only the group file; each attempt's change comes from `gitdiff.Against`, its removal from `worktree.Discard`; §4.5. |
 | `scripts` | A project's setup and run scripts, each workspace's port block (with a free check on both loopbacks), job names and the job's command line | The scripts are the person's, kept in `~/.loom/scripts.json`; nothing reads or writes a repo config; §5.6. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
@@ -283,6 +285,36 @@ Seed outcome is never silently dropped: `seed_status` is written `sent` or
   closing a tab kills only the attach client.
 
 ---
+
+### 4.5 Best of N
+
+The launcher's **Attempts** field starts one seed as two or three worktree
+sessions (`App.LaunchBestOf`), half a second apart so their claudes don't
+create worktrees in the same instant. A seed is required: it is what the
+attempts are compared on. The group, in `~/.loom/bestof.json`, records the
+repository's HEAD at launch as the base. A group is forgotten at startup
+once all its rows have been dismissed. Each attempt's row carries a
+"best of N · k" pill that opens the compare view.
+
+`BestOfCompare` reads every attempt fresh with `gitdiff.Against(worktree,
+start)`: one patch from the merge-base of start and the attempt's HEAD to
+its working tree, covering commits, uncommitted changes, and new files'
+contents (up to 200 files of at most 256 KiB each). start is where the
+attempt's branch was created (the oldest entry of its reflog), because
+claude may cut it from somewhere other than the local HEAD. The group's base
+is the fallback when there is no reflog. The view aligns files in rows, one
+column per attempt. Nothing judges the attempts.
+
+`KeepBestOf` keeps one attempt and discards the rest. For each, it kills the
+session and its setup/run jobs, then calls `worktree.Discard`: `git worktree
+remove --force` after releasing the lock of a claude that has exited
+(retried for up to 10 s while the killed claude exits). The session is
+stopped even when its worktree does not exist yet, so an attempt kept
+away early cannot go on to create one. A Keep that could not discard every
+attempt says which, and the view offers to try again. Branches are kept, so
+committed work survives; uncommitted changes and new files are lost, and the
+GUI's confirm names them per attempt. The kept attempt is not touched, and a
+group can keep only one.
 
 ## 5. Status: how Loom knows what a session is doing
 

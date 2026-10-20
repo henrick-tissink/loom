@@ -113,3 +113,35 @@ func TestRemoveLocks(t *testing.T) {
 		t.Fatal("a non-worktree path must be refused")
 	}
 }
+
+func TestDiscard(t *testing.T) {
+	ctx := context.Background()
+	orig := pidAlive
+	t.Cleanup(func() { pidAlive = orig })
+
+	repo, root := newWorktree(t)
+	os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644)
+	run(t, root, "add", "f.txt")
+	run(t, root, "commit", "-q", "-m", "attempt")
+	os.WriteFile(filepath.Join(root, "uncommitted.txt"), []byte("y"), 0o644)
+	run(t, repo, "worktree", "lock", "--reason", "claude session loom-1a2b3c4d (pid 4242 start now)", root)
+	pidAlive = func(int) bool { return true }
+	if err := Discard(ctx, root); err == nil || !strings.Contains(err.Error(), "running claude") {
+		t.Fatalf("live claude: %v", err)
+	}
+	pidAlive = func(int) bool { return false }
+	if err := Remove(ctx, root); err == nil {
+		t.Fatal("Remove should still refuse a worktree with work in it")
+	}
+	if err := Discard(ctx, root); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatal("the worktree is still there")
+	}
+	// The branch, and the commit on it, are kept.
+	run(t, repo, "rev-parse", "--verify", "worktree-loom-1a2b3c4d")
+	if err := Discard(ctx, root); err == nil {
+		t.Fatal("discarding a gone worktree should say so")
+	}
+}

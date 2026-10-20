@@ -92,6 +92,12 @@ When a session's task file is open and has Done-when checks, and the session is 
 
 `tab`/`shift-tab` move fields · `↵` launches · `esc` cancels. The seed is delivered only once Claude's input box is actually ready (and never fired into a first-run trust dialog).
 
+### Best of N
+
+Set **Attempts** to *Best of 2* or *Best of 3* in the launcher to run the same seed in that many worktrees at once. A seed is required, and the worktree option is switched on for you. Each attempt's row shows **best of N · k**. Click it to compare the attempts side by side: each one's status, branch and commit count, with every file any attempt touched in rows across the columns. This shows everything since they started: commits, uncommitted changes and new files. **Refresh** rereads them.
+
+**Keep this one** shows what will be lost, then stops the other attempts and deletes their worktrees. Their branches stay, so anything they committed is still there (`git branch -D` removes them). The attempt you keep is left exactly as it is; merging it is up to you.
+
 ### Setup and run scripts
 
 Right-click a project and choose **Scripts…** to give it a **setup** script and a **run** script. Both run in your login shell. They are kept in loom, not in the repository.
@@ -178,6 +184,7 @@ Adopted rules show how often their failure happened since you adopted them, agai
 | Usage tap (when on) | `~/.loom/usage/` (the script and the last status line capture) |
 | Adopted rules | `~/.claude/discipline/rules.md` (imported from `~/.claude/CLAUDE.md`) |
 | Setup and run scripts, port blocks | `~/.loom/scripts.json`; the jobs run on tmux `-L loom` as `loomjob-…` |
+| Best-of-N groups | `~/.loom/bestof.json` |
 | Sessions | tmux server `-L loom` (`tmux -L loom list-sessions` to inspect raw) |
 | Transcripts (Claude's own, read-only to Loom) | `~/.claude/projects/…` |
 

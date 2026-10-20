@@ -102,6 +102,15 @@ func run() error {
 	} else {
 		app.scripts = sc
 	}
+	if bo, err := newBestofState(cfg.LoomDir); err != nil {
+		fmt.Fprintln(os.Stderr, "loom-gui: best of N:", err)
+	} else {
+		// A group whose rows have all been dismissed is forgotten.
+		if err := bo.store.Prune(func(n string) bool { _, ok, err := st.Get(n); return ok || err != nil }); err != nil {
+			fmt.Fprintln(os.Stderr, "loom-gui: best of N:", err)
+		}
+		app.bestof = bo
+	}
 	if home, err := os.UserHomeDir(); err == nil {
 		l := discipline.NewLayout(cfg.ClaudeConfigDir, home, os.Getenv("CLAUDE_STATE_DIR"))
 		app.disc = newDisciplineState(l, time.Now)

@@ -59,6 +59,8 @@ type SessionDTO struct {
 	// Jobs are the workspace's setup and run scripts, when its project has
 	// any (scripts.go).
 	Jobs *JobsDTO `json:"jobs,omitempty"`
+	// BestOf is the session's place in a best-of-N group (bestof.go).
+	BestOf *BestOfDTO `json:"bestOf,omitempty"`
 	// PR is the pull or merge request for the branch the session last
 	// worked on (its transcript's gitBranch), when there is one.
 	PR *PRDTO `json:"pr,omitempty"`
@@ -153,6 +155,8 @@ type FinishedDTO struct {
 	// Jobs are the workspace's setup and run scripts, when its project has
 	// any (scripts.go).
 	Jobs *JobsDTO `json:"jobs,omitempty"`
+	// BestOf is the session's place in a best-of-N group (bestof.go).
+	BestOf *BestOfDTO `json:"bestOf,omitempty"`
 	// PR is the pull or merge request for the branch the session last
 	// worked on (its transcript's gitBranch), when there is one.
 	PR *PRDTO `json:"pr,omitempty"`

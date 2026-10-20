@@ -134,3 +134,42 @@ func contains(s []string, v string) bool {
 	}
 	return false
 }
+
+func TestAgainst(t *testing.T) {
+	repo := initRepo(t)
+	write(t, repo, "a.txt", "one\n")
+	run(t, repo, "add", "a.txt")
+	run(t, repo, "commit", "-q", "-m", "a")
+	base := run(t, repo, "rev-parse", "HEAD")
+	wt := filepath.Join(t.TempDir(), "wt")
+	run(t, repo, "worktree", "add", "-q", "-b", "attempt", wt)
+
+	// The attempt commits one change, leaves one uncommitted, adds a file.
+	write(t, wt, "a.txt", "one\ntwo\n")
+	run(t, wt, "commit", "-qam", "two")
+	write(t, wt, "a.txt", "one\ntwo\nthree\n")
+	write(t, wt, "new/b.txt", "brand new\n")
+	// main moves on after the attempt was cut; that is not the attempt's work.
+	write(t, repo, "main-only.txt", "x\n")
+	run(t, repo, "add", "main-only.txt")
+	run(t, repo, "commit", "-q", "-m", "main moves")
+	head := run(t, repo, "rev-parse", "HEAD")
+
+	for _, b := range []string{base, head} {
+		d := Against(wt, b)
+		if d.Error != "" || !d.Dirty || d.Commits != 1 {
+			t.Fatalf("Against(%s): %+v", b, d)
+		}
+		for _, want := range []string{"+two", "+three", "diff --git a/new/b.txt b/new/b.txt", "+brand new"} {
+			if !strings.Contains(d.Patch, want) {
+				t.Errorf("base %s: patch lacks %q:\n%s", b[:7], want, d.Patch)
+			}
+		}
+		if strings.Contains(d.Patch, "main-only") {
+			t.Errorf("base %s: main's own commit leaked into the attempt", b[:7])
+		}
+	}
+	if d := Against(wt, "nosuchref"); d.Error == "" {
+		t.Fatal("a bad base gave no error")
+	}
+}

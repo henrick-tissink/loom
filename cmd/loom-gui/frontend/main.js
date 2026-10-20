@@ -615,6 +615,166 @@ async function openScriptsEditor(root) {
   setup.focus();
 }
 
+// bestOfTag marks an attempt in a best-of-N group: which one of how many,
+// and which was kept. Clicking it opens the compare view.
+function bestOfTag(s) {
+  const b = s.bestOf;
+  if (!b) return "";
+  const kept = b.kept === s.name;
+  const word = kept ? `kept · best of ${b.of}` : `best of ${b.of} · ${b.index}`;
+  const tip = `Attempt ${b.index} of ${b.of} on the same seed${kept ? "; the one you kept" : b.kept ? "; another attempt was kept" : ""}\nClick to compare them side by side`;
+  return `<span class="tpill ${kept ? "tpill-ok" : "tpill-ext"}" data-bestof="${esc(b.group)}" title="${esc(tip)}">${esc(word)}</span>`;
+}
+document.addEventListener("click", (e) => {
+  const p = e.target.closest && e.target.closest(".tpill[data-bestof]");
+  if (!p) return;
+  e.stopPropagation();
+  e.preventDefault();
+  openBestOf(p.dataset.bestof);
+}, true);
+
+// The compare view: one column per attempt, files aligned in rows, each
+// attempt's whole change since the group's base (commits, uncommitted
+// changes, new files). Read fresh on open, on Refresh and after a Keep.
+let bestOf = null; // { id, data, err, busy }
+
+function openBestOf(id) {
+  teardownTerminal();
+  activeName = null;
+  stageView = { kind: "bestof", id };
+  bestOf = { id, data: null, err: "", busy: true };
+  renderBestOf();
+  renderRail();
+  loadBestOf();
+}
+
+async function loadBestOf() {
+  const id = bestOf && bestOf.id;
+  if (!id) return;
+  bestOf.busy = true;
+  renderBestOf();
+  try {
+    const d = await window.go.main.App.BestOfCompare(id);
+    if (!bestOf || bestOf.id !== id) return;
+    bestOf.data = d;
+    bestOf.err = "";
+  } catch (e) {
+    if (bestOf && bestOf.id === id) bestOf.err = String(e);
+  }
+  if (bestOf && bestOf.id === id) { bestOf.busy = false; renderBestOf(); }
+}
+
+// boRow is an attempt's live or finished row, for its status.
+function boRow(name) {
+  return latestSessions.find((x) => x.name === name) || latestRecent.find((x) => x.name === name) || null;
+}
+
+function boStatusHtml(name) {
+  const s = boRow(name);
+  if (!s) return `<span class="bo-st">no row</span>`;
+  return `<span class="bo-st" style="color:${statusColor(s.status)}">${esc(statusWord(s.status))}</span>`;
+}
+
+// boStatuses refreshes only the attempts' statuses on each poll, leaving the
+// diffs (and the reader's scroll position) alone.
+function boStatuses() {
+  if (stageView.kind !== "bestof") return;
+  document.querySelectorAll("[data-bo-st]").forEach((el) => {
+    const html = boStatusHtml(el.dataset.boSt);
+    if (el.innerHTML !== html) el.innerHTML = html;
+  });
+}
+
+function renderBestOf() {
+  const stage = document.getElementById("stage");
+  if (!stage || stageView.kind !== "bestof" || !bestOf) return;
+  const d = bestOf.data;
+  const head = `<div id="stage-header" class="stage-head po-head"><span class="sh-name">Best of ${d ? d.attempts.length : "N"}</span>
+    <button class="sh-btn" id="bo-refresh"${bestOf.busy ? " disabled" : ""}>${bestOf.busy ? "Reading…" : "Refresh"}</button></div>`;
+  if (!d) {
+    stage.innerHTML = head + `<div class="po"><div class="modal-error">${esc(bestOf.err)}</div>${bestOf.err ? "" : `<div class="po-empty">Reading the attempts…</div>`}</div>`;
+    wireBestOf(stage);
+    return;
+  }
+  const at = d.attempts;
+  const cols = `grid-template-columns: repeat(${at.length}, minmax(0, 1fr))`;
+  const card = (a, i) => {
+    const s = boRow(a.name);
+    const files = (a.diff.files || []).length + (a.diff.untracked || []).length;
+    let add = 0, del = 0;
+    for (const f of splitPatchByFile(a.diff.patch || "")) { const c = patchCounts(f.body); add += c.add; del += c.del; }
+    const kept = d.kept === a.name;
+    const badge = kept ? `<span class="tpill tpill-ok">kept</span>` : a.discarded ? `<span class="tpill tpill-ext">discarded</span>` : a.gone ? `<span class="tpill tpill-bad">worktree gone</span>` : "";
+    const acts = [];
+    if (latestSessions.some((x) => x.name === a.name)) acts.push(`<button class="sh-btn" data-bo-open="${esc(a.name)}">Open session</button>`);
+    if (!d.kept && !a.gone) acts.push(`<button class="sh-btn sh-primary" data-bo-keep="${esc(a.name)}">Keep this one</button>`);
+    // A Keep that could not discard every other attempt can be tried again.
+    if (kept && at.some((o) => o.name !== a.name && !o.discarded && !o.gone)) acts.push(`<button class="sh-btn sh-primary" data-bo-keep="${esc(a.name)}">Discard the others again</button>`);
+    return `<div class="bo-card">
+      <div class="bo-title"><b>Attempt ${i + 1}</b> <span data-bo-st="${esc(a.name)}">${boStatusHtml(a.name)}</span> ${badge}</div>
+      <div class="bo-meta">${esc(s ? displayName(s) : a.name)}${a.branch ? ` · ⑂ ${esc(a.branch)}` : ""}</div>
+      <div class="bo-meta">${a.diff.error ? esc(a.diff.error) : `${files} file${files === 1 ? "" : "s"} · <span class="df-add">+${add}</span> <span class="df-del">−${del}</span> · ${a.diff.commits || 0} commit${a.diff.commits === 1 ? "" : "s"}`}</div>
+      <div class="bo-acts">${acts.join("")}</div></div>`;
+  };
+  // Files aligned across attempts: every file any attempt touched, in the
+  // order first seen, one row each.
+  const per = at.map((a) => {
+    const m = new Map();
+    for (const f of splitPatchByFile(a.diff.patch || "")) m.set(f.file, f.body);
+    return m;
+  });
+  const order = [];
+  for (const m of per) for (const f of m.keys()) if (!order.includes(f)) order.push(f);
+  const rows = order.map((f) => {
+    const cells = per.map((m, i) => {
+      const body = m.get(f);
+      if (at[i].gone) return `<div class="bo-cell bo-none">—</div>`;
+      return body ? `<div class="bo-cell"><pre class="diff-patch">${renderPatch(body)}</pre></div>` : `<div class="bo-cell bo-none">unchanged</div>`;
+    }).join("");
+    const counts = per.map((m) => m.has(f) ? (() => { const c = patchCounts(m.get(f)); return `<span class="df-add">+${c.add}</span> <span class="df-del">−${c.del}</span>`; })() : "·").join(" &nbsp;|&nbsp; ");
+    return `<details class="diff-file bo-file" open><summary><span class="df-name">${esc(f)}</span><span class="df-counts">${counts}</span></summary><div class="bo-grid" style="${cols}">${cells}</div></details>`;
+  }).join("");
+  stage.innerHTML = head + `<div class="po bo">
+    <div class="modal-error" id="bo-error">${esc(bestOf.err)}</div>
+    <details class="bo-seed"><summary>Seed · ${esc(new Date(d.created * 1000).toLocaleString())} · from ${esc(d.base.slice(0, 7))}</summary><pre>${esc(d.seed)}</pre></details>
+    <div class="bo-grid" style="${cols}">${at.map(card).join("")}</div>
+    ${rows || `<div class="po-empty">No attempt has changed anything yet.</div>`}
+  </div>`;
+  wireBestOf(stage);
+}
+
+function wireBestOf(stage) {
+  const r = stage.querySelector("#bo-refresh");
+  if (r) r.addEventListener("click", loadBestOf);
+  stage.querySelectorAll("[data-bo-open]").forEach((b) => b.addEventListener("click", () => selectSession(b.dataset.boOpen)));
+  stage.querySelectorAll("[data-bo-keep]").forEach((b) => b.addEventListener("click", () => keepBestOf(b.dataset.boKeep)));
+}
+
+// keepBestOf confirms, naming exactly what goes, then keeps one attempt:
+// the others' sessions and scripts stop and their worktrees are removed;
+// their branches (and commits) stay.
+async function keepBestOf(name) {
+  const d = bestOf && bestOf.data;
+  if (!d) return;
+  const others = d.attempts.filter((a) => a.name !== name && !a.gone);
+  const idx = d.attempts.findIndex((a) => a.name === name) + 1;
+  const lines = others.map((a) => {
+    const i = d.attempts.indexOf(a) + 1;
+    const unc = (a.diff.untracked || []).length;
+    return `<li><b>Attempt ${i}</b>: its session stops and its worktree is deleted, with any uncommitted changes${unc ? ` and ${unc} new file${unc === 1 ? "" : "s"}` : ""}. ${a.diff.commits ? `Its ${a.diff.commits} commit${a.diff.commits === 1 ? "" : "s"} stay on branch <code>${esc(a.branch)}</code>.` : a.branch ? `Branch <code>${esc(a.branch)}</code> is kept.` : ""}</li>`;
+  }).join("");
+  const ok = await confirmModal(`Keep attempt ${idx}?`,
+    `<p>Attempt ${idx} is left exactly as it is.</p>${lines ? `<ul class="bo-lose">${lines}</ul><p>This cannot be undone.</p>` : ""}`,
+    others.length ? "Keep and discard the others" : "Keep");
+  if (!ok) return;
+  bestOf.busy = true;
+  renderBestOf();
+  try { await window.go.main.App.KeepBestOf(d.id, name); bestOf.err = ""; }
+  catch (e) { bestOf.err = "Keep: " + e; }
+  await poll();
+  loadBestOf();
+}
+
 // openPromptModal shows a composed prompt fetched fresh, editable, and sends
 // it only on an explicit click: pasted into a live session as one message,
 // or as the first message of a resumed one (finished). Errors stay in the
@@ -872,7 +1032,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${bestOfTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -920,7 +1080,7 @@ function appendFinishedRow(s) {
   if (worktreeErrs.has(s.name)) sumLine = `<span class="tsum tsum-err" title="${esc(worktreeErrs.get(s.name))}">${esc(worktreeErrs.get(s.name))}</span>`;
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}</span>${sumLine}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${bestOfTag(s)}</span>${sumLine}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(s.status)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M12 3l1.6 5L19 9.6 13.6 11 12 16l-1.6-5L5 9.6 10.4 8z"/>', s.summary ? "Regenerate summary" : "Summarize", async () => {
@@ -3529,6 +3689,7 @@ async function poll() {
       refreshProjectSessions();
     }
     if (stageView.kind === "attention") renderAttentionStage();
+    boStatuses();
   } catch (e) {
     console.error("poll failed", e);
   }
@@ -3583,6 +3744,11 @@ async function openLauncher(preselect) {
       </div>
       <div class="field">
         <label class="pf-check"><input type="checkbox" id="f-worktree" /><span>Own git worktree <em>claude --worktree: a fresh branch under .claude/worktrees, so parallel sessions don't collide</em></span></label>
+      </div>
+      <div class="field">
+        <label for="f-attempts">Attempts</label>
+        <select id="f-attempts"><option value="1">1</option><option value="2">Best of 2</option><option value="3">Best of 3</option></select>
+        <div class="f-hint" id="f-attempts-hint" hidden>The seed runs in that many worktrees at once; compare them side by side and keep one.</div>
       </div>
       <div class="field">
         <label for="f-seed">Seed prompt (optional)</label>
@@ -3651,6 +3817,18 @@ async function openLauncher(preselect) {
   try { wtBox.checked = localStorage.getItem("loom.launch.worktree") === "1"; } catch (_) {}
   wtBox.addEventListener("change", () => { try { localStorage.setItem("loom.launch.worktree", wtBox.checked ? "1" : "0"); } catch (_) {} });
 
+  // Best of N needs its own worktrees and a seed to compare on.
+  const attemptsSel = backdrop.querySelector("#f-attempts");
+  let wtBefore = wtBox.checked;
+  attemptsSel.addEventListener("change", () => {
+    const many = attemptsSel.value !== "1";
+    if (many && !wtBox.disabled) wtBefore = wtBox.checked;
+    wtBox.checked = many ? true : wtBefore;
+    wtBox.disabled = many;
+    backdrop.querySelector("#f-attempts-hint").hidden = !many;
+    backdrop.querySelector('label[for="f-seed"]').textContent = many ? "Seed prompt (required)" : "Seed prompt (optional)";
+  });
+
   const launchBtn = backdrop.querySelector("#f-launch");
   launchBtn.addEventListener("click", async () => {
     const model = backdrop.querySelector("#f-model").value;
@@ -3667,6 +3845,27 @@ async function openLauncher(preselect) {
       path = backdrop.querySelector("#f-project").value;
     }
     if (!path) { errEl.textContent = "Pick a project to launch."; return; }
+    const n = parseInt(attemptsSel.value, 10);
+    if (n > 1) {
+      if (!seed.trim()) { errEl.textContent = "Best of N needs a seed prompt: it is what the attempts are compared on."; return; }
+      errEl.textContent = "";
+      launchBtn.disabled = true;
+      let names = [];
+      try {
+        names = await window.go.main.App.LaunchBestOf(path, model, mode, seed, addDirs, n);
+      } catch (e) {
+        // Attempts that did start are grouped and on the rail.
+        errEl.textContent = "Launch failed: " + e;
+        launchBtn.disabled = false;
+        poll();
+        return;
+      }
+      close();
+      await poll();
+      const s = latestSessions.find((x) => names.includes(x.name) && x.bestOf);
+      if (s) openBestOf(s.bestOf.group);
+      return;
+    }
     errEl.textContent = "";
     launchBtn.disabled = true;
     try {

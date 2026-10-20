@@ -205,6 +205,39 @@ func Remove(ctx context.Context, path string) error {
 	return err
 }
 
+// Discard deletes a claude worktree's directory even though it holds
+// changes, and keeps its branch, so commits made there survive and only
+// uncommitted work and new files are lost. It is for a best-of-N attempt
+// the person chose not to keep, on an explicit confirm. It still refuses
+// while a running claude (or a lock it can't attribute) holds the worktree.
+func Discard(ctx context.Context, path string) error {
+	repo, _, root, ok := Parse(path)
+	if !ok {
+		return fmt.Errorf("%s is not a claude worktree", path)
+	}
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		return fmt.Errorf("worktree %s is already gone", root)
+	}
+	reason, locked, err := lockReason(ctx, repo, root)
+	if err != nil {
+		return fmt.Errorf("could not read the worktree's lock, so it was kept: %w", err)
+	}
+	if locked {
+		m := lockPID.FindStringSubmatch(reason)
+		if m == nil {
+			return fmt.Errorf("kept: locked (%s)", strings.TrimSpace(reason))
+		}
+		if pid, _ := strconv.Atoi(m[1]); pidAlive(pid) {
+			return fmt.Errorf("kept: a running claude (pid %d) holds it", pid)
+		}
+		if _, err := git(ctx, repo, "worktree", "unlock", root); err != nil {
+			return err
+		}
+	}
+	_, err = git(ctx, repo, "worktree", "remove", "--force", root)
+	return err
+}
+
 func plural(n int, one, many string) string {
 	if n == 1 {
 		return one
