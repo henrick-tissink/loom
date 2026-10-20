@@ -258,6 +258,16 @@ func (c *Client) CapturePane(name string) (string, error) {
 	return out, nil
 }
 
+// CaptureHistory is a pane's last lines, scrollback included, with wrapped
+// lines joined: a job's log, which has usually scrolled off the screen.
+func (c *Client) CaptureHistory(name string, lines int) (string, error) {
+	out, err := c.run("capture-pane", "-p", "-J", "-S", fmt.Sprintf("-%d", lines), "-t", paneTarget(name))
+	if err != nil {
+		return "", fmt.Errorf("tmux capture-pane %s: %s: %w", name, strings.TrimSpace(out), err)
+	}
+	return out, nil
+}
+
 func (c *Client) HasSession(name string) bool {
 	_, err := c.run("has-session", "-t", target(name))
 	return err == nil

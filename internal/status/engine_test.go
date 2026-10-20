@@ -703,3 +703,38 @@ func TestAgentStatus(t *testing.T) {
 		}
 	}
 }
+
+// Jobs (internal/scripts) are reported, never adopted as sessions, and a
+// finished one is kept for its exit code.
+func TestPollReportsJobsWithoutAdopting(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	run, setup := "loomjob-run-aaaaaaaaaaaa", "loomjob-setup-aaaaaaaaaaaa"
+	if err := tm.NewSession(run, t.TempDir(), "sleep 60", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.NewSession(setup, t.TempDir(), "exit 3", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(tm, st, ccd)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snap, err := e.Poll(time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, ok := snap.Jobs[setup]
+		if ok && s.Dead {
+			if s.ExitCode != 3 || snap.Jobs[run].Dead || len(snap.Live) != 0 || len(snap.Recent) != 0 {
+				t.Fatalf("jobs %+v live %d recent %d", snap.Jobs, len(snap.Live), len(snap.Recent))
+			}
+			if !tm.HasSession(setup) {
+				t.Fatal("a finished job was reaped")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("setup never seen dead: %+v", snap.Jobs)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}

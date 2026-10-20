@@ -1026,3 +1026,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .usg-table td:first-child { font-family: var(--font-ui); max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 .usg-table tr.usg-total td { font-weight: 700; border-bottom: 1px solid var(--sel); }
 .usg-act { align-self: flex-start; }
+
+/* Scripts (setup/run jobs): each job's output in the scripts modal. */
+.jb-out { display: flex; flex-direction: column; gap: 4px; }
+.jb-head { font-size: var(--t-small); color: var(--text-dim); }
+.jb-out pre { margin: 0; height: 160px; overflow: auto; padding: 8px; border-radius: 6px; background: var(--inset); color: var(--text); font-family: var(--font-mono); font-size: var(--t-small); line-height: 1.4; white-space: pre-wrap; word-break: break-all; }
+.review-modal .field textarea.sc-text { min-height: 90px; }
+.review-sub code { font-family: var(--font-mono); }

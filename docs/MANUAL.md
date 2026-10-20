@@ -92,6 +92,15 @@ When a session's task file is open and has Done-when checks, and the session is 
 
 `tab`/`shift-tab` move fields · `↵` launches · `esc` cancels. The seed is delivered only once Claude's input box is actually ready (and never fired into a first-run trust dialog).
 
+### Setup and run scripts
+
+Right-click a project and choose **Scripts…** to give it a **setup** script and a **run** script. Both run in your login shell. They are kept in loom, not in the repository.
+
+- **Setup** runs by itself in each new worktree as soon as Claude creates it. Use it to copy `.env`, install dependencies, and so on. `$LOOM_ROOT_PATH` is the project and `$LOOM_WORKSPACE_PATH` the worktree.
+- **Run** starts from a session's row (▶) and stops from the same button (■). It gets `$LOOM_PORT`, the first of ten ports kept for that workspace. Each worktree gets its own ten, and the same ones again next time if they are free, so parallel dev servers don't collide (`npm run dev -- --port $LOOM_PORT`).
+
+The row shows **setup…** while setup runs and **setup failed (N)** if it exits non-zero. A running run script shows as **▶ :port**; click it to open `http://localhost:port`. Click any other script pill for the scripts window: each script's output, **Run setup** again, and **Run**/**Stop**. Scripts keep running if loom quits, and a worktree with a running script is not removed.
+
 ## 5. Inside a session
 
 It's real Claude Code — nothing changes. Remember:
@@ -168,6 +177,7 @@ Adopted rules show how often their failure happened since you adopted them, agai
 | Briefs | `~/.loom/briefs/<project>/<when>-<window>/` |
 | Usage tap (when on) | `~/.loom/usage/` (the script and the last status line capture) |
 | Adopted rules | `~/.claude/discipline/rules.md` (imported from `~/.claude/CLAUDE.md`) |
+| Setup and run scripts, port blocks | `~/.loom/scripts.json`; the jobs run on tmux `-L loom` as `loomjob-…` |
 | Sessions | tmux server `-L loom` (`tmux -L loom list-sessions` to inspect raw) |
 | Transcripts (Claude's own, read-only to Loom) | `~/.claude/projects/…` |
 

@@ -73,6 +73,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 |---|---|---|
 | `~/.loom/loom.db` | Loom (rw) | sessions, projects, transcripts index, FTS |
 | `~/.loom/settings.json` | GUI (rw, atomic) | editor, notifications, auto-summarize, theme (dark default) |
+| `~/.loom/scripts.json` | GUI (rw, atomic) | each project's setup and run scripts, and each workspace's port block (§5.6) |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status, kind and background job id |
 | `claude agents --json --all` | Claude (Loom: runs it, read-only) | background sessions, including the ones the supervisor has stopped |
@@ -145,6 +146,7 @@ no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `forge` | A branch's GitHub PR or GitLab MR, its CI and review state and open review feedback (composed into a prompt), through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
 | `usage` | Plan rate-limit windows from the opt-in status-line tap, token totals from transcripts | Writes settings.json only on the explicit Track / Stop click, after a backup; §5.2. |
 | `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
+| `scripts` | A project's setup and run scripts, each workspace's port block (with a free check on both loopbacks), job names and the job's command line | The scripts are the person's, kept in `~/.loom/scripts.json`; nothing reads or writes a repo config; §5.6. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
 | `config` | Paths, env, binary preflight | |
 | `discipline` | The embedded Agent Discipline bundle (rules, hooks, suites, helpers), its generated manifest, the on-machine layout, the read-only doctor, and the installer: plan → stage + gate → commit, uninstall from the receipt, keep/reset of local edits | Source of truth for the handbook from rev 3 on. Revisions are immutable once in the manifest history. Only a human installs (`RefuseIfAgent`). Plan: `docs/DISCIPLINE.md`. |
@@ -447,6 +449,34 @@ adopted rule shows how often its failure happened since adoption and in the
 14 days before. A lapsed one is flagged and offered for renewal or removal;
 nothing is applied or removed automatically. Changing a hook's behaviour stays
 a bundle revision through the install gate.
+
+### 5.6 Setup and run scripts (`internal/scripts`)
+
+A project can carry a setup script and a run script, set from its menu
+(**Scripts…**) and kept in `~/.loom/scripts.json`, never in the repository.
+A row's scripts are found by the deepest configured root containing its
+workspace: the claude worktree's root for a worktree session, its cwd
+otherwise. A workspace has at most one setup job and one run job. Each is a
+tmux session on loom's server named `loomjob-<kind>-<hash of workspace>`, so
+it outlives loom the way sessions do. The hash keeps `.` and `:` out of tmux
+targets, and the prefix is not `loom-`, so `Poll` collects job panes into
+`Snapshot.Jobs` from the same `list-panes` call and never adopts one as a
+session. `remain-on-exit` keeps a finished job's exit code for the row.
+
+A job runs `exec env LOOM_ROOT_PATH=… LOOM_WORKSPACE_PATH=… [LOOM_PORT=…]
+$SHELL -lc '<script>'`, so the script gets the person's login PATH. A run is
+given a block of ten ports from 42000 (below 49000). The block is stable per
+workspace while its first port is free, and is persisted. A new block is the
+lowest whose ten ports nothing listens on, on 127.0.0.1 or ::1. Blocks of
+workspaces that no longer exist are given back.
+
+Claude has no post-create hook for its worktrees (its WorktreeCreate hook
+replaces creation). So after a worktree launch the GUI waits up to a minute
+for the worktree's checkout to finish (its index under the `gitdir:` that
+`.git` names, which git writes after the files), then starts the setup job there.
+A setup that could not start keeps its reason on the row. Run, Stop, Run
+setup again and the output are clicks. Nothing restarts a crashed run.
+`RemoveWorktree` refuses while either job is alive.
 
 ## 6. Data model (`~/.loom/loom.db`)
 

@@ -132,6 +132,9 @@ func (a *App) RemoveWorktree(name string) error {
 	if who := a.worktreeInUse(row.Cwd); who != "" {
 		return fmt.Errorf("kept: %s is running in it", who)
 	}
+	if kind := a.jobAlive(row.Cwd); kind != "" {
+		return fmt.Errorf("kept: its %s script is running; stop it first", kind)
+	}
 	defer a.wt.forget(row.Cwd)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

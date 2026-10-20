@@ -2,11 +2,13 @@ package status
 
 import (
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/henricktissink/loom/internal/ccsessions"
+	"github.com/henricktissink/loom/internal/scripts"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/store"
 	"github.com/henricktissink/loom/internal/taskfile"
@@ -82,6 +84,11 @@ type Snapshot struct {
 	// display string themselves. This keeps the engine ignorant of projects
 	// (§6.2a); it reports identity, not grouping.
 	NewlyNeedsYou []string
+
+	// Jobs are the workspaces' setup and run jobs (internal/scripts), by
+	// tmux name, from the same list-panes call. A dead pane is a finished
+	// job: tmux keeps it for its exit code, and loom never reaps one.
+	Jobs map[string]tmux.PaneStatus
 }
 
 // Engine performs one reconcile pass per Poll. tmux is the source of truth
@@ -176,7 +183,12 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 
 	var aliveNames []string
 	activity := map[string]int64{}
+	jobs := map[string]tmux.PaneStatus{}
 	for _, p := range panes {
+		if strings.HasPrefix(p.Name, scripts.JobPrefix) {
+			jobs[p.Name] = p.PaneStatus
+			continue
+		}
 		if _, ok := session.SessionIDFromTmuxName(p.Name); !ok {
 			continue // not ours
 		}
@@ -380,7 +392,7 @@ func (e *Engine) Poll(now time.Time) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{Live: live, Recent: recent, NewlyNeedsYou: newly}, nil
+	return Snapshot{Live: live, Recent: recent, NewlyNeedsYou: newly, Jobs: jobs}, nil
 }
 
 // row assembles a live row from its store row, transcript snapshot, fused

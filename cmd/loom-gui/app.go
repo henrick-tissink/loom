@@ -44,6 +44,10 @@ type App struct {
 	// nil in tests that do not set one.
 	rules *rulesState
 
+	// scripts holds the projects' setup and run scripts and the workspaces'
+	// jobs (scripts.go); nil in tests that do not set one.
+	scripts *scriptsState
+
 	// briefs writes and keeps project study briefs (brief.go); nil in tests
 	// that do not set one.
 	briefs *briefState
@@ -128,9 +132,13 @@ func (a *App) ListSessions() (out []SessionDTO) {
 	for _, r := range snap.Live {
 		ids[r.Name] = r.ClaudeSessionID
 	}
+	if a.scripts != nil {
+		a.scripts.setJobs(snap.Jobs)
+	}
 	for i := range out {
 		out[i].Worktree = a.wt.info(out[i].Cwd, false)
 		out[i].PR = a.prs.info(out[i].Cwd, a.transcriptFor(out[i].Cwd, ids[out[i].Name]), true)
+		out[i].Jobs = a.scripts.info(out[i].Cwd)
 	}
 	if a.hooks != nil {
 		a.hooks.reader.Refresh()
@@ -199,7 +207,11 @@ func (a *App) LaunchSession(repoPath, model, mode, seed string, addDirs []string
 		return "", err
 	}
 	r.Worktree = worktree
-	return a.launcher.Launch(r, launchCols, launchRows, a.now())
+	name, err := a.launcher.Launch(r, launchCols, launchRows, a.now())
+	if err == nil && worktree {
+		go a.setupAfterLaunch(name)
+	}
+	return name, err
 }
 
 func (a *App) AttachSession(name string) error {
@@ -287,6 +299,7 @@ func (a *App) ListRecent() []FinishedDTO {
 		cwd := cwds[out[i].Name]
 		out[i].Worktree = a.wt.info(cwd, true)
 		out[i].PR = a.prs.info(cwd, a.transcriptFor(cwd, sids[out[i].Name]), false)
+		out[i].Jobs = a.scripts.info(cwd)
 	}
 	return out
 }

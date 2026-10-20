@@ -103,6 +103,25 @@ func TestSendLiteralAndCapture(t *testing.T) {
 	}
 }
 
+func TestCaptureHistory(t *testing.T) {
+	c := testClient(t)
+	name := "loomjob-run-history"
+	if err := c.NewSession(name, t.TempDir(), "seq 1 100; sleep 30", 80, 24); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if out, _ := c.CapturePane(name); strings.Contains(out, "\n1\n") {
+		t.Fatal("the screen alone should have scrolled the first lines off")
+	}
+	out, err := c.CaptureHistory(name, 1000)
+	if err != nil {
+		t.Fatalf("CaptureHistory: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimLeft(out, "\n"), "1\n2\n") || !strings.Contains(out, "100") {
+		t.Fatalf("history missing lines:\n%s", out)
+	}
+}
+
 func TestPaste(t *testing.T) {
 	c := testClient(t)
 	name := "loom-44444444-4444-4444-4444-444444444444"

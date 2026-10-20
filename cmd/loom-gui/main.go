@@ -97,6 +97,11 @@ func run() error {
 	app := newApp(engine, tm, st, launcher, svc, time.Now)
 	app.settings = newSettingsStore(cfg.LoomDir)
 	app.usage = newUsageState(cfg.ClaudeConfigDir, cfg.LoomDir, time.Now)
+	if sc, err := newScriptsState(cfg.LoomDir); err != nil {
+		fmt.Fprintln(os.Stderr, "loom-gui: scripts:", err)
+	} else {
+		app.scripts = sc
+	}
 	if home, err := os.UserHomeDir(); err == nil {
 		l := discipline.NewLayout(cfg.ClaudeConfigDir, home, os.Getenv("CLAUDE_STATE_DIR"))
 		app.disc = newDisciplineState(l, time.Now)

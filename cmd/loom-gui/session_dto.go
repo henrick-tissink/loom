@@ -56,6 +56,9 @@ type SessionDTO struct {
 	// Worktree is set when the session runs in a claude worktree
 	// (<repo>/.claude/worktrees/<name>): its branch and what it holds.
 	Worktree *WorktreeDTO `json:"worktree,omitempty"`
+	// Jobs are the workspace's setup and run scripts, when its project has
+	// any (scripts.go).
+	Jobs *JobsDTO `json:"jobs,omitempty"`
 	// PR is the pull or merge request for the branch the session last
 	// worked on (its transcript's gitBranch), when there is one.
 	PR *PRDTO `json:"pr,omitempty"`
@@ -147,6 +150,9 @@ type FinishedDTO struct {
 	// Worktree is set while the finished session's worktree is still on
 	// disk, so the row can offer to remove it.
 	Worktree *WorktreeDTO `json:"worktree,omitempty"`
+	// Jobs are the workspace's setup and run scripts, when its project has
+	// any (scripts.go).
+	Jobs *JobsDTO `json:"jobs,omitempty"`
 	// PR is the pull or merge request for the branch the session last
 	// worked on (its transcript's gitBranch), when there is one.
 	PR *PRDTO `json:"pr,omitempty"`

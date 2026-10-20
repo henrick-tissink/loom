@@ -460,6 +460,161 @@ function goalPillHtml(s) {
   return `<span class="tpill ${cls}" title="${esc(tip.join("\n"))}">${esc(word)}</span>`;
 }
 
+// jobsTag is the row's setup and run scripts (set from the project menu):
+// setup running or failed, the run's ":port" (click opens localhost), a run
+// that exited. Clicking a script pill without a URL opens its output.
+// jobErrs holds a refused Run/Stop per row for a short while, shown on the
+// row: a refusal must be visible, not a console line.
+const jobErrs = new Map();
+function jobsTag(s) {
+  const j = s.jobs;
+  const err = jobErrs.get(s.name);
+  let out = err && Date.now() - err.at < 20000 ? `<span class="tpill tpill-bad" title="${esc(err.msg)}">script: refused</span>` : "";
+  if (!j) return out;
+  const pill = (cls, word, tip, url) =>
+    `<span class="tpill ${cls}"${url ? ` data-url="${esc(url)}"` : ` data-job="${esc(s.name)}"`} title="${esc(tip)}">${esc(word)}</span>`;
+  if (j.setupErr) out += pill("tpill-bad", "setup not started", `The setup script did not start: ${j.setupErr}\nClick for the scripts`);
+  else if (j.setup && j.setup.running) out += pill("tpill-held", "setup…", `Setup script running in ${j.workspace}\nClick for its output`);
+  else if (j.setup && j.setup.exit !== 0) out += pill("tpill-bad", `setup failed (${j.setup.exit})`, `The setup script exited ${j.setup.exit} in ${j.workspace}\nClick for its output`);
+  if (j.run && j.run.running && j.port) {
+    out += pill("tpill-ok", `▶ :${j.port}`, `Run script serving in ${j.workspace}\nLOOM_PORT=${j.port} (ports ${j.port}–${j.port + 9})\nClick to open http://localhost:${j.port}`, `http://localhost:${j.port}`);
+  } else if (j.run && !j.run.running && j.run.exit !== 0) {
+    out += pill("tpill-bad", `run exited ${j.run.exit}`, `The run script exited ${j.run.exit}\nClick for its output`);
+  }
+  return out;
+}
+document.addEventListener("click", (e) => {
+  const p = e.target.closest && e.target.closest(".tpill[data-job]");
+  if (!p) return;
+  e.stopPropagation();
+  e.preventDefault();
+  const s = [...latestSessions, ...latestRecent].find((x) => x.name === p.dataset.job);
+  if (s) openJobs(s);
+}, true);
+
+// runButton starts the project's run script in the row's workspace, or
+// stops it while it runs.
+function runButton(s) {
+  const j = s.jobs;
+  if (!j || !j.hasRun) return null;
+  const running = j.run && j.run.running;
+  const act = async () => {
+    jobErrs.delete(s.name);
+    try {
+      if (running) await window.go.main.App.StopJob(s.name, "run");
+      else await window.go.main.App.RunScript(s.name);
+    } catch (e) { jobErrs.set(s.name, { msg: String(e), at: Date.now() }); }
+    poll();
+  };
+  return running
+    ? actionBtn('<rect x="6" y="6" width="12" height="12" rx="1.5"/>', `Stop the run script (${j.workspace})`, act)
+    : actionBtn('<path d="M7 4.5v15l12-7.5z"/>', `Run the run script in ${j.workspace} on its own ports (LOOM_PORT)`, act);
+}
+
+// openJobs shows a row's scripts: each job's output (refreshed while open),
+// Run setup again, and Run or Stop. Errors stay in the modal.
+function openJobs(s) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal review-modal" role="dialog" aria-label="Scripts">
+      <h2>Scripts</h2>
+      <p class="review-sub" id="jb-sub"></p>
+      <div class="jb-out"><div class="jb-head" id="jb-setup-h">Setup</div><pre id="jb-setup"></pre></div>
+      <div class="jb-out"><div class="jb-head" id="jb-run-h">Run</div><pre id="jb-run"></pre></div>
+      <div class="modal-error" id="jb-err"></div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="jb-close">Close</button>
+        <button class="btn-ghost" id="jb-setup-btn">Run setup</button>
+        <button class="btn-launch" id="jb-run-btn">Run</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const $ = (id) => backdrop.querySelector("#" + id);
+  const errEl = $("jb-err");
+  const cur = () => [...latestSessions, ...latestRecent].find((x) => x.name === s.name) || s;
+  const word = (job) => !job ? "not run" : job.running ? "running" : `exited ${job.exit}`;
+  const refresh = async () => {
+    if (!backdrop.isConnected) return;
+    const j = cur().jobs;
+    if (!j) { $("jb-sub").textContent = "This project has no scripts any more."; return; }
+    $("jb-sub").textContent = `${j.workspace}${j.port ? ` · ports ${j.port}–${j.port + 9}` : ""}`;
+    $("jb-setup-h").textContent = `Setup · ${j.hasSetup ? (j.setupErr ? "did not start: " + j.setupErr : word(j.setup)) : "no script"}`;
+    $("jb-run-h").textContent = `Run · ${j.hasRun ? word(j.run) : "no script"}`;
+    $("jb-setup-btn").disabled = !j.hasSetup || !!(j.setup && j.setup.running);
+    $("jb-run-btn").disabled = !j.hasRun;
+    $("jb-run-btn").textContent = j.run && j.run.running ? "Stop" : "Run";
+    for (const kind of ["setup", "run"]) {
+      if (!j[kind]) { $("jb-" + kind).textContent = ""; continue; }
+      try {
+        const pre = $("jb-" + kind);
+        const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+        pre.textContent = await window.go.main.App.JobOutput(s.name, kind);
+        if (atEnd) pre.scrollTop = pre.scrollHeight;
+      } catch (e) { $("jb-" + kind).textContent = String(e); }
+    }
+  };
+  const timer = setInterval(refresh, 1500);
+  const close = () => { clearInterval(timer); backdrop.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  $("jb-close").addEventListener("click", close);
+  const act = async (fn) => {
+    errEl.textContent = "";
+    try { await fn(); } catch (e) { errEl.textContent = String(e); }
+    await poll();
+    refresh();
+  };
+  $("jb-setup-btn").addEventListener("click", () => act(() => window.go.main.App.RunSetup(s.name)));
+  $("jb-run-btn").addEventListener("click", () => act(() => {
+    const j = cur().jobs;
+    return j && j.run && j.run.running ? window.go.main.App.StopJob(s.name, "run") : window.go.main.App.RunScript(s.name);
+  }));
+  refresh();
+}
+
+// openScriptsEditor edits a project's setup and run scripts. They are kept
+// in loom (~/.loom/scripts.json), never written to the repository.
+async function openScriptsEditor(root) {
+  if (document.querySelector(".modal-backdrop")) return;
+  let cur = { setup: "", run: "" };
+  try { cur = await window.go.main.App.ProjectScripts(root); } catch (e) { console.error("scripts", e); }
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal review-modal" role="dialog" aria-label="Scripts">
+      <h2>Scripts</h2>
+      <p class="review-sub">Run in your login shell, in the session's workspace (its worktree, or the project). Kept in loom, not in the repository.
+        <code>$LOOM_ROOT_PATH</code> is the project, <code>$LOOM_WORKSPACE_PATH</code> the workspace, and the run script gets <code>$LOOM_PORT</code>: the first of ten ports kept for that workspace.</p>
+      <div class="field"><label for="sc-setup">Setup — runs in each new worktree once claude makes it</label>
+        <textarea id="sc-setup" class="sc-text" spellcheck="false" placeholder="cp $LOOM_ROOT_PATH/.env .env &amp;&amp; npm ci"></textarea></div>
+      <div class="field"><label for="sc-run">Run — started and stopped from a session's row</label>
+        <textarea id="sc-run" class="sc-text" spellcheck="false" placeholder="npm run dev -- --port $LOOM_PORT"></textarea></div>
+      <div class="modal-error" id="sc-err"></div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="sc-cancel">Cancel</button>
+        <button class="btn-launch" id="sc-save">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const setup = backdrop.querySelector("#sc-setup");
+  const run = backdrop.querySelector("#sc-run");
+  setup.value = cur.setup || "";
+  run.value = cur.run || "";
+  const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#sc-cancel").addEventListener("click", close);
+  backdrop.querySelector("#sc-save").addEventListener("click", async () => {
+    try { await window.go.main.App.SetProjectScripts(root, setup.value, run.value); close(); poll(); }
+    catch (e) { backdrop.querySelector("#sc-err").textContent = String(e); }
+  });
+  setup.focus();
+}
+
 // openPromptModal shows a composed prompt fetched fresh, editable, and sends
 // it only on an explicit click: pasted into a live session as one message,
 // or as the first message of a resumed one (finished). Errors stay in the
@@ -717,7 +872,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -733,6 +888,8 @@ function appendLiveRow(s, projLabel) {
   if (hasReview(s) && !(s.waitingFor && s.waitingFor !== "shell")) acts.appendChild(reviewButton(s, false));
   if (canGoal(s)) acts.appendChild(goalButton(s));
   if (canPhone(s)) acts.appendChild(phoneButton(s));
+  const rb = runButton(s);
+  if (rb) acts.appendChild(rb);
   if (overBudget(s)) {
     acts.appendChild(actionBtn('<path d="M12 5v14M5 12h14"/>', "Fresh session from checkpoint (same directory; this one stays open)", async () => {
       try { const nn = await window.go.main.App.FreshSession(s.name); if (nn) selectSession(nn); poll(); }
@@ -763,7 +920,7 @@ function appendFinishedRow(s) {
   if (worktreeErrs.has(s.name)) sumLine = `<span class="tsum tsum-err" title="${esc(worktreeErrs.get(s.name))}">${esc(worktreeErrs.get(s.name))}</span>`;
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}${worktreeTag(s)}${prTag(s)}</span>${sumLine}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(s.project)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}</span>${sumLine}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(s.status)}</span><span class="tactions"></span></span>`;
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M12 3l1.6 5L19 9.6 13.6 11 12 16l-1.6-5L5 9.6 10.4 8z"/>', s.summary ? "Regenerate summary" : "Summarize", async () => {
@@ -780,6 +937,8 @@ function appendFinishedRow(s) {
     catch (e) { console.error("resume", e); }
   }));
   if (hasReview(s)) acts.appendChild(reviewButton(s, true));
+  const rb = runButton(s);
+  if (rb) acts.appendChild(rb);
   if (s.worktree) acts.appendChild(removeWorktreeButton(s.name));
   acts.appendChild(actionBtn('<path d="M6 6l12 12M18 6L6 18"/>', "Dismiss from history", async () => {
     try { await window.go.main.App.DismissSession(s.name); poll(); } catch (e) { console.error("dismiss", e); }
@@ -1408,6 +1567,7 @@ function projectMenu(p, x, y) {
     // the project detail.
     const hidden = !!(projectByRoot(p.root) || {}).hidden;
     items.push(["Brief…", () => openBrief(p.root)]);
+    items.push(["Scripts…", () => openScriptsEditor(p.root)]);
     items.push([hidden ? "Show" : "Hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !hidden))]);
     items.push(["Remove…", () => removeProjectFlow(p.root), "danger"]);
   }
