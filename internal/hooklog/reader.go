@@ -7,12 +7,15 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Reader keeps the records of a log directory in memory and reads only
-// what was appended since the last Refresh. Each file remembers its inode
-// and offset: a new inode (rotation) or a size below the offset
-// (truncation) restarts that file at zero and drops what it held.
+// what was appended since the last Refresh. Each file remembers its inode,
+// offset and first bytes: a new inode or different first bytes (rotation;
+// Linux hands a deleted file's inode straight to the next one) or a size
+// below the offset (truncation) restarts that file at zero and drops what
+// it held.
 //
 // Legacy directories (the hooks' old location beside the scripts, or the
 // directory loom moved it to) are read once, in full, for history, and
@@ -31,8 +34,14 @@ type logFile struct {
 	loaded bool
 	inode  uint64
 	offset int64
+	head   []byte    // the file's first bytes, read from complete lines
+	mtime  time.Time // as of the last read
 	recs   []Record
 }
+
+// headLen is how much of a file's start identifies it: every line begins
+// with its timestamp.
+const headLen = 64
 
 // New reads decisions.jsonl and allows.jsonl under logDir.
 func New(logDir string) *Reader {
@@ -86,25 +95,33 @@ func (r *Reader) read(f *logFile) bool {
 		if f.offset == 0 && len(f.recs) == 0 {
 			return false
 		}
-		f.offset, f.inode, f.recs = 0, 0, nil
+		f.offset, f.inode, f.head, f.recs = 0, 0, nil, nil
 		return true
 	}
 	ino := inode(fi)
 	changed := false
 	if (f.inode != 0 && ino != f.inode) || fi.Size() < f.offset {
-		f.offset, f.recs = 0, nil
+		f.offset, f.head, f.recs = 0, nil, nil
 		changed = true
 	}
 	f.inode = ino
 	f.loaded = true
-	if fi.Size() == f.offset {
+	if fi.Size() == f.offset && fi.ModTime().Equal(f.mtime) {
 		return changed
 	}
+	f.mtime = fi.ModTime()
 	fh, err := os.Open(f.path)
 	if err != nil {
 		return changed
 	}
 	defer fh.Close()
+	if len(f.head) > 0 {
+		got := make([]byte, len(f.head))
+		if _, err := io.ReadFull(fh, got); err != nil || !bytes.Equal(got, f.head) {
+			f.offset, f.head, f.recs = 0, nil, nil
+			changed = true
+		}
+	}
 	if _, err := fh.Seek(f.offset, io.SeekStart); err != nil {
 		return changed
 	}
@@ -123,6 +140,9 @@ func (r *Reader) read(f *logFile) bool {
 			f.recs = append(f.recs, rec)
 			changed = true
 		}
+	}
+	if f.offset == 0 {
+		f.head = append([]byte(nil), data[:min(headLen, end+1)]...)
 	}
 	f.offset += int64(end + 1)
 	return changed

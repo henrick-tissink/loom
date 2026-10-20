@@ -22,12 +22,12 @@ import (
 type RepoDiff struct {
 	Path      string   `json:"path"`
 	Label     string   `json:"label"`
-	Stat      string   `json:"stat"`      // `git diff … --stat` summary
-	Patch     string   `json:"patch"`     // the full patch
-	Files     []string `json:"files"`     // repo-relative paths the patch touches
-	Untracked []string `json:"untracked"` // new files not yet tracked
-	Dirty     bool     `json:"dirty"`     // any tracked change or untracked file
-	Error     string   `json:"error"`     // set when the path isn't a git work tree
+	Stat      string   `json:"stat"`              // `git diff … --stat` summary
+	Patch     string   `json:"patch"`             // the full patch
+	Files     []string `json:"files"`             // repo-relative paths the patch touches
+	Untracked []string `json:"untracked"`         // new files not yet tracked
+	Dirty     bool     `json:"dirty"`             // any tracked change or untracked file
+	Error     string   `json:"error"`             // set when the path isn't a git work tree
 	Commits   int      `json:"commits,omitempty"` // Against: commits made on top of the base
 }
 

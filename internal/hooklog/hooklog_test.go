@@ -120,6 +120,14 @@ func TestReaderIncrementalAndTruncation(t *testing.T) {
 	if len(recs) != 2 || recs[1].Hook != "test_rerun" {
 		t.Fatalf("after rotation: %+v", recs)
 	}
+	// Rewritten in place, longer than before, at the same inode (which is
+	// also what Linux does on rotation: the new file reuses the old inode).
+	writeLog(t, dec, deny1, deny2)
+	r.Refresh()
+	recs = r.Records()
+	if len(recs) != 3 || recs[0].Command != "sleep 5" || recs[2].Command != "sleep 6" {
+		t.Fatalf("after rewrite: %+v", recs)
+	}
 	// A vanished file drops its records.
 	if err := os.Remove(dec); err != nil {
 		t.Fatal(err)

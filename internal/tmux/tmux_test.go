@@ -30,6 +30,25 @@ func TestListSessionsNoServer(t *testing.T) {
 	}
 }
 
+// Every test kills its server and the next starts one on the same socket:
+// a start straight after a kill must not fail on the exiting server (seen
+// on tmux 3.4 as "server exited unexpectedly").
+func TestEnsureServerRightAfterKill(t *testing.T) {
+	c := &Client{Socket: fmt.Sprintf("loomtestrestart%d", os.Getpid())}
+	t.Cleanup(func() { _ = c.KillServer() })
+	for i := 0; i < 100; i++ {
+		if err := c.EnsureServer(); err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		if err := c.NewSession("s", os.TempDir(), "sleep 30", 80, 24); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.KillServer(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestSessionLifecycle(t *testing.T) {
 	c := testClient(t)
 	name := "loom-11111111-1111-1111-1111-111111111111"

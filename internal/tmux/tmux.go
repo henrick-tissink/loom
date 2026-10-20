@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Client struct{ Socket string }
@@ -86,11 +87,24 @@ func (c *Client) EnsureServer() error {
 			args = append(args, ";")
 		}
 	}
-	if out, err := c.run(args...); err != nil {
-		return fmt.Errorf("tmux %v: %s: %w", args, strings.TrimSpace(out), err)
+	// kill-server returns before the old server has gone: a start in that
+	// window reaches the dying server and fails with "server exited
+	// unexpectedly". Wait for it to go and start again.
+	deadline := time.Now().Add(ensureWait)
+	for {
+		out, err := c.run(args...)
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(out, "server exited unexpectedly") || time.Now().After(deadline) {
+			return fmt.Errorf("tmux %v: %s: %w", args, strings.TrimSpace(out), err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	return nil
 }
+
+// ensureWait bounds how long EnsureServer waits out a server that is exiting.
+const ensureWait = 3 * time.Second
 
 func (c *Client) NewSession(name, cwd, shellCmd string, w, h int) error {
 	out, err := c.run("new-session", "-d", "-s", name,
