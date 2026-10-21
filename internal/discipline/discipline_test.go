@@ -189,7 +189,7 @@ func fixture(t *testing.T, kind string) (Layout, map[string]any) {
 		"hooks":       hooks,
 		"statusLine":  map[string]any{"type": "command", "command": "bash " + l.ContextBar()},
 		"env":         env,
-		"permissions": map[string]any{"deny": []any{"Edit(" + ccd + "/hooks/**)", "Write(" + ccd + "/hooks/**)"}},
+		"permissions": map[string]any{"deny": []any{"Edit(" + ccd + "/hooks/**)"}},
 	}
 	writeJSON(t, l.SettingsPath(), settings)
 	return l, settings

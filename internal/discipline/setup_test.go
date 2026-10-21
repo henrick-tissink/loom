@@ -123,7 +123,7 @@ func TestMergeStatusLineEnvDeny(t *testing.T) {
 		t.Fatal("user's env value replaced")
 	}
 	a := MergeDeny(doc, l.DenyEntries(regs))
-	if len(a) != 2 || len(MergeDeny(doc, l.DenyEntries(regs))) != 0 {
+	if len(a) != 1 || len(MergeDeny(doc, l.DenyEntries(regs))) != 0 {
 		t.Fatalf("deny %v", a)
 	}
 	// Undo with the user having changed one env value since.
@@ -133,7 +133,7 @@ func TestMergeStatusLineEnvDeny(t *testing.T) {
 	if n != len(w)-1 || doc.Path("env", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH").Str() != "3" {
 		t.Fatalf("unmerge env %d: %s", n, doc.Marshal(""))
 	}
-	if UnmergeDeny(doc, a) != 2 || doc.Get("permissions") != nil {
+	if UnmergeDeny(doc, a) != 1 || doc.Get("permissions") != nil {
 		t.Fatalf("deny undo: %s", doc.Marshal(""))
 	}
 	if !UnmergeStatusLine(parse(t, `{"statusLine":{"type":"command","command":"X"}}`), "X") {
@@ -302,7 +302,7 @@ func TestSetupUninstallRoundtrip(t *testing.T) {
 	}
 	rc, err := LoadReceipt(l)
 	must(t, err)
-	if rc == nil || rc.Rev != BundledRev() || len(rc.Settings.HooksAdded) != 1 || rc.Settings.StatusLine == "" || len(rc.Settings.Deny) != 2 || !rc.ClaudeMD.ReplacedInline || rc.MigratedFrom == "" {
+	if rc == nil || rc.Rev != BundledRev() || len(rc.Settings.HooksAdded) != 1 || rc.Settings.StatusLine == "" || len(rc.Settings.Deny) != 1 || !rc.ClaudeMD.ReplacedInline || rc.MigratedFrom == "" {
 		t.Fatalf("receipt: %+v", rc)
 	}
 	if b, _ := os.ReadFile(filepath.Join(rc.MigratedFrom, "bash_guard.py")); !strings.Contains(string(b), "local tweak") {
@@ -483,5 +483,50 @@ func TestUninstallRestoresPreLoomSymlinkAndDeadline(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(l.Deadline()); string(got) != string(myDeadline) {
 		t.Fatalf("deadline after uninstall:\n%s", got)
+	}
+}
+
+// r5 asks only for Edit(<ccd>/hooks/**). A setup over an install that added
+// Write(<ccd>/hooks/**) too retires it, as a step the plan shows; a Write
+// entry the person added themselves stays.
+func TestSetupRetiresDenyEntriesTheBundleDropped(t *testing.T) {
+	l, settings := fixture(t, LayoutRev)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)
+	edit, write, mine := "Edit("+l.ConfigDir+"/hooks/**)", "Write("+l.ConfigDir+"/hooks/**)", "Write(/elsewhere/**)"
+	settings["permissions"] = map[string]any{"deny": []any{edit, write, mine}}
+	writeJSON(t, l.SettingsPath(), settings)
+	rc, _ := LoadReceipt(l)
+	if rc == nil {
+		rc = &Receipt{ConfigDir: l.ConfigDir}
+	}
+	rc.Settings.Deny = []string{edit, write}
+	must(t, SaveReceipt(l, rc))
+
+	rep := Doctor(ctx, l, fakeEnv(l), Options{})
+	p := PlanSetup(l, rep, DefaultPlanOptions(), now)
+	if p.HasErrors() {
+		t.Fatalf("plan: %v", p.Errors)
+	}
+	if !stepEnabled(p, StepDenyRetire) || !stepDetailHas(p, StepDenyRetire, write) {
+		t.Fatalf("no retire step: %+v", p.Steps)
+	}
+	opts := ApplyOptions{Now: now, SkipGate: true}
+	st, err := Stage(ctx, l, p, opts)
+	must(t, err)
+	if _, err := Commit(ctx, l, p, st, opts); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	b, _ := os.ReadFile(l.SettingsPath())
+	var got struct {
+		Permissions struct{ Deny []string } `json:"permissions"`
+	}
+	must(t, json.Unmarshal(b, &got))
+	if strings.Join(got.Permissions.Deny, " ") != edit+" "+mine {
+		t.Fatalf("deny after setup: %v", got.Permissions.Deny)
+	}
+	rc, _ = LoadReceipt(l)
+	if strings.Join(rc.Settings.Deny, " ") != edit {
+		t.Fatalf("receipt deny: %v", rc.Settings.Deny)
 	}
 }

@@ -28,6 +28,7 @@ const (
 	StepStatusLine = "settings-statusline"
 	StepEnv        = "settings-env"
 	StepDeny       = "settings-deny"
+	StepDenyRetire = "settings-deny-retire"
 	StepSettings   = "settings-write"
 	StepClaudeMD   = "claudemd"
 	StepReceipt    = "receipt"
@@ -293,6 +294,15 @@ func PlanSetup(l Layout, rep Report, opts PlanOptions, now time.Time) *Plan {
 			p.add(Step{Kind: StepDeny, Target: "permissions.deny", Detail: fmt.Sprintf("%d entries added", len(a)), Group: GroupDeny, Enabled: len(a) > 0})
 		} else {
 			p.add(Step{Kind: StepDeny, Target: "permissions.deny", Detail: "off (--with deny)", Group: GroupDeny})
+		}
+		if rc, _ := LoadReceipt(l); rc != nil {
+			if old := RetiredDeny(rc.Settings.Deny, l.DenyEntries(regs)); len(old) > 0 {
+				detail := "remove entries an earlier setup added that the bundle no longer asks for: "
+				if UnmergeDeny(doc, old) == 0 {
+					detail = "forget entries an earlier setup added, already gone from settings.json: "
+				}
+				p.add(Step{Kind: StepDenyRetire, Target: "permissions.deny", Detail: detail + strings.Join(old, ", "), Group: GroupCore, Enabled: true})
+			}
 		}
 		after := string(doc.Marshal("  "))
 		diff := UnifiedDiff("settings.json", before, after)

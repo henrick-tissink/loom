@@ -174,7 +174,7 @@ writes.
   "settings": {"hooks": ["PreToolUse|Bash|hooks/enforce/bash_guard.py", "…"],
                "statusLine": "bash ~/.claude/scripts/context-bar.sh",
                "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"},
-               "permissionsDeny": ["Edit(~/.claude/hooks/**)", "Write(~/.claude/hooks/**)"]},
+               "permissionsDeny": ["Edit(~/.claude/hooks/**)"]},
   "claudeMd": {"importLine": "@discipline/current/CLAUDE.how-to-work.md"},
   "kept":    {"/Users/x/.claude/discipline/r3/enforce/session_checkpoint.py": "sha… (user chose Keep)"}
 }
@@ -266,7 +266,7 @@ git-tracked is flagged on its project row.
 | layout | `hooks/enforce` and `discipline/current` are the expected symlinks; legacy real-dir layout detected and named | amber | yes (gate, moves old dir to `local-<ts>`) |
 | registrations | 7 present, scripts exist, none duplicated, `bash_guard` has `onFailure: block`, Stop timeout > `CLAUDE_CHECKS_TIMEOUT` (240), no `disableAllHooks` | missing/dup/timeout → red | yes (gate) |
 | settings | `statusLine` set (ours, or another tool's → report only); `CLAUDE_CODE_AUTO_COMPACT_WINDOW` > `CLAUDE_CONTEXT_BUDGET` (200000); `env.PATH` contains `~/.local/bin` | amber | statusLine: only if unset; env: opt-in |
-| operate | `permissions.deny` contains Edit/Write on `<ccd>/hooks/**` | ○ (yours) | opt-in, on by default in the gate |
+| operate | `permissions.deny` contains Edit (or Write) on `<ccd>/hooks/**` | ○ (yours) | opt-in, on by default in the gate |
 | path | `deadline` resolves in: login PATH, `env.PATH` from settings, `tmux -L loom` env | red if none; amber if only some | no (prints the line to add) |
 | state | state dirs exist and are writable; `CLAUDE_STATE_DIR`/`CLAUDE_CONFIG_DIR` agree between loom and hooks | red | create dirs: yes |
 | rules | `CLAUDE.md` has the import line exactly once; the rules file hash is current; no second inline copy of the rules text | amber | import line: gate; inline text: diff + consent only |

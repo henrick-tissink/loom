@@ -671,7 +671,7 @@ func (r *Report) operate(l Layout, settings map[string]any) {
 	}
 	r.Operate.DenyRule = len(r.Operate.DenyEntries) > 0
 	if !r.Operate.DenyRule {
-		r.add(SevInfo, "operate", "no permissions.deny entry stops Claude editing the hook directory (the handbook's operate layer)", "loom setup offers it; or add Edit("+l.ConfigDir+"/hooks/**) and Write(…) to permissions.deny")
+		r.add(SevInfo, "operate", "no permissions.deny entry stops Claude editing the hook directory (the handbook's operate layer)", "loom setup offers it; or add Edit("+l.ConfigDir+"/hooks/**) to permissions.deny (it covers writes too)")
 	}
 }
 

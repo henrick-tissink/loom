@@ -14,5 +14,5 @@
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000"
   },
-  "permissionsDeny": ["Edit(<ccd>/hooks/**)", "Write(<ccd>/hooks/**)"]
+  "permissionsDeny": ["Edit(<ccd>/hooks/**)"]
 }

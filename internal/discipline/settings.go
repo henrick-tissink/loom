@@ -245,6 +245,20 @@ func (l Layout) DenyEntries(regs Registrations) []string {
 	return out
 }
 
+// RetiredDeny is what an earlier setup added to permissions.deny that the
+// bundle no longer asks for: r5 dropped Write(<ccd>/hooks/**), since Edit
+// rules cover every file write and Claude warns that a Write rule never
+// matches. Only entries loom recorded adding are retired.
+func RetiredDeny(added, current []string) []string {
+	var out []string
+	for _, e := range added {
+		if !contains(current, e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // MergeDeny appends the entries that are not present. Returns what was added.
 func MergeDeny(doc *jsonedit.Node, entries []string) []string {
 	perms := doc.Ensure("permissions")

@@ -368,6 +368,17 @@ func Commit(ctx context.Context, l Layout, p *Plan, st *Staged, opts ApplyOption
 				}
 			}
 		}
+		if stepEnabled(p, StepDenyRetire) {
+			old := RetiredDeny(rc.Settings.Deny, l.DenyEntries(regs))
+			UnmergeDeny(doc, old)
+			var keep []string
+			for _, e := range rc.Settings.Deny {
+				if !contains(old, e) {
+					keep = append(keep, e)
+				}
+			}
+			rc.Settings.Deny = keep
+		}
 		if err := jsonedit.WriteFile(l.SettingsPath(), doc); err != nil {
 			return fail(err)
 		}
