@@ -127,6 +127,14 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "/" && !isTyping() && !document.querySelector(".modal-backdrop")) {
     e.preventDefault();
     openSearch();
+    return;
+  }
+  // R is the Reply button's shortcut. A focused terminal counts as typing
+  // (xterm's input is a textarea), so R still reaches Claude there.
+  if ((e.key === "r" || e.key === "R") && !e.metaKey && !e.ctrlKey && !e.altKey &&
+      activeName && !isTyping() && !document.querySelector(".modal-backdrop")) {
+    e.preventDefault();
+    openReply(activeName);
   }
 });
 
