@@ -280,7 +280,9 @@ func plural(n int, word string) string {
 	return fmt.Sprintf("%d %ss", n, word)
 }
 
-func slug(s string) string { return strings.Trim(slugRe.ReplaceAllString(strings.ToLower(s), "-"), "-") }
+func slug(s string) string {
+	return strings.Trim(slugRe.ReplaceAllString(strings.ToLower(s), "-"), "-")
+}
 
 // pageCSS is loom's own palette ("Islands": plum ground, peach accent), light
 // by default and dark when the system is, so the artefact looks like loom.

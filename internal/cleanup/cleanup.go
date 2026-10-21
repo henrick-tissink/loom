@@ -37,10 +37,10 @@ func junkFile(name string) bool {
 
 // Entry is one removable path.
 type Entry struct {
-	Repo  string `json:"repo"`  // the repo root it lives under
-	Rel   string `json:"rel"`   // path relative to Repo
-	Abs   string `json:"abs"`   // absolute path
-	Size  int64  `json:"size"`  // bytes (walked, for dirs)
+	Repo  string `json:"repo"` // the repo root it lives under
+	Rel   string `json:"rel"`  // path relative to Repo
+	Abs   string `json:"abs"`  // absolute path
+	Size  int64  `json:"size"` // bytes (walked, for dirs)
 	IsDir bool   `json:"isDir"`
 }
 

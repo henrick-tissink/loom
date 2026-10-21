@@ -32,7 +32,7 @@ func TestScanKeepsJunkSkipsEnvAndTracked(t *testing.T) {
 	write(".gitignore", "node_modules/\n*.log\n.env\n")
 	write("node_modules/pkg/index.js", "x")
 	write("debug.log", "log")
-	write(".env", "SECRET=1")      // git-ignored but NOT junk — must be kept
+	write(".env", "SECRET=1")        // git-ignored but NOT junk — must be kept
 	write("main.go", "package main") // tracked — must never be junk
 	git("add", ".gitignore", "main.go")
 	git("commit", "-m", "init")
