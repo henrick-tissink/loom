@@ -47,6 +47,11 @@ type Row struct {
 	Checkpoint taskfile.Checkpoint
 	// Goal is the session's /goal as its transcript records it.
 	Goal transcript.Goal
+	// Spin is the same tool failure repeating in the current turn, or nil;
+	// Edited the files the session wrote through its file tools (shared
+	// with the transcript reader: read-only).
+	Spin   *transcript.Spin
+	Edited []transcript.Edit
 	// RemoteURL is the session's claude.ai/code link while it is under
 	// Remote Control (claude's registry), else "".
 	RemoteURL string
@@ -402,7 +407,7 @@ func (e *Engine) row(r store.SessionRow, rs transcript.ReaderSnapshot, st Status
 	activity int64, ent ccsessions.Entry, hasEnt bool) Row {
 	row := Row{SessionRow: r, Status: st, LastTool: rs.LastTool,
 		Activity: activity, Title: r.Title, CtxTokens: rs.CtxTokens,
-		WaitingFor: waitingFor, Goal: rs.Goal}
+		WaitingFor: waitingFor, Goal: rs.Goal, Spin: rs.Spin, Edited: rs.Edited}
 	if st == NeedsYou {
 		// the wait is measured from the ask; a registry "waiting" (a
 		// dialog) is timed by the registry, which is what flipped it.

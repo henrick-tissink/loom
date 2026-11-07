@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/henricktissink/loom/internal/status"
@@ -21,7 +22,7 @@ func TestSnapshotToDTOs_mapsFieldsAndStatus(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("want 2 DTOs, got %d", len(got))
 	}
-	if got[0] != (SessionDTO{Name: "api-migration", Project: "sauce-api", Title: "Migrate the API", Status: "needs_you"}) {
+	if !reflect.DeepEqual(got[0], SessionDTO{Name: "api-migration", Project: "sauce-api", Title: "Migrate the API", Status: "needs_you"}) {
 		t.Errorf("row 0 mismatch: %+v", got[0])
 	}
 	if got[1].Status != "running" || got[1].Project != "loom" {

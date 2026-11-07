@@ -82,6 +82,11 @@ type SessionDTO struct {
 	Held         *hooklog.Held `json:"held,omitempty"`
 	Verified     bool          `json:"verified"`
 	ChecksFailed bool          `json:"checksFailed"`
+	// Spin is the same tool failure repeating in the current turn (spin.go);
+	// Overlaps the other live sessions with pending changes to the same
+	// files (overlap.go).
+	Spin     *SpinDTO     `json:"spin,omitempty"`
+	Overlaps []OverlapDTO `json:"overlaps,omitempty"`
 }
 
 // snapshotToDTOs flattens a status.Snapshot's live rows into SessionDTOs,
@@ -123,6 +128,7 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 			JobID:        r.JobID,
 			StartedAt:    r.CreatedAt,
 			SeedFailed:   r.SeedStatus == "failed",
+			Spin:         spinDTO(r.Spin),
 		})
 	}
 	return out

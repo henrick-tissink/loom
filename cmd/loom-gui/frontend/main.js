@@ -1040,7 +1040,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${bestOfTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${bestOfTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}${spinChip(s)}${overlapChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -1052,6 +1052,7 @@ function appendLiveRow(s, projLabel) {
   if (s.background) { li.querySelector(".tactions").appendChild(killButton(s.name, "Stop")); sealLive(li, s); return; }
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
+  if (canNudge(s)) acts.appendChild(nudgeButton(s));
   // not while a dialog is open: the paste's Enter would answer it
   if (hasReview(s) && !(s.waitingFor && s.waitingFor !== "shell")) acts.appendChild(reviewButton(s, false));
   if (canGoal(s)) acts.appendChild(goalButton(s));
@@ -1487,14 +1488,20 @@ function renderStageHeader(name) {
     `<span class="sh-name">${esc(label)}</span>` +
     (project ? `<span class="sh-proj">${icon(FOLDER_ICON)}${esc(project)}</span>` : "") +
     `<span class="sh-pill"><i style="background:${color}"></i><span style="color:${color}">${esc(statusWord(status))}${wait}</span></span>` +
-    task + goal + (s && s.remoteUrl ? `<span class="sh-chip" data-url="${esc(s.remoteUrl)}" title="${esc(`Under Remote Control: ${s.remoteUrl}\nClick to open`)}">phone</span>` : "") + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
+    task + goal +
+    (s && s.spin ? `<span class="sh-chip over" title="${esc(spinTip(s))}">spinning ×${s.spin.count}</span>` : "") +
+    (s && s.overlaps && s.overlaps.length ? `<span class="sh-chip over"${s.overlaps.length === 1 ? ` data-session="${esc(s.overlaps[0].with)}"` : ""} title="${esc(overlapTip(s))}">${esc(overlapLabel(s))}</span>` : "") +
+    (s && s.remoteUrl ? `<span class="sh-chip" data-url="${esc(s.remoteUrl)}" title="${esc(`Under Remote Control: ${s.remoteUrl}\nClick to open`)}">phone</span>` : "") + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
     (s && (s.external || s.background) ? "" :
       `<span class="sh-acts">` +
+      (s && canNudge(s) ? `<button class="sh-btn" id="sh-nudge" title="Ask it to stop retrying and rethink">${icon(NUDGE_ICON)}Nudge</button>` : "") +
       `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
       (s && overBudget(s) ? `<button class="sh-btn" id="sh-fresh" title="Fresh session from checkpoint (same directory; this one stays open)">Fresh session</button>` : "") +
       `<button class="sh-btn sh-primary" id="sh-reply" title="Quick reply (R)">Reply</button></span>`);
   const diffBtn = el.querySelector("#sh-diff");
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
+  const nudgeBtn = el.querySelector("#sh-nudge");
+  if (nudgeBtn) nudgeBtn.addEventListener("click", () => openNudge(s));
   const hooksBtn = el.querySelector("#sh-hooks");
   if (hooksBtn) hooksBtn.addEventListener("click", () => openHooksPanel(name));
   const replyBtn = el.querySelector("#sh-reply");
@@ -3308,6 +3315,73 @@ async function openRuleSheet(op, i) {
 function heldChip(s) {
   if (!s.held) return "";
   return `<span class="tpill tpill-held" title="${esc(s.held.hook)} blocked this session ${s.held.count} times for the same reason since its task started">held ×${s.held.count} · ${esc(s.held.decision.replace(/^(block|deny)_/, ""))}</span>`;
+}
+
+// ---- per-session: spinning and overlapping (spin.go, overlap.go) ----
+
+// spinTip says what the session keeps hitting: the same tool failure three
+// or more times this turn, so it is retrying rather than diagnosing.
+function spinTip(s) {
+  const p = s.spin;
+  const span = p.first && p.last > p.first ? ` over ${fmtAge(p.last - p.first)}` : "";
+  const what = p.subject ? (p.tool === "Bash" ? `Bash: ${p.subject}` : `${p.tool} on ${p.subject}`) : p.tool;
+  return `The same failure ${p.count} times this turn${span}\n${what}\n${p.sample}` +
+    (canNudge(s) ? "\nNudge asks it to stop and rethink before trying again" : "");
+}
+function spinChip(s) {
+  if (!s.spin) return "";
+  return `<span class="tpill tpill-bad" title="${esc(spinTip(s))}">spinning ×${s.spin.count}</span>`;
+}
+
+// overlapTip names the other live sessions with pending changes to the same
+// files. In one checkout they overwrite each other; on two branches they
+// conflict at merge. A pill naming one session goes to it on click.
+function overlapTip(s) {
+  const nameOf = (n) => { const x = latestSessions.find((y) => y.name === n); return x ? displayName(x) : n; };
+  const lines = s.overlaps.map((h) => `${nameOf(h.with)}: ${h.files.join(", ")}${h.more ? ` and ${h.more} more` : ""}`);
+  return `Also changed by ${s.overlaps.length === 1 ? "another live session" : "other live sessions"}:\n${lines.join("\n")}\n` +
+    "In one checkout they overwrite each other; on two branches they conflict at merge." +
+    (s.overlaps.length === 1 ? "\nClick to go to it" : "");
+}
+function overlapLabel(s) {
+  const o = s.overlaps;
+  if (o.length > 1) return `overlap ×${o.length}`;
+  const n = o[0].files.length + (o[0].more || 0);
+  return `overlap · ${n === 1 ? o[0].files[0].split("/").pop() : `${n} files`}`;
+}
+function overlapChip(s) {
+  if (!s.overlaps || !s.overlaps.length) return "";
+  const go = s.overlaps.length === 1 ? ` data-session="${esc(s.overlaps[0].with)}"` : "";
+  return `<span class="tpill tpill-held"${go} title="${esc(overlapTip(s))}">${esc(overlapLabel(s))}</span>`;
+}
+document.addEventListener("click", (e) => {
+  const pill = e.target.closest && e.target.closest(".tpill[data-session], .sh-chip[data-session]");
+  if (!pill) return;
+  e.stopPropagation();
+  e.preventDefault();
+  selectSession(pill.dataset.session);
+}, true);
+
+// canNudge: a spinning session loom has a pane for, with no dialog open (the
+// paste's Enter would answer it). A busy session takes it as a queued message.
+function canNudge(s) {
+  return !!s.spin && !s.external && !s.background && !(s.waitingFor && s.waitingFor !== "shell");
+}
+const NUDGE_ICON = '<circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/>';
+function nudgeButton(s) {
+  return actionBtn(NUDGE_ICON, "Nudge: ask it to stop retrying and rethink", () => openNudge(s));
+}
+// openNudge shows the stop-and-rethink message, composed from the failure,
+// for the operator to edit; it is sent only on the click.
+function openNudge(s) {
+  openPromptModal(s, {
+    label: "Nudge",
+    title: "Nudge: stop and rethink",
+    sub: `Sent to ${displayName(s)} as one message; if it is mid-turn, claude takes it as a queued message.`,
+    fetch: () => window.go.main.App.NudgePrompt(s.name),
+    placeholder: "Composing…",
+    sendLabel: "Send nudge",
+  });
 }
 
 function hooksChip(s) {

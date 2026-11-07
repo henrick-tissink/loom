@@ -738,3 +738,37 @@ func TestPollReportsJobsWithoutAdopting(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 	}
 }
+
+// A live row carries its transcript's repeating failure and edited files.
+func TestPollCarriesSpinAndEdited(t *testing.T) {
+	tm, st, ccd := testEnv(t)
+	cwd := t.TempDir()
+	id := "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	name := launchFake(t, tm, ccd, cwd, id)
+	lines := `{"type":"user","promptId":"p1","message":{"role":"user","content":"fix it"}}` + "\n"
+	for i := 0; i < 3; i++ {
+		lines += fmt.Sprintf(`{"type":"assistant","cwd":%q,"message":{"role":"assistant","content":[{"type":"tool_use","id":"b%d","name":"Bash","input":{"command":"make"}}],"stop_reason":"tool_use"}}`+"\n", cwd, i)
+		lines += fmt.Sprintf(`{"type":"user","promptId":"p1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b%d","content":"Exit code 2\nmake: *** No rule to make target 'x'","is_error":true}]}}`+"\n", i)
+	}
+	lines += fmt.Sprintf(`{"type":"assistant","cwd":%q,"message":{"role":"assistant","content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"Makefile"}}],"stop_reason":"tool_use"}}`+"\n", cwd)
+	lines += `{"type":"user","promptId":"p1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e1","content":"ok"}]}}` + "\n"
+	if err := os.WriteFile(transcript.Path(ccd, cwd, id), []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st.Upsert(store.SessionRow{Name: name, ClaudeSessionID: id, ProjectLabel: "p",
+		Cwd: cwd, CreatedAt: 1, EndedAt: -1, ExitCode: -1, LastStatus: "unknown"})
+	snap, err := NewEngine(tm, st, ccd).Poll(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Live) != 1 {
+		t.Fatalf("live = %+v", snap.Live)
+	}
+	r := snap.Live[0]
+	if r.Spin == nil || r.Spin.Count != 3 || r.Spin.Tool != "Bash" {
+		t.Fatalf("spin = %+v", r.Spin)
+	}
+	if len(r.Edited) != 1 || r.Edited[0].Path != filepath.Join(cwd, "Makefile") {
+		t.Fatalf("edited = %v", r.Edited)
+	}
+}

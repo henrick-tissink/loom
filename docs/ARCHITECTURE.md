@@ -97,7 +97,7 @@ frontend.
         │                                    │
         └──────────────────────┬─────────────┤
                                │             │
-   internal/status ────────────┤     internal/{gitdiff,cleanup}
+   internal/status ────────────┤     internal/{gitdiff,cleanup,overlap}
         │        │             │
    internal/session   internal/transcript   internal/memory
         │                │                     │
@@ -110,7 +110,7 @@ frontend.
 |---|---|---|
 | `tmux` | Every interaction with the `-L loom` server | Only place that shells out to `tmux`. Exact-match targets (`=name`), locale defense. |
 | `session` | Launch recipe + the launch/resume sequence | Owns tmux naming, argv construction, the ready/trust gate, seed delivery, multi-repo `--add-dir`. |
-| `transcript` | Locate + interpret Claude's JSONL | Path encoding, incremental `Reader`, turn-boundary `Classifier`. |
+| `transcript` | Locate + interpret Claude's JSONL | Path encoding, incremental `Reader`, turn-boundary `Classifier`. The classifier also tracks the current turn's repeated tool failures (`Spin`) and the files the session wrote through its file tools (`Edited`); §5.7. |
 | `ccsessions` | Read Claude's own session registry and its background sessions | The only way to learn a pane's *current* session id after `/clear` or an in-pane resume. Also lists background sessions (`claude agents --json --all`, throttled) and stops one (`claude stop`). |
 | `taskfile` | Read the hooks' task file and checkpoint | Finish line (status, Done-when ticks, outcome, `Started:` time, the stop guard's `.verified` marker) and hand-over age per session; stat-cached per poll. |
 | `diet` | The context-diet report: plugins at user scope, MCP servers and connectors per project, commands to copy | Pure and read-only over Claude's own files; `diet/fromstore` is its only tie to loom.db. Nothing is applied. |
@@ -147,6 +147,7 @@ no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `forge` | A branch's GitHub PR or GitLab MR, its CI and review state and open review feedback (composed into a prompt), through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
 | `usage` | Plan rate-limit windows from the opt-in status-line tap, token totals from transcripts | Writes settings.json only on the explicit Track / Stop click, after a backup; §5.2. |
 | `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
+| `overlap` | Live sessions with pending changes to the same files: a directory's checkout (main or linked worktree, keyed by the common git dir), a checkout's dirty files and its branch's unique commits' files, the pairwise match | Read-only (`git status`, `git log`); the GUI decides what each session owns and caches the git reads; §5.7. |
 | `bestof` | Best-of-N groups (the same seed launched as 2–3 worktree sessions) | Only the group file; each attempt's change comes from `gitdiff.Against`, its removal from `worktree.Discard`; §4.5. |
 | `scripts` | A project's setup and run scripts, each workspace's port block (with a free check on both loopbacks), job names and the job's command line | The scripts are the person's, kept in `~/.loom/scripts.json`; nothing reads or writes a repo config; §5.6. |
 | `cleanup` | Remove git-ignored build junk | Only paths that are *both* ignored and junk-patterned. |
@@ -510,6 +511,54 @@ A setup that could not start keeps its reason on the row. Run, Stop, Run
 setup again and the output are clicks. Nothing restarts a crashed run.
 `RemoveWorktree` refuses while either job is alive.
 
+### 5.7 Spinning and overlapping sessions (`transcript/spin.go`, `internal/overlap`)
+
+**Spinning.** The classifier keeps, for the current turn, a count per failure
+key. A turn is one `promptId`: claude stamps it on the human prompt and every
+record the turn produces, including tool results, stop-hook feedback
+(`isMeta`) and compaction summaries; a task notification starts a new one.
+Transcripts without `promptId` fall back to a non-meta user record that is not
+a tool result. The key is a hash of the tool, the file for file tools, and the
+error text normalised (hex runs and digits masked, whitespace collapsed). For
+Bash it is the output with the `Exit code N` line dropped, so a reworded
+command that fails the same way counts again. An output too short to tell
+apart falls back to the command and exit code. Failures that are not the
+agent's are skipped: a declined tool call, a hook's block, the auto-mode
+classifier denying a call (its text is the same whatever the command) or
+being unavailable. Three hits make a `Spin`. It is reported while
+its last hit is within the last 8 tool results, and a success of the same
+command or file clears it. Replayed over 82 real transcripts (3,246 turns), it
+flagged one turn, a genuine loop.
+
+The GUI keeps the rail's spins (`App.noteSpins`), so `NudgePrompt` composes
+from what the operator sees rather than polling again. The message is sent
+only on a click, through `SendPrompt`.
+
+**Overlap.** `Classifier.Edited` is the absolute paths of successful
+Edit/Write/MultiEdit/NotebookEdit calls (relative ones resolved against the
+record's `cwd`). `cmd/loom-gui/overlap.go` gives each visible row a set of
+pending files, keyed by (common git dir, repo-relative path), so a main
+checkout and its worktrees compare equal:
+
+- a linked worktree with exactly one live session in it, counting hidden
+  rows, is that session's: `git status` dirty files plus the files of `git
+  log HEAD --not --branches --remotes`, excluding the branch's own name and
+  its remote copies (pushed is not merged);
+- anywhere else, the session's edited files that `git status` still shows
+  dirty there. An edit that a read started after it found clean (committed
+  or reverted) is forgotten for that session until its next edit of the
+  file, so a long-lived session is not named for every file it ever touched.
+
+`overlap.Find` pairs sessions sharing a file. Git runs off the poll: each
+checkout's answer is refreshed in the background after 10 s, at most 4 reads
+at once, with a 5 s timeout, and dropped after 2 minutes unused. A failed read
+keeps the last answer. Only visible rows are compared, so a hidden project's
+session is never named in a chip.
+
+Limits: edits through Bash count only in an owned worktree; subagents'
+transcripts are not read; a `/clear` rebind starts the edited set afresh; a
+merge done on the remote counts only after a fetch.
+
 ## 6. Data model (`~/.loom/loom.db`)
 
 SQLite via `modernc.org/sqlite` (pure Go, no cgo), `journal_mode=WAL`,
@@ -872,6 +921,7 @@ going to be one.** Loom is a cockpit for a human who is present.
 |---|---|
 | How is a session started? | `internal/session/{recipe,launch}.go` |
 | Why does a row say "running"? | `internal/transcript/classify.go` + `internal/status/status.go` |
+| Why does a row say spinning or overlap? | `internal/transcript/spin.go`, `internal/overlap/overlap.go`, `cmd/loom-gui/overlap.go` |
 | Why did a row disappear / come back / change id? | `internal/status/engine.go`, `internal/ccsessions/ccsessions.go` |
 | What's in the DB? | `internal/store/store.go` (migrations), `memory.go`, `projects.go` |
 | How is search built? | `internal/store/memory.go` (`searchSQL`) |

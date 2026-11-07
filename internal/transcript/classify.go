@@ -35,7 +35,12 @@ type record struct {
 	AiTitle     string `json:"aiTitle"`
 	Timestamp   string `json:"timestamp"` // RFC 3339, written on every turn record
 	IsMeta      bool   `json:"isMeta"`
-	Subtype     string `json:"subtype"`
+	// PromptID names the turn a record belongs to: claude mints one per
+	// prompt (a person's message or a task notification), and every tool
+	// result and stop-hook feedback in that turn carries it.
+	PromptID string `json:"promptId"`
+	Cwd      string `json:"cwd"`
+	Subtype  string `json:"subtype"`
 	// Content is a system record's text; raw, so a record whose content is
 	// not a string still parses
 	Content    json.RawMessage `json:"content"`
@@ -72,6 +77,13 @@ type block struct {
 	Type string `json:"type"`
 	Name string `json:"name"`
 	Text string `json:"text"`
+	// tool_use
+	ID    string          `json:"id"`
+	Input json.RawMessage `json:"input"`
+	// tool_result
+	ToolUseID string          `json:"tool_use_id"`
+	IsError   bool            `json:"is_error"`
+	Content   json.RawMessage `json:"content"`
 }
 
 // Goal is the session's /goal as claude records it: a goal_status
@@ -106,6 +118,14 @@ type Classifier struct {
 	ask   string
 	askAt int64
 	goal  Goal
+	// spin.go: the turn's tool calls and failures, and the files edited.
+	turn        string
+	results     int
+	calls       map[string]toolCall
+	fails       map[string]*failure
+	edited      map[string]int64
+	editedList  []Edit
+	editedDirty bool
 }
 
 func (c *Classifier) Feed(line []byte) {
@@ -126,6 +146,12 @@ func (c *Classifier) Feed(line []byte) {
 		return // sidecar or subagent record: not a turn boundary
 	}
 	blocks := parseBlocks(r)
+	if r.Type == "assistant" {
+		c.noteCalls(blocks, r.Cwd)
+	} else {
+		c.noteTurn(r, blocks)
+		c.noteResults(blocks, parseTS(r.Timestamp))
+	}
 	switch r.Type {
 	case "assistant":
 		if r.Message != nil && r.Message.Usage != nil {

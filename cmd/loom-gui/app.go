@@ -85,11 +85,20 @@ type App struct {
 	// usage is the usage view's state (usage.go); nil when the claude
 	// config dir is unknown.
 	usage *usageState
+
+	// ov finds sessions with pending changes to the same files
+	// (overlap.go); nil in tests that do not set one.
+	ov *overlapState
+	// spins are the rail's current repeating failures, by session, for
+	// NudgePrompt (spin.go).
+	spinMu sync.Mutex
+	spins  map[string]SpinDTO
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {
 	a := &App{engine: engine, tm: tm, st: st, launcher: launcher, projects: svc, now: now, notifier: newNotifier(),
 		wt:       newWorktreeCache(now),
+		ov:       newOverlapState(now),
 		forgeRun: forge.Exec}
 	a.prs = newPRCache(now, func(ctx context.Context, dir, branch string) (*forge.PR, error) {
 		return forge.Lookup(ctx, a.forgeRun, dir, branch)
@@ -150,6 +159,8 @@ func (a *App) ListSessions() (out []SessionDTO) {
 		a.hooks.reader.Refresh()
 		applyHooks(out, snap, a.hooks.reader)
 	}
+	a.ov.apply(out, snap.Live)
+	a.noteSpins(out)
 	a.onSnapshot(snap, out, res)
 	return out
 }
