@@ -21,3 +21,35 @@ jobs:
           pkgs=$(go list ./... | grep -v /cmd/loom-gui)
           go vet $pkgs
           go test -count=1 $pkgs
+  linux-gui:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev tmux desktop-file-utils
+      - run: npm ci && npm run build
+        working-directory: cmd/loom-gui/frontend
+      - run: go vet -tags webkit2_41 ./...
+      - run: go test -tags webkit2_41 ./...
+      - run: go build -tags production,webkit2_41 -o loom-gui ./cmd/loom-gui
+      - run: python3 tools/test_install_linux.py
+  macos-gui:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: brew install tmux
+      - run: npm ci && npm run build
+        working-directory: cmd/loom-gui/frontend
+      - run: go test ./cmd/loom-gui ./internal/config ./internal/tmux
+      - run: go build -tags production -o loom-gui ./cmd/loom-gui

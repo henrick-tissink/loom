@@ -931,3 +931,24 @@ going to be one.** Loom is a cockpit for a human who is present.
 | Bundling the Agent Discipline Handbook (installer, doctor, GUI surfaces) | `docs/DISCIPLINE.md` (plan, not yet built) |
 | Empirical findings about Claude's CLI | `docs/spikes/` |
 | The parked arcs | `git show parked-arcs` |
+
+
+## Linux desktop boundary (2026-11-11)
+
+Linux acquires a per-user `~/.loom/gui.lock` flock and a private `gui.sock`
+activation endpoint before checking dependencies or opening the DB. A second
+invocation queues activation with a five-second bound; failed delivery refuses
+a duplicate owner. Kernel lock lifetime handles crashes and the next owner
+cleans stale sockets. This is independent of D-Bus. macOS retains its existing
+multi-instance behavior. Avoid treating shared SQLite as multi-GUI coordination.
+
+`desktop.go` dispatches Linux open/reveal with bounded calls and real errors;
+notification dispatch uses notify-send asynchronously. Linux identity is
+`loom-gui` with desktop entry/icon `loom`. Its backing surface remains opaque
+and its Wails GPU policy explicitly remains Never. The frontend gets OS identity
+through `Platform()` and selects input/layout conventions explicitly.
+
+Settings writes serialize through the store mutex, replace a unique temporary
+file atomically, and update the in-memory snapshot only after a successful save.
+Workspace precedence is environment, saved settings, then `~/Sauce`. Live theme
+changes still synchronize the agent launch theme through SystemAppearance.

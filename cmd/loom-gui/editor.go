@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 )
 
 // resolveFile resolves path (possibly relative to cwd) to an existing absolute
@@ -130,6 +131,14 @@ func (a *App) OpenInEditor(sessionName, path string, line int) error {
 	if a.settings != nil {
 		preferred = a.settings.get().Editor
 	}
+	if runtime.GOOS == "linux" {
+		bin := pickEditor(exec.LookPath, preferred)
+		if bin == "open" {
+			return desktopOpen(abs)
+		}
+		argv := editorArgv(bin, abs, line)
+		return desktopCommand(argv[0], argv[1:]...)
+	}
 	// Fire and forget — the editor runs independently of loom — but reap each
 	// child (GUI editor CLIs fork-and-exit) so it doesn't linger as a zombie.
 	// The open-at-line command must start before the activate so the file is
@@ -153,5 +162,5 @@ func (a *App) RevealInFinder(path string) error {
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("path not found: %s", path)
 	}
-	return exec.Command("open", "-R", path).Start()
+	return desktopReveal(path)
 }

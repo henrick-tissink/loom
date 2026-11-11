@@ -58,7 +58,7 @@ behind the non-obvious choices.
 
 ## Requirements
 
-- macOS, `tmux` ≥ 3.x, `claude` CLI, Go ≥ 1.22 (build only)
+- macOS or Linux, `tmux` ≥ 3.x, `claude` CLI; Go version from `go.mod` (build only)
 
 ## Build & run
 
@@ -107,3 +107,11 @@ To get `loom` on your PATH:
   native scroll — a known, deliberate deviation from raw `claude`.
 - State: `~/.loom/loom.db`. Transcripts remain claude's own (`~/.claude/projects/...`).
 - Design: `docs/superpowers/specs/2026-07-02-cockpit-core-design.md`.
+
+
+Linux desktop helpers: install `libnotify` for notifications, `xdg-utils` or
+`gio` for opening files/links, and optionally `zenity` for startup error dialogs.
+Use `make install-linux` to install the already-built binary and
+`make uninstall-linux` to remove application artifacts while retaining history
+and agent sessions. The initial validated target is CachyOS/Hyprland; other
+compositors and portable packages still require release qualification.

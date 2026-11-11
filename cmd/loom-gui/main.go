@@ -27,6 +27,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 )
 
@@ -35,12 +36,21 @@ var assets embed.FS
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "loom-gui:", err)
+		startupError(err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
+	release, forwarded, err := acquireGUI()
+	if err != nil {
+		return err
+	}
+	defer release()
+	if forwarded {
+		return nil
+	}
+
 	// GUI apps launched from Finder/Dock get a minimal PATH; make tmux/claude
 	// resolve the same as they do in a terminal before we check for them.
 	hydratePATH()
@@ -150,13 +160,14 @@ func run() error {
 		Height:      760,
 		MinWidth:    760,
 		MinHeight:   480,
-		OnStartup:   func(ctx context.Context) { app.startup(ctx) },
+		OnStartup:   func(ctx context.Context) { app.startup(ctx); listenActivation(ctx) },
 		Bind:        []interface{}{app},
 		AssetServer: &assetserver.Options{Assets: assets},
 		// A transparent webview over a translucent window: the ground (the
 		// strips between the islands) lets the desktop's vibrancy through,
 		// tinted by tokens.css; the islands themselves stay opaque.
 		BackgroundColour: background,
+		Linux:            &linux.Options{ProgramName: "loom-gui", WebviewGpuPolicy: linux.WebviewGpuPolicyNever},
 		Mac: &mac.Options{
 			TitleBar:             mac.TitleBarHiddenInset(),
 			WebviewIsTransparent: true,

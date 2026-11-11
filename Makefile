@@ -33,11 +33,15 @@ gui-linux:
 
 # Optional: make gui-install-linux LOOM_WORKSPACE=/path/to/projects
 gui-install-linux: gui-linux
+	$(MAKE) install-linux LOOM_WORKSPACE="$(LOOM_WORKSPACE)"
+
+.PHONY: install-linux uninstall-linux
+install-linux:
 	python3 tools/install-linux.py --workspace "$(LOOM_WORKSPACE)"
 
 # Install the Wails CLI only if it isn't already present.
 $(WAILS):
-	go install github.com/wailsapp/wails/v2/cmd/wails@latest
+	go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
 
 # Build the loom GUI app bundle.
 gui: $(WAILS)
@@ -60,3 +64,13 @@ bundle-test:
 
 bundle-manifest:
 	cd internal/discipline && go run ./gen
+
+uninstall-linux:
+	python3 tools/install-linux.py --uninstall
+
+# Host-specific artifact: GTK/WebKit, tmux and Claude remain runtime dependencies.
+.PHONY: package-linux
+package-linux: gui-linux
+	mkdir -p cmd/loom-gui/build/packages
+	tar -czf cmd/loom-gui/build/packages/loom-linux-$$(uname -m).tar.gz loom-gui tools/install-linux.py cmd/loom-gui/build/appicon.svg README.md
+	cd cmd/loom-gui/build/packages && sha256sum loom-linux-*.tar.gz > SHA256SUMS

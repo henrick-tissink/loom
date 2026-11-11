@@ -1,7 +1,8 @@
 # Linux desktop support plan
 
-Status: proposed implementation plan; no porting work beyond the baseline below
-has been completed. Branch: `plan/linux-native-desktop`, based on `e8131d2`
+Status: core desktop implementation landed in the working branch; release
+qualification and optional distribution/desktop enhancements remain. See the
+implementation record below. Branch: `plan/linux-native-desktop`, based on `e8131d2`
 on `fix/linux-window-flicker`.
 
 ## Outcome and scope
@@ -298,3 +299,37 @@ without data loss; confirm macOS behavior remains intact. Record environment,
 results, unresolved limitations and evidence with the release. Human observation
 is required for flicker, focus and notification behavior; automated tests alone
 do not establish those outcomes.
+
+
+## Implementation record (2026-11-11)
+
+Delivered: early Linux flock/socket ownership and bounded activation; explicit
+GPU policy and identity; Linux notification dispatch with rate-limited errors;
+bounded URL/file/editor opening and file-manager reveal fallback; Linux modifier,
+clipboard, palette, opaque layout, focus and reduced-motion behavior; portal
+startup appearance and UTF-8 defaults; workspace preference; safer settings
+persistence; visible startup diagnostics and error record; atomic artifact
+installation, receipt-checked uninstall, tarball/checksum build target; GUI CI
+for Linux/macOS; refreshed user/architecture documentation. Compatible dependency
+updates reduce npm audit findings from five to two.
+
+Validation: production frontend/Go build; full Go test suite (including GUI),
+vet, GUI/config/tmux race tests; installer upgrade/uninstall and modified-file
+protection tests; desktop-file validation; Hyprland mapped window and immediate
+second-launch forwarding observed. Full tests require a normal temporary root:
+the execution sandbox exposes a synthetic /tmp/.git that invalidates an existing
+outside-repository test, so the suite was rerun with TMPDIR=/var/tmp.
+
+Not yet release-qualified: sustained compositor/GPU performance and mixed-DPI
+checks, suspend/resume, clipboard/IME/screen-reader and notification visuals,
+GNOME/KDE/X11 and physical macOS validation. CI jobs are configured, not yet run
+remotely. A pre-change performance baseline was not captured, so no performance
+improvement is claimed. Some interactive launches exited cleanly before later
+inspection; an immediate launch/activation test passed, but user confirmation
+of whether those windows were closed is outstanding.
+
+Remaining work: AppImage/Flatpak feasibility prototypes and portable distro/ABI
+qualification; major Vite/esbuild audit remediation (two remaining build-tool
+findings); optional tray, autostart, notification actions, geometry and desktop
+actions. The tarball targets the build host's GTK/WebKit/glibc ABI and is not a
+universal Linux binary. Multi-window coordination remains explicitly deferred.
