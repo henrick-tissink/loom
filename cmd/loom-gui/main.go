@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/henricktissink/loom/internal/brief"
@@ -135,6 +136,14 @@ func run() error {
 		Writer:  brief.Writer{Binary: "claude", WorkDir: cfg.LoomDir},
 	})
 
+	background := &options.RGBA{R: 0, G: 0, B: 0, A: 0}
+	if runtime.GOOS == "linux" {
+		// GTK/WebKit needs an opaque backing surface. The transparent
+		// macOS vibrancy background can flicker at the window edges under
+		// Wayland compositors when the webview repaints.
+		background = &options.RGBA{R: 23, G: 17, B: 20, A: 255}
+	}
+
 	return wails.Run(&options.App{
 		Title:       "loom",
 		Width:       1180,
@@ -147,7 +156,7 @@ func run() error {
 		// A transparent webview over a translucent window: the ground (the
 		// strips between the islands) lets the desktop's vibrancy through,
 		// tinted by tokens.css; the islands themselves stay opaque.
-		BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 0},
+		BackgroundColour: background,
 		Mac: &mac.Options{
 			TitleBar:             mac.TitleBarHiddenInset(),
 			WebviewIsTransparent: true,

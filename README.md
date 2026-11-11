@@ -62,6 +62,18 @@ behind the non-obvious choices.
 
 ## Build & run
 
+On Linux (GTK3 and WebKit2GTK 4.1 installed):
+
+    make gui-install-linux LOOM_WORKSPACE="$HOME/dev"
+
+This builds the embedded frontend and installs `~/.local/bin/loom-gui`, an
+icon, and a Loom application-menu entry. Open your desktop launcher and type
+**Loom**. Repeat the command to update. The installed app runs independently
+of this checkout; tmux, Claude CLI, and GTK/WebKit runtime libraries are still
+required. Building requires Go, npm, a C compiler, pkg-config, GTK/WebKit
+development files, and Python 3 for the installer. Without `LOOM_WORKSPACE`,
+project discovery uses Loom's default (`~/Sauce`) or the launch environment.
+
 The app is the frontend:
 
     make gui-install        # builds and installs /Applications/loom.app

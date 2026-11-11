@@ -23,6 +23,18 @@ APP     := $(GUI_DIR)/build/bin/loom.app
 
 .PHONY: gui gui-install gui-run bundle-test bundle-manifest
 
+# Linux desktop build: embeds the frontend; no development server at runtime.
+# Override WEBKIT_TAG for distributions using a different WebKit ABI.
+WEBKIT_TAG ?= webkit2_41
+.PHONY: gui-linux gui-install-linux
+gui-linux:
+	cd $(GUI_DIR)/frontend && npm ci && npm run build
+	go build -tags 'production,$(WEBKIT_TAG)' -o loom-gui ./cmd/loom-gui
+
+# Optional: make gui-install-linux LOOM_WORKSPACE=/path/to/projects
+gui-install-linux: gui-linux
+	python3 tools/install-linux.py --workspace "$(LOOM_WORKSPACE)"
+
 # Install the Wails CLI only if it isn't already present.
 $(WAILS):
 	go install github.com/wailsapp/wails/v2/cmd/wails@latest
