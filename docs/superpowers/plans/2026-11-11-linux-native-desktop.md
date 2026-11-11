@@ -45,6 +45,13 @@ desktop service calls with timeouts and reap subprocesses. Missing optional
 services must not stop polling or agent work. Surface actionable errors and
 rate-limit repeated diagnostics. Retain URL validation in `url.go`.
 
+The initial Linux release supports one GUI owner per user/state directory;
+launcher invocations activate that owner. Shared SQLite access remains supported
+for CLI readers/writers, but does not establish safe multi-GUI operation.
+Explicit additional GUI windows are deferred until notification and preference
+coordination is implemented and tested. This is a Linux product policy, not a
+change to existing macOS multi-instance behavior.
+
 ## Phase 1 — Restore everyday desktop functionality
 
 ### 1. Native notifications
@@ -58,6 +65,9 @@ Evidence: `cmd/loom-gui/notify.go` always invokes `osascript`.
   diagnostics rather than silent failure.
 - Identify the app with the installed desktop ID/icon. Escape text appropriately
   for notification markup; avoid markup injection from session titles.
+- Establish the desktop identity and GUI ownership contract before this backend
+  ships, including the notification desktop-entry hint. Per-process transition
+  tracking is not sufficient to deduplicate notifications between GUI owners.
 - Honor the existing notification preference. Later add an optional action
   to select the relevant session when the notification server supports actions.
 - Do not bypass the desktop's do-not-disturb policy or assume sound support.
@@ -66,10 +76,14 @@ Acceptance: one notification per qualifying transition, no repeats on each
 poll, no hidden-project disclosure, graceful missing-bus/server behavior,
 and no subprocess leaks. Verify on Hyprland's notification daemon and GNOME/KDE.
 
-### 2. Open files, reveal paths and editor focus
+### 2. Open URLs/files, reveal paths and editor focus
 
 Evidence: `editor.go` uses `open`, `open -a`, `open -R`; `brief.go` also invokes
 `open`. Frontend labels say Finder.
+
+`url.go` returns success after Wails' void `BrowserOpenURL` call. In pinned
+Wails v2.13, Linux opening ultimately waits on an unbounded command and logs
+errors without returning them to Loom. It must also enter the platform boundary.
 
 - Keep supported editor CLIs and line-number arguments. Make default-app
   fallback platform-specific; never run macOS activation commands on Linux.
@@ -77,6 +91,12 @@ Evidence: `editor.go` uses `open`, `open -a`, `open -R`; `brief.go` also invokes
   encoded file URIs. Fall back to opening the containing directory through
   `xdg-open`/`gio open`; opening a directory should open that directory itself.
 - Open generated brief HTML through the desktop default application.
+- Route every Linux HTTP(S) launch (terminal links, PR links, local development
+  servers and other callers) through the bounded opener; retain scheme validation.
+  Return missing-opener, nonzero-exit and timeout errors to the frontend and
+  display them visibly rather than only logging to the developer console.
+  Distinguish successful dispatch from proof that a browser window appeared.
+  Do not kill an independently launched browser when timing out its opener.
 - Rename visible labels to “Show in file manager”; keep old bridge method
   compatibility until all frontend callers are migrated together.
 - Honor compositor focus restrictions. Report a launched editor accurately;
@@ -84,7 +104,9 @@ Evidence: `editor.go` uses `open`, `open -a`, `open -R`; `brief.go` also invokes
 
 Acceptance: files, directories, spaces, Unicode, quotes and leading hyphens;
 missing paths; no installed editor; no file manager; brief export and reveal.
-Use fake runners for argument/error tests, then real desktop checks.
+Also test HTTP(S) success, rejected schemes, missing/failing/hanging openers,
+and visible error recovery. Use fake runners for argument/error tests, then
+real desktop checks.
 
 ### 3. Keyboard, pointer and clipboard conventions
 
@@ -133,7 +155,8 @@ fullscreen transitions; no clipped controls or unused macOS titlebar gap.
   Wails v2 currently disables webview GPU acceleration by default when Linux
   options are nil; do not inadvertently change this when adding Linux options.
 - Measure typing/scroll latency, idle CPU, resize behavior and memory with
-  representative session counts before tuning. Avoid unconditional GPU flags.
+  representative session counts before any desktop changes, and retain that
+  baseline for subsequent comparisons. Avoid unconditional GPU flags.
 - Coalesce redundant resize/title updates only where measurements justify it.
 - Add a documented renderer fallback if reproducible GPU issues require one;
   verify integrated/discrete GPU configurations when available.
@@ -143,15 +166,32 @@ fullscreen transitions; no clipped controls or unused macOS titlebar gap.
 - `path.go`: validate login-shell PATH hydration with bash, zsh and fish, bounded
   execution, missing shell and a minimal launcher environment. Use an installed
   UTF-8 locale on Linux rather than assume bare `UTF-8` is valid.
+- Include `internal/tmux/tmux.go:ensureLocale` in the same audit. Test absent
+  locale variables separately from explicit `LANG=C` and `LC_ALL=C`; document
+  which explicit settings are preserved and how UTF-8 terminal operation is
+  achieved, rather than silently overriding the user's locale globally.
 - Missing `tmux`/`claude` currently causes early stderr exit. Provide a visible
   startup error with exact missing dependencies and a persistent diagnostic log.
 - Make workspace selection discoverable and persistent, with documented
   precedence: explicit environment override, saved preference, existing default.
 - Align executable, desktop ID, GTK program name and Wayland/X11 app identity
   so icons, grouping and notifications match. Validate actual runtime app ID.
-- Add optional “activate existing window” behavior for launcher invocations,
-  while retaining an explicit new-window path and supported shared-DB access.
-  Investigate Wails v2 support first; no ad-hoc PID lock that strands the app.
+- Resolve GUI ownership and attempt bounded activation forwarding before
+  dependency checks, tmux startup, DB writes, reconciliation or indexer startup.
+  A second invocation must be able to reach a healthy owner even with a reduced
+  PATH or newly missing agent binary. Forward activation only; an environment
+  override on a second launch must not silently replace the owner's workspace.
+- Pinned Wails v2 provides `SingleInstanceLock`, but registers it during frontend
+  construction, after Loom's current initialization. Its Linux D-Bus failure
+  path can allow another instance. Simply enabling it does not meet this plan.
+  Spike early activation/ownership using supported primitives before choosing
+  the implementation; avoid PID-file-only locks and handle crashes/restarts.
+- Degraded policy: do not silently start a second GUI if forwarding fails or
+  ownership cannot be established. Show a bounded, actionable startup error
+  and preserve the existing process/sessions. Without a session bus, a first
+  GUI may start only if an independent ownership mechanism safely establishes
+  exclusivity; otherwise report the missing service and exit. Do not bypass
+  compositor focus restrictions or report activation success without delivery.
 - Define close behavior clearly: close the GUI, leave sessions/jobs running.
   Never terminate tmux as a side effect of desktop activation or shutdown.
 - Exercise suspend/resume, monitor removal, stale tmux sockets and session
@@ -160,6 +200,20 @@ fullscreen transitions; no clipped controls or unused macOS titlebar gap.
 Acceptance: launch from menu after logout/login without an interactive shell;
 clear errors when dependencies are absent; restart adopts existing sessions;
 window grouping works; no unexpected duplicate windows or killed agents.
+Exercise two concurrent launches, a second launch with minimal/changed PATH,
+missing agent binary, absent/disconnected session bus, unreachable owner,
+owner crash and restart. Assert only one GUI starts polling or writes preferences;
+the second launch must not duplicate notifications or alter settings.
+
+Before any later multi-window feature, explicitly solve two confirmed hazards:
+external/background attention transitions are per-engine (owned-session status
+read/update is also not an atomic notification claim), and `settings.go` uses a
+shared `settings.json.tmp` plus independently cached preferences. Define one
+notification owner or atomic delivery claims, and serialized preference updates
+with reload/conflict handling and unique temp files. Unique temp names alone do
+not prevent stale overwrites. Acceptance must include simultaneous preference
+edits and a single external/background attention transition observed by two
+processes. Audit other JSON-backed stores under the same ownership policy.
 
 ## Phase 3 — Installation, distribution and maintainability
 
@@ -228,9 +282,13 @@ checks for unchanged transparency, shortcuts, notifications and open/reveal.
 
 ## Delivery sequence and definition of done
 
-Keep commits/PRs reviewable: (1) platform boundary and open/reveal, (2) native
-notifications, (3) input/layout/theme, (4) startup/identity/diagnostics,
+Start with rendering/resource baseline capture and an activation/ownership spike.
+Then keep commits/PRs reviewable: (1) platform boundary, desktop identity and
+early GUI ownership/activation, (2) bounded URL/file opening and reveal,
+(3) native notifications, (4) input/layout/theme and remaining startup diagnostics,
 (5) installer/CI/docs, then measured rendering fixes and optional enhancements.
+The numbered feature sections above group scope; this sequence defines their
+implementation dependencies. Multi-window support is a separate later feature.
 Each change carries focused tests and real desktop verification where needed.
 
 Before calling Linux supported: launch installed artifact from menu; start a
