@@ -23,9 +23,25 @@ APP     := $(GUI_DIR)/build/bin/loom.app
 
 .PHONY: gui gui-install gui-run bundle-test bundle-manifest
 
+# Linux desktop build: embeds the frontend; no development server at runtime.
+# Override WEBKIT_TAG for distributions using a different WebKit ABI.
+WEBKIT_TAG ?= webkit2_41
+.PHONY: gui-linux gui-install-linux
+gui-linux:
+	cd $(GUI_DIR)/frontend && npm ci && npm run build
+	go build -tags 'production,$(WEBKIT_TAG)' -o loom-gui ./cmd/loom-gui
+
+# Optional: make gui-install-linux LOOM_WORKSPACE=/path/to/projects
+gui-install-linux: gui-linux
+	$(MAKE) install-linux LOOM_WORKSPACE="$(LOOM_WORKSPACE)"
+
+.PHONY: install-linux uninstall-linux
+install-linux:
+	python3 tools/install-linux.py --workspace "$(LOOM_WORKSPACE)"
+
 # Install the Wails CLI only if it isn't already present.
 $(WAILS):
-	go install github.com/wailsapp/wails/v2/cmd/wails@latest
+	go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
 
 # Build the loom GUI app bundle.
 gui: $(WAILS)
@@ -48,3 +64,13 @@ bundle-test:
 
 bundle-manifest:
 	cd internal/discipline && go run ./gen
+
+uninstall-linux:
+	python3 tools/install-linux.py --uninstall
+
+# Host-specific artifact: GTK/WebKit, tmux and Claude remain runtime dependencies.
+.PHONY: package-linux
+package-linux: gui-linux
+	mkdir -p cmd/loom-gui/build/packages
+	tar -czf cmd/loom-gui/build/packages/loom-linux-$$(uname -m).tar.gz loom-gui tools/install-linux.py cmd/loom-gui/build/appicon.svg README.md
+	cd cmd/loom-gui/build/packages && sha256sum loom-linux-*.tar.gz > SHA256SUMS

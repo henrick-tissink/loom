@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -48,8 +49,12 @@ func TestHydrateLocale_defaultsWhenUnset(t *testing.T) {
 		os.Unsetenv(k)
 	}
 	hydrateLocale()
-	if got := os.Getenv("LC_CTYPE"); got != "UTF-8" {
-		t.Fatalf("LC_CTYPE = %q, want UTF-8", got)
+	want := "UTF-8"
+	if runtime.GOOS == "linux" {
+		want = "C.UTF-8"
+	}
+	if got := os.Getenv("LC_CTYPE"); got != want {
+		t.Fatalf("LC_CTYPE = %q, want %s", got, want)
 	}
 }
 

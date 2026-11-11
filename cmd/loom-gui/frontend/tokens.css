@@ -1079,3 +1079,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .rs-repo { display: flex; flex-direction: column; gap: 6px; }
 .rs-path { cursor: pointer; font-family: var(--font-mono); font-size: var(--t-micro); overflow-wrap: anywhere; }
 .rs-path:hover { text-decoration: underline; }
+
+/* Linux has compositor decorations, not macOS traffic-light controls. */
+:root[data-platform="linux"] { --ground-tint: 100%; }
+:root[data-platform="linux"] #titlebar { padding-left: 14px; }
+:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

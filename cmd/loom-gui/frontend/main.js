@@ -10,6 +10,14 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 
+// Explicit backend platform identity; no user-agent inference.
+const platform = await window.go.main.App.Platform();
+const isLinux = platform === "linux";
+document.documentElement.dataset.platform = platform;
+const linkModifier = (event) => isLinux ? event.ctrlKey : event.metaKey;
+const linkHint = isLinux ? "Ctrl-click to open" : "⌘-click to open";
+function desktopError(error) { window.alert("Loom: " + String(error)); }
+
 const threadsEl = document.getElementById("threads");
 const projectsEl = document.getElementById("projects");
 const threadsHeadEl = document.getElementById("threads-head");
@@ -110,12 +118,13 @@ syncFullscreen();
 
 // Wrapped rather than passed directly: openLauncher's first argument is a
 // preselected target path, and a raw listener would hand it a MouseEvent.
+document.getElementById("commands-btn").addEventListener("click", openPalette);
 document.getElementById("new-session").addEventListener("click", () => openLauncher());
 document.getElementById("search-btn").addEventListener("click", openSearch);
 document.getElementById("prefs-btn").addEventListener("click", openPrefs);
 document.addEventListener("keydown", (e) => {
   // ⌘K only (not Ctrl+K) — Ctrl+K is the terminal's readline "kill line".
-  if (e.metaKey && (e.key === "k" || e.key === "K")) {
+  if (isLinux ? (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "p") : (e.metaKey && e.key.toLowerCase() === "k")) {
     e.preventDefault();
     openPalette();
     return;
@@ -1457,7 +1466,7 @@ function homeMarkup() {
   return `<div class="home"><div class="home-inner">` +
     `<div class="home-hero${queue.length ? " asking" : ""}"><div class="br-empty-mark">${briefWave}</div><h2>${esc(head)}</h2><p>${esc(sub)}</p></div>` +
     body +
-    `<div class="home-keys"><button class="home-new">+ New thread</button><span><kbd>⌘K</kbd> commands</span><span><kbd>/</kbd> search</span></div>` +
+    `<div class="home-keys"><button class="home-new">+ New thread</button><span><kbd>${isLinux ? "Ctrl+Shift+P" : "⌘K"}</kbd> commands</span><span><kbd>/</kbd> search</span></div>` +
     `</div></div>`;
 }
 
@@ -1789,7 +1798,7 @@ function renderProject() {
       ${r.missing ? `<span class="po-tag">missing</span>` : ""}
       <span class="po-racts">
         <button class="tact po-launch"${r.missing ? " disabled" : ""} title="${r.missing ? "Directory is gone — re-point the project first" : "New session here"}">launch</button>
-        <button class="tact po-reveal"${r.missing ? " disabled" : ""} title="Reveal in Finder">reveal</button>
+        <button class="tact po-reveal"${r.missing ? " disabled" : ""} title="Show in file manager">reveal</button>
         <button class="tact po-copy" title="Copy path">copy</button>
         <button class="tact po-remove" title="Move this repo to a project of its own">remove</button>
       </span>
@@ -1861,7 +1870,7 @@ function renderProject() {
     if (launch && !launch.disabled) launch.addEventListener("click", () => openLauncher(path));
     const reveal = li.querySelector(".po-reveal");
     if (reveal && !reveal.disabled) reveal.addEventListener("click", () =>
-      window.go.main.App.RevealInFinder(path).catch((e) => console.error("reveal", e)));
+      window.go.main.App.RevealInFinder(path).catch(desktopError));
     li.querySelector(".po-copy").addEventListener("click", async (e) => {
       const b = e.currentTarget;
       try {
@@ -2163,7 +2172,7 @@ function renderBriefReader() {
       <button class="br-cur" id="br-cur" title="Contents"><span id="br-cur-t">${esc("Last " + briefWinLabel(m.window))}</span><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
       <span class="br-bacts">
         <button class="sh-btn" id="br-page" title="Open as a standalone page in your browser, to print or keep">Make artefact</button>
-        <button class="sh-btn" id="br-files" title="Show brief.md, evidence.md and the page in Finder">Files</button>
+        <button class="sh-btn" id="br-files" title="Show brief.md, evidence.md and the page in file manager">Files</button>
       </span>
     </div>
     <div class="br-body" id="br-body">
@@ -2185,7 +2194,7 @@ function renderBriefReader() {
   const pb = document.getElementById("br-page");
   pb.addEventListener("click", () => flash(pb, "Opening…", "Opened in browser", () => window.go.main.App.BriefArtefact(id)));
   const fb = document.getElementById("br-files");
-  fb.addEventListener("click", () => flash(fb, "Opening…", "Shown in Finder", () => window.go.main.App.BriefReveal(id)));
+  fb.addEventListener("click", () => flash(fb, "Opening…", "Shown in file manager", () => window.go.main.App.BriefReveal(id)));
   const bodyEl = document.getElementById("br-body");
   // Narrow: the outline is a menu under the bar's title. It is placed from
   // the button, so it opens in the same spot however far the reader scrolled.
@@ -2274,7 +2283,7 @@ async function openCreateProject() {
       <div class="field">
         <label for="cp-root">Root directory</label>
         <div class="pm-row">
-          <input id="cp-root" class="search-input" type="text" placeholder="/Users/you/Sauce/Innostream" autocomplete="off" spellcheck="false" />
+          <input id="cp-root" class="search-input" type="text" placeholder="/path/to/project" autocomplete="off" spellcheck="false" />
           ${picker ? `<button class="btn-ghost" id="cp-pick">Choose…</button>` : ""}
         </div>
       </div>
@@ -2289,7 +2298,7 @@ async function openCreateProject() {
       <div class="field">
         <label for="cp-extra">Add a repo outside the root</label>
         <div class="pm-row">
-          <input id="cp-extra" class="search-input" type="text" placeholder="/Users/you/other/repo" autocomplete="off" spellcheck="false" />
+          <input id="cp-extra" class="search-input" type="text" placeholder="/path/to/other/repo" autocomplete="off" spellcheck="false" />
           ${picker ? `<button class="btn-ghost" id="cp-extra-pick">Choose…</button>` : ""}
           <button class="btn-ghost" id="cp-extra-add">Add</button>
         </div>
@@ -2421,6 +2430,7 @@ window.addEventListener("resize", applyCollapse);
 
 // ---- preferences ----
 async function openPrefs() {
+  const buildInfo = await window.go.main.App.BuildInfo();
   if (document.querySelector(".modal-backdrop")) return;
   let prefs = { editor: "", notifications: true, autoSummarize: false, terminalTheme: "dark" };
   try { prefs = await window.go.main.App.GetPrefs(); } catch (e) { console.error("prefs", e); }
@@ -2430,7 +2440,9 @@ async function openPrefs() {
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
     <div class="modal prefs-modal" role="dialog" aria-label="Preferences">
-      <h2>Preferences</h2>
+      <h2>Preferences</h2><small>${esc(buildInfo)}</small>
+      <div class="field"><label for="pf-workspace">Workspace (after restart; LOOM_WORKSPACE overrides)</label>
+      <input id="pf-workspace" value="${esc(prefs.workspaceRoot || "")}" placeholder="/path/to/projects" /></div>
       <div class="field">
         <label for="pf-editor">Editor for opening files</label>
         <select id="pf-editor">${editors.map(([v, l]) => `<option value="${v}"${v === prefs.editor ? " selected" : ""}>${l}</option>`).join("")}</select>
@@ -2452,12 +2464,13 @@ async function openPrefs() {
   backdrop.querySelector("#pf-cancel").addEventListener("click", close);
   backdrop.querySelector("#pf-save").addEventListener("click", async () => {
     const next = {
+      workspaceRoot: backdrop.querySelector("#pf-workspace").value.trim(),
       editor: backdrop.querySelector("#pf-editor").value,
       notifications: backdrop.querySelector("#pf-notif").checked,
       autoSummarize: backdrop.querySelector("#pf-autosum").checked,
       terminalTheme: backdrop.querySelector("#pf-term").value,
     };
-    try { await window.go.main.App.SetPrefs(next); } catch (e) { console.error("setprefs", e); }
+    try { await window.go.main.App.SetPrefs(next); } catch (e) { desktopError(e); return; }
     applyTermTheme(next.terminalTheme); // recolor the open terminal + pane at once
     close();
   });
@@ -2689,6 +2702,20 @@ function selectSession(name) {
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(host);
+  term.attachCustomKeyEventHandler((event) => {
+    if (!isLinux || !event.ctrlKey || !event.shiftKey || event.type !== "keydown") return true;
+    if (event.key.toLowerCase() === "p") return false;
+    if (event.key.toLowerCase() === "c") {
+      navigator.clipboard.writeText(term.getSelection()).catch(desktopError);
+      event.preventDefault(); return false;
+    }
+    if (event.key.toLowerCase() === "v") {
+      const target = term;
+      navigator.clipboard.readText().then((text) => { if (target === term) target.paste(text); }).catch(desktopError);
+      event.preventDefault(); return false;
+    }
+    return true;
+  });
   useWebgl(term);
   fit.fit();
 
@@ -2812,7 +2839,7 @@ function registerFileLinks(t) {
         const url = m[0].replace(/[.,;:!?]+$/, ""); // drop trailing sentence punctuation
         if (!url) continue;
         urlSpans.push([m.index, m.index + url.length]);
-        links.push(link(m.index, url.length, (e) => { if (e && e.metaKey) openURLToken(url); }));
+        links.push(link(m.index, url.length, (e) => { if (e && linkModifier(e)) openURLToken(url); }));
       }
 
       // File paths (with an extension) and well-known extension-less files,
@@ -2824,7 +2851,7 @@ function registerFileLinks(t) {
           const s = m.index, e = m.index + m[0].length;
           if (!notInURL(s, e)) continue;
           const token = m[0];
-          links.push(link(s, m[0].length, (ev) => { if (ev && ev.metaKey) openFileToken(token); }));
+          links.push(link(s, m[0].length, (ev) => { if (ev && linkModifier(ev)) openFileToken(token); }));
         }
       }
       cb(links.length ? links : undefined);
@@ -2838,11 +2865,11 @@ function openFileToken(token) {
   let line = 0;
   const cm = token.match(/^(.+?):(\d+)(?::\d+)?$/);
   if (cm) { path = cm[1]; line = parseInt(cm[2], 10); }
-  window.go.main.App.OpenInEditor(activeName, path, line).catch((e) => console.error("open", e));
+  window.go.main.App.OpenInEditor(activeName, path, line).catch(desktopError);
 }
 
 function openURLToken(url) {
-  window.go.main.App.OpenURL(url).catch((e) => console.error("openurl", e));
+  window.go.main.App.OpenURL(url).catch(desktopError);
 }
 
 // A small "⌘-click to open" tooltip shown while hovering a terminal link, so
@@ -2852,7 +2879,7 @@ function showLinkTip(e) {
   if (!linkTip) {
     linkTip = document.createElement("div");
     linkTip.className = "link-tip";
-    linkTip.textContent = "⌘-click to open";
+    linkTip.textContent = linkHint;
     document.body.appendChild(linkTip);
   }
   linkTip.style.left = (e.clientX + 12) + "px";

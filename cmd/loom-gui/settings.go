@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/godbus/dbus/v5"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/henricktissink/loom/internal/session"
 )
@@ -15,6 +20,7 @@ import (
 // and additive: unknown/absent fields fall back to defaults so old files and
 // new binaries interoperate.
 type Settings struct {
+	WorkspaceRoot string `json:"workspaceRoot"`
 	Editor        string `json:"editor"`        // "" = auto-detect; else "cursor" | "code" | "zed"
 	Notifications bool   `json:"notifications"` // fire native needs-you notifications
 	AutoSummarize bool   `json:"autoSummarize"` // background-summarize finished sessions (uses claude quota)
@@ -65,17 +71,28 @@ func (s *settingsStore) get() Settings {
 func (s *settingsStore) set(v Settings) error {
 	v = normalize(v)
 	s.mu.Lock()
-	s.cur = v
-	s.mu.Unlock()
+	defer s.mu.Unlock()
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(s.path), ".settings-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	defer os.Remove(f.Name())
+	if _, err = f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(f.Name(), s.path); err != nil {
+		return err
+	}
+	s.cur = v
+	return nil
 }
 
 // normalize clamps the editor and terminal theme to known values.
@@ -105,6 +122,16 @@ func (a *App) GetPrefs() Settings {
 // SetPrefs persists the given settings, applies the Claude theme so newly
 // launched/resumed sessions match, and returns any write error.
 func (a *App) SetPrefs(s Settings) error {
+	if s.WorkspaceRoot != "" {
+		if !filepath.IsAbs(s.WorkspaceRoot) {
+			return fmt.Errorf("workspace must be an absolute directory path")
+		}
+		info, err := os.Stat(s.WorkspaceRoot)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("workspace directory does not exist")
+		}
+	}
+
 	if a.settings == nil {
 		return nil
 	}
@@ -139,6 +166,22 @@ func (a *App) SystemAppearance(mode string) {
 // systemAppearance reads the macOS appearance: AppleInterfaceStyle is "Dark"
 // in dark mode and absent (the read fails) in light mode.
 func systemAppearance() string {
+	if runtime.GOOS == "linux" {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if conn, err := dbus.Connect(os.Getenv("DBUS_SESSION_BUS_ADDRESS"), dbus.WithContext(ctx)); err == nil {
+			defer conn.Close()
+			var value dbus.Variant
+			err = conn.Object("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop").CallWithContext(ctx, "org.freedesktop.portal.Settings.Read", 0, "org.freedesktop.appearance", "color-scheme").Store(&value)
+			if err == nil {
+				if n, ok := value.Value().(uint32); ok && n == 1 {
+					return "dark"
+				}
+			}
+		}
+		return "light"
+	}
+
 	out, err := exec.Command("defaults", "read", "-g", "AppleInterfaceStyle").Output()
 	if err == nil && strings.TrimSpace(string(out)) == "Dark" {
 		return "dark"
