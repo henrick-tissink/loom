@@ -324,9 +324,9 @@ Not yet release-qualified: sustained compositor/GPU performance and mixed-DPI
 checks, suspend/resume, clipboard/IME/screen-reader and notification visuals,
 GNOME/KDE/X11 and physical macOS validation. CI jobs are configured, not yet run
 remotely. A pre-change performance baseline was not captured, so no performance
-improvement is claimed. Some interactive launches exited cleanly before later
-inspection; an immediate launch/activation test passed, but user confirmation
-of whether those windows were closed is outstanding.
+improvement is claimed. The immediate launch/activation test passed. The user
+confirmed that all subsequently observed clean window exits were manual closes;
+there is no unexplained startup-exit concern from those observations.
 
 Remaining work: AppImage/Flatpak feasibility prototypes and portable distro/ABI
 qualification; major Vite/esbuild audit remediation (two remaining build-tool
