@@ -58,9 +58,21 @@ behind the non-obvious choices.
 
 ## Requirements
 
-- macOS, `tmux` ≥ 3.x, `claude` CLI, Go ≥ 1.22 (build only)
+- macOS or Linux, `tmux` ≥ 3.x, `claude` CLI; Go version from `go.mod` (build only)
 
 ## Build & run
+
+On Linux (GTK3 and WebKit2GTK 4.1 installed):
+
+    make gui-install-linux LOOM_WORKSPACE="$HOME/dev"
+
+This builds the embedded frontend and installs `~/.local/bin/loom-gui`, an
+icon, and a Loom application-menu entry. Open your desktop launcher and type
+**Loom**. Repeat the command to update. The installed app runs independently
+of this checkout; tmux, Claude CLI, and GTK/WebKit runtime libraries are still
+required. Building requires Go, npm, a C compiler, pkg-config, GTK/WebKit
+development files, and Python 3 for the installer. Without `LOOM_WORKSPACE`,
+project discovery uses Loom's default (`~/Sauce`) or the launch environment.
 
 The app is the frontend:
 
@@ -95,3 +107,11 @@ To get `loom` on your PATH:
   native scroll — a known, deliberate deviation from raw `claude`.
 - State: `~/.loom/loom.db`. Transcripts remain claude's own (`~/.claude/projects/...`).
 - Design: `docs/superpowers/specs/2026-07-02-cockpit-core-design.md`.
+
+
+Linux desktop helpers: install `libnotify` for notifications, `xdg-utils` or
+`gio` for opening files/links, and optionally `zenity` for startup error dialogs.
+Use `make install-linux` to install the already-built binary and
+`make uninstall-linux` to remove application artifacts while retaining history
+and agent sessions. The initial validated target is CachyOS/Hyprland; other
+compositors and portable packages still require release qualification.

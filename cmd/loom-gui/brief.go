@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -281,7 +280,7 @@ func (a *App) BriefArtefact(id string) (string, error) {
 	if err := os.WriteFile(p, []byte(brief.Page(m, src)), 0o600); err != nil {
 		return "", err
 	}
-	return p, exec.Command("open", p).Start()
+	return p, desktopOpen(p)
 }
 
 // BriefReveal shows a brief's folder (brief.md, evidence.md, the page) in Finder.
@@ -293,5 +292,5 @@ func (a *App) BriefReveal(id string) error {
 	if err != nil {
 		return err
 	}
-	return exec.Command("open", "-R", p).Start()
+	return desktopReveal(p)
 }

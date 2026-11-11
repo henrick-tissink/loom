@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -34,7 +35,11 @@ func hydrateLocale() {
 			return
 		}
 	}
-	os.Setenv("LC_CTYPE", "UTF-8")
+	if runtime.GOOS == "linux" {
+		os.Setenv("LC_CTYPE", "C.UTF-8")
+	} else {
+		os.Setenv("LC_CTYPE", "UTF-8")
+	}
 }
 
 // buildPATH merges the current PATH, the login-shell PATH, and well-known bin

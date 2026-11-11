@@ -1050,3 +1050,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .bo-seed summary { cursor: pointer; color: var(--text-dim); font-size: var(--t-small); }
 .bo-lose { margin: 8px 0; padding-left: 18px; }
 .f-hint { font-size: var(--t-small); color: var(--text-dim); margin-top: 4px; }
+
+/* Linux has compositor decorations, not macOS traffic-light controls. */
+:root[data-platform="linux"] { --ground-tint: 100%; }
+:root[data-platform="linux"] #titlebar { padding-left: 14px; }
+:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

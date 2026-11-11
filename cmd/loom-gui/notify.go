@@ -2,8 +2,13 @@ package main
 
 import (
 	"fmt"
+	"html"
+	"log"
 	"os/exec"
+	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/status"
@@ -15,7 +20,26 @@ type notifier struct {
 	run func(title, body string)
 }
 
-func newNotifier() *notifier { return &notifier{run: osascriptNotify} }
+var notificationLogMu sync.Mutex
+var lastNotificationError time.Time
+
+func newNotifier() *notifier {
+	if runtime.GOOS == "linux" {
+		return &notifier{run: func(title, body string) {
+			go func() {
+				if err := desktopCommand("notify-send", "--app-name=Loom", "--icon=loom", "--hint=string:desktop-entry:loom", "--", title, html.EscapeString(body)); err != nil {
+					notificationLogMu.Lock()
+					if time.Since(lastNotificationError) > time.Minute {
+						log.Printf("notification unavailable: %v", err)
+						lastNotificationError = time.Now()
+					}
+					notificationLogMu.Unlock()
+				}
+			}()
+		}}
+	}
+	return &notifier{run: osascriptNotify}
+}
 
 // needsYou fires one notification summarizing the sessions that just flipped
 // to needs-you. No-op on an empty transition — the engine's NewlyNeedsYou is

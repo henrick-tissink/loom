@@ -3,6 +3,7 @@ package tmux
 import (
 	"fmt"
 	"os"
+ "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -283,8 +284,10 @@ func TestAttachCmdDefaultsLocaleWhenUnset(t *testing.T) {
 	}
 	c := &Client{Socket: "loomtest-env"}
 	cmd := c.AttachCmd("loom-x")
-	if got, _ := envValue(cmd.Env, "LC_CTYPE"); got != "UTF-8" {
-		t.Fatalf("LC_CTYPE = %q, want UTF-8", got)
+	want := "UTF-8"
+ if runtime.GOOS == "linux" { want = "C.UTF-8" }
+ if got, _ := envValue(cmd.Env, "LC_CTYPE"); got != want {
+		t.Fatalf("LC_CTYPE = %q, want %s", got, want)
 	}
 }
 

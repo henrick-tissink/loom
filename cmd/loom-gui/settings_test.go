@@ -55,3 +55,17 @@ func TestNormalize_TerminalTheme(t *testing.T) {
 		}
 	}
 }
+
+func TestSettingsFailedSavePreservesMemory(t *testing.T) {
+	s := newSettingsStore(t.TempDir())
+	before := s.get()
+	s.path = filepath.Join(t.TempDir(), "missing", "settings.json")
+	next := before
+	next.Notifications = !before.Notifications
+	if err := s.set(next); err == nil {
+		t.Fatal("expected write failure")
+	}
+	if s.get() != before {
+		t.Fatal("failed save changed in-memory preferences")
+	}
+}

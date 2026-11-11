@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,9 @@ func ensureLocale(env []string) []string {
 				return env
 			}
 		}
+	}
+	if runtime.GOOS == "linux" {
+		return append(env, "LC_CTYPE=C.UTF-8")
 	}
 	return append(env, "LC_CTYPE=UTF-8")
 }

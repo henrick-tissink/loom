@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,7 +26,16 @@ func Load() (*Config, error) {
 	}
 	ws := os.Getenv("LOOM_WORKSPACE")
 	if ws == "" {
-		ws = filepath.Join(home, "Sauce")
+		var saved struct {
+			WorkspaceRoot string `json:"workspaceRoot"`
+		}
+		if b, err := os.ReadFile(filepath.Join(home, ".loom", "settings.json")); err == nil {
+			_ = json.Unmarshal(b, &saved)
+		}
+		ws = saved.WorkspaceRoot
+		if ws == "" {
+			ws = filepath.Join(home, "Sauce")
+		}
 	}
 	c := &Config{
 		ClaudeConfigDir: ccd,
