@@ -559,6 +559,32 @@ Limits: edits through Bash count only in an owned worktree; subagents'
 transcripts are not read; a `/clear` rebind starts the edited set afresh; a
 merge done on the remote counts only after a fetch.
 
+### 5.8 The review sheet (`cmd/loom-gui/review.go`, `transcript/runs.go`)
+
+`App.ReviewSheet` builds a session's sheet on the click, from the last poll's
+visible rows (`App.noteRail`, the same cache `NudgePrompt` reads; a hidden
+row has no sheet). Nothing calls a model.
+
+- **Checks** come from the task file the engine already read. A check's proof
+  follows the stop guard's own records: `name: $ command` is an executable
+  check (the hooks' `_CHECK_CMD`); the `.verified` marker at least as new as
+  the file means the guard ran every command and they passed; otherwise the
+  guard's latest Stop verdict (hooklog), if it is no older than the file and
+  lists `failed` names, marks those checks failed. Any other ticked check is
+  the model's claim; one with no command is its word.
+- **Tests** are `transcript.ScanActivity`, which reads the whole transcript
+  from the task's start: Bash calls whose first line matches the hooks'
+  `TEST_CMD` (a heredoc's body is not read), each with its exit code and a
+  status that also reads failing summaries in the output (a pipe hides the
+  exit code). A background run takes its exit code from the task
+  notification that names its tool use id. Replayed over 80 real
+  transcripts: 733 runs, 369 passed and 83 failed of the 453 kept, 1 still
+  unknown.
+- **Changes** are `gitdiff.WorkingTree` per session directory, the patch
+  dropped (Open diff fetches it).
+- **Risks** are rules over the above and the row's spin, overlap and held
+  chip, worst first.
+
 ## 6. Data model (`~/.loom/loom.db`)
 
 SQLite via `modernc.org/sqlite` (pure Go, no cgo), `journal_mode=WAL`,

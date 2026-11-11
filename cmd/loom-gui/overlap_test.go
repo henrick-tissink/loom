@@ -218,8 +218,8 @@ func TestNudgePrompt(t *testing.T) {
 	if _, err := a.NudgePrompt("loom-1"); err == nil {
 		t.Fatal("a prompt for a session that is not spinning")
 	}
-	a.noteSpins([]SessionDTO{{Name: "loom-1", Spin: spinDTO(&transcript.Spin{Tool: "Bash", Count: 4,
-		Sample: "exit 1 · --- FAIL: TestHedge (0.03s)", Subject: "go test ./vega/"})}, {Name: "loom-2"}})
+	a.noteRail([]SessionDTO{{Name: "loom-1", Spin: spinDTO(&transcript.Spin{Tool: "Bash", Count: 4,
+		Sample: "exit 1 · --- FAIL: TestHedge (0.03s)", Subject: "go test ./vega/"})}, {Name: "loom-2"}}, nil)
 	p, err := a.NudgePrompt("loom-1")
 	if err != nil {
 		t.Fatal(err)

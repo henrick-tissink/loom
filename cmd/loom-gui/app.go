@@ -89,10 +89,12 @@ type App struct {
 	// ov finds sessions with pending changes to the same files
 	// (overlap.go); nil in tests that do not set one.
 	ov *overlapState
-	// spins are the rail's current repeating failures, by session, for
-	// NudgePrompt (spin.go).
-	spinMu sync.Mutex
-	spins  map[string]SpinDTO
+	// rail is the last poll's visible rows by name: their DTOs and the
+	// engine rows behind them, for NudgePrompt and ReviewSheet, which work
+	// from what the operator is looking at rather than polling again (a
+	// poll outside ListSessions would swallow a needs-you bell).
+	railMu sync.Mutex
+	rail   map[string]railEntry
 }
 
 func newApp(engine *status.Engine, tm *tmux.Client, st *store.Store, launcher *session.Launcher, svc *projects.Service, now func() time.Time) *App {
@@ -160,7 +162,7 @@ func (a *App) ListSessions() (out []SessionDTO) {
 		applyHooks(out, snap, a.hooks.reader)
 	}
 	a.ov.apply(out, snap.Live)
-	a.noteSpins(out)
+	a.noteRail(out, snap.Live)
 	a.onSnapshot(snap, out, res)
 	return out
 }

@@ -1050,3 +1050,32 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .bo-seed summary { cursor: pointer; color: var(--text-dim); font-size: var(--t-small); }
 .bo-lose { margin: 8px 0; padding-left: 18px; }
 .f-hint { font-size: var(--t-small); color: var(--text-dim); margin-top: 4px; }
+
+/* review sheet (main.js openReviewSheet) */
+.rs-modal { width: 760px; }
+.rs-body { gap: 16px; }
+.rs-sec { display: flex; flex-direction: column; gap: 8px; }
+.rs-sec h3 { margin: 0; font-size: var(--t-body); font-weight: 800; color: var(--text); display: flex; gap: 8px; align-items: baseline; }
+.rs-sec h3 .rs-dim { font-weight: 500; }
+.rs-sec p { margin: 0; }
+.rs-dim { color: var(--text-faint); font-size: var(--t-small); }
+.rs-outcome { color: var(--text); font-size: var(--t-small); line-height: 1.5; }
+.rs-tag { font-size: var(--t-micro); font-weight: 700; color: var(--text-dim); background: var(--inset); border-radius: 6px; padding: 1px 6px; }
+.rs-risks { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.rs-risks li { font-size: var(--t-small); line-height: 1.45; padding: 6px 10px; border-radius: 8px; }
+.rs-risks li.rs-bad { color: var(--st-error); background: var(--bad-bg); }
+.rs-risks li.rs-warn { color: var(--over); background: var(--over-bg); }
+.rs-checks, .rs-tests { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.rs-checks li, .rs-tests li { display: flex; gap: 10px; align-items: flex-start; font-size: var(--t-small); }
+.rs-proof { flex: none; min-width: 64px; text-align: center; font-size: var(--t-micro); font-weight: 700; border-radius: 6px; padding: 2px 6px; }
+.rs-proof.rs-ok { color: var(--st-running); background: var(--ok-bg); }
+.rs-proof.rs-bad { color: var(--st-error); background: var(--bad-bg); }
+.rs-proof.rs-warn { color: var(--over); background: var(--over-bg); }
+.rs-proof.rs-dim { color: var(--text-faint); background: var(--inset); }
+.rs-check { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rs-cname { font-weight: 700; color: var(--text); }
+.rs-check code, .rs-sec p code { font-family: var(--font-mono); font-size: var(--t-micro); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.rs-evidence { color: var(--text-faint); font-size: var(--t-micro); overflow-wrap: anywhere; }
+.rs-repo { display: flex; flex-direction: column; gap: 6px; }
+.rs-path { cursor: pointer; font-family: var(--font-mono); font-size: var(--t-micro); overflow-wrap: anywhere; }
+.rs-path:hover { text-decoration: underline; }

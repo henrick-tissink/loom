@@ -1053,6 +1053,7 @@ function appendLiveRow(s, projLabel) {
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
   if (canNudge(s)) acts.appendChild(nudgeButton(s));
+  if (readyForReview(s)) acts.appendChild(reviewSheetButton(s));
   // not while a dialog is open: the paste's Enter would answer it
   if (hasReview(s) && !(s.waitingFor && s.waitingFor !== "shell")) acts.appendChild(reviewButton(s, false));
   if (canGoal(s)) acts.appendChild(goalButton(s));
@@ -1495,11 +1496,14 @@ function renderStageHeader(name) {
     (s && (s.external || s.background) ? "" :
       `<span class="sh-acts">` +
       (s && canNudge(s) ? `<button class="sh-btn" id="sh-nudge" title="Ask it to stop retrying and rethink">${icon(NUDGE_ICON)}Nudge</button>` : "") +
+      `<button class="sh-btn" id="sh-sheet" title="Review sheet: the finish line, who proved each check, the tests that ran, the changes and the risks">${icon(SHEET_ICON)}Review</button>` +
       `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
       (s && overBudget(s) ? `<button class="sh-btn" id="sh-fresh" title="Fresh session from checkpoint (same directory; this one stays open)">Fresh session</button>` : "") +
       `<button class="sh-btn sh-primary" id="sh-reply" title="Quick reply (R)">Reply</button></span>`);
   const diffBtn = el.querySelector("#sh-diff");
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
+  const sheetBtn = el.querySelector("#sh-sheet");
+  if (sheetBtn) sheetBtn.addEventListener("click", () => openReviewSheet(name));
   const nudgeBtn = el.querySelector("#sh-nudge");
   if (nudgeBtn) nudgeBtn.addEventListener("click", () => openNudge(s));
   const hooksBtn = el.querySelector("#sh-hooks");
@@ -3382,6 +3386,122 @@ function openNudge(s) {
     placeholder: "Composing…",
     sendLabel: "Send nudge",
   });
+}
+
+// ---- per-session: the review sheet (review.go) ----
+// One page to judge the work by: the finish line with who proved each
+// check, the tests the transcript shows ran, the changes, and the risks
+// loom can see for itself. Read on the click; nothing is sent.
+
+const SHEET_ICON = '<rect x="8" y="3" width="8" height="4" rx="1"/><path d="M16 5h2a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>';
+
+// readyForReview: the task file says done and the session has stopped.
+function readyForReview(s) {
+  return s.taskStatus === "done" && s.status !== "running";
+}
+function reviewSheetButton(s) {
+  return actionBtn(SHEET_ICON, "Review sheet: its task file says done", () => openReviewSheet(s.name));
+}
+
+const PROOF = {
+  guard_passed: ["guard ✓", "ok", "The stop guard ran this command on this version of the task file and it passed"],
+  guard_failed: ["guard ✗", "bad", "The stop guard ran this command on this version of the task file and it failed"],
+  claimed: ["claimed", "warn", "Ticked by the model; the stop guard has not run its command on this version of the task file"],
+  observed: ["its word", "warn", "Ticked, with no command anyone can run: it rests on the model's word"],
+  open: ["open", "dim", "Not ticked"],
+};
+
+function reviewSheetHtml(r) {
+  const now = Math.floor(Date.now() / 1000);
+  let h = "";
+  h += `<section class="rs-sec"><h3>Risks</h3>`;
+  h += r.risks.length
+    ? `<ul class="rs-risks">${r.risks.map((x) => `<li class="rs-${x.level}">${esc(x.text)}</li>`).join("")}</ul>`
+    : `<p class="rs-dim">Nothing loom can see stands out. That is not a pass: read the diff.</p>`;
+  h += `</section>`;
+
+  h += `<section class="rs-sec"><h3>Finish line${r.taskStatus ? ` <span class="rs-tag">${esc(r.taskStatus)}</span>` : ""}</h3>`;
+  if (!r.taskStatus) {
+    h += `<p class="rs-dim">No task file for this session.</p>`;
+  } else {
+    if (r.outcome) h += `<p class="rs-outcome">${esc(r.outcome)}</p>`;
+    h += r.checks.length ? `<ul class="rs-checks">${r.checks.map((c) => {
+      const [label, cls, tip] = PROOF[c.proof] || [c.proof, "dim", ""];
+      return `<li><span class="rs-proof rs-${cls}" title="${esc(tip)}">${esc(label)}</span>` +
+        `<span class="rs-check"><span class="rs-cname">${esc(c.name)}</span>` +
+        (c.command ? `<code>${esc(c.command)}</code>` : (c.text !== c.name ? `<span class="rs-dim">${esc(c.text.slice(c.name.length).replace(/^\s*:\s*/, ""))}</span>` : "")) +
+        (c.evidence ? `<span class="rs-evidence">${esc(c.evidence)}</span>` : "") + `</span></li>`;
+    }).join("")}</ul>` : `<p class="rs-dim">No Done-when checks.</p>`;
+    if (r.taskPath) h += `<p class="rs-dim rs-path" data-path="${esc(r.taskPath)}" title="Open the task file">${esc(r.taskPath)}</p>`;
+  }
+  h += `</section>`;
+
+  const when = r.since ? "since the task started" : "in this session";
+  h += `<section class="rs-sec"><h3>Tests that ran <span class="rs-dim">${when}</span></h3>`;
+  if (!r.tests.length) {
+    h += `<p class="rs-dim">The transcript shows no test command.</p>`;
+  } else {
+    h += `<ul class="rs-tests">${r.tests.slice().reverse().map((t) => {
+      const cls = t.status === "passed" ? "ok" : t.status === "failed" ? "bad" : "dim";
+      const word = t.status === "passed" ? "passed" : t.status === "failed" ? (t.exit > 0 ? `exit ${t.exit}` : "failed") : "unknown";
+      return `<li><span class="rs-proof rs-${cls}">${word}</span><span class="rs-check"><code title="${esc(t.command)}">${esc(t.command)}</code>` +
+        `<span class="rs-evidence">${esc(t.sample)}${t.at ? ` · ${fmtAge(Math.max(0, now - t.at))} ago` : ""}</span></span></li>`;
+    }).join("")}</ul>`;
+    if (r.testsTotal > r.tests.length) h += `<p class="rs-dim">The latest ${r.tests.length} of ${r.testsTotal} runs.</p>`;
+  }
+  h += `</section>`;
+
+  h += `<section class="rs-sec"><h3>Changes</h3>`;
+  if (r.worktree) h += `<p class="rs-dim">Worktree branch <code>${esc(r.worktree.branch)}</code>: ${r.worktree.unique} commit${r.worktree.unique === 1 ? "" : "s"} no other branch has.</p>`;
+  if (!r.changes.length) h += `<p class="rs-dim">No working directory.</p>`;
+  for (const c of r.changes) {
+    h += `<div class="rs-repo"><span class="rs-cname">${esc(c.label)}</span>`;
+    if (c.error) h += ` <span class="rs-dim">${esc(c.error)}</span>`;
+    else if (!c.stat && !c.untracked.length) h += ` <span class="rs-dim">nothing uncommitted</span>`;
+    else {
+      if (c.stat) h += `<pre class="diff-stat">${esc(c.stat)}</pre>`;
+      if (c.untracked.length) h += `<div class="diff-untracked"><span class="du-head">new files</span>${c.untracked.map((f) => `<span class="du-file" data-path="${esc(c.path ? c.path + "/" + f : f)}">${esc(f)}</span>`).join("")}</div>`;
+    }
+    h += `</div>`;
+  }
+  h += `</section>`;
+  return h;
+}
+
+async function openReviewSheet(name) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const s = latestSessions.find((x) => x.name === name);
+  const pane = s && !s.external && !s.background;
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal diff-modal rs-modal" role="dialog" aria-label="Review sheet">
+      <h2>Review · ${esc(s ? displayName(s) : name)}</h2>
+      <div id="rs-body" class="diff-body rs-body">Loading…</div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="rs-close">Close</button>
+        ${pane ? `<button class="btn-ghost" id="rs-diff">Open diff</button><button class="btn-launch" id="rs-reply">Reply</button>` : ""}
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#rs-close").addEventListener("click", close);
+  if (pane) {
+    backdrop.querySelector("#rs-diff").addEventListener("click", () => { close(); openDiff(name); });
+    backdrop.querySelector("#rs-reply").addEventListener("click", () => { close(); openReply(name); });
+  }
+  const body = backdrop.querySelector("#rs-body");
+  try {
+    const r = await window.go.main.App.ReviewSheet(name);
+    if (!backdrop.isConnected) return;
+    body.innerHTML = reviewSheetHtml(r);
+    body.querySelectorAll("[data-path]").forEach((el) => el.addEventListener("click", () => openFileToken(el.getAttribute("data-path"))));
+  } catch (e) {
+    body.innerHTML = `<div class="diff-empty">${esc(String(e))}</div>`;
+  }
 }
 
 function hooksChip(s) {

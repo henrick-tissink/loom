@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/transcript"
 )
 
@@ -28,31 +29,43 @@ func spinDTO(s *transcript.Spin) *SpinDTO {
 	return &SpinDTO{Tool: s.Tool, Count: s.Count, Sample: s.Sample, Subject: s.Subject, First: s.First, Last: s.Last}
 }
 
-// noteSpins keeps the rail's current spins for NudgePrompt, which composes
-// from what the operator is looking at rather than polling again (a poll
-// outside ListSessions would swallow a needs-you bell).
-func (a *App) noteSpins(dtos []SessionDTO) {
-	m := map[string]SpinDTO{}
-	for _, d := range dtos {
-		if d.Spin != nil {
-			m[d.Name] = *d.Spin
-		}
+type railEntry struct {
+	dto SessionDTO
+	row status.Row
+}
+
+// noteRail keeps the poll's visible rows (the DTOs; hidden rows have none)
+// with their engine rows.
+func (a *App) noteRail(dtos []SessionDTO, rows []status.Row) {
+	byName := make(map[string]status.Row, len(rows))
+	for _, r := range rows {
+		byName[r.Name] = r
 	}
-	a.spinMu.Lock()
-	a.spins = m
-	a.spinMu.Unlock()
+	m := make(map[string]railEntry, len(dtos))
+	for _, d := range dtos {
+		m[d.Name] = railEntry{dto: d, row: byName[d.Name]}
+	}
+	a.railMu.Lock()
+	a.rail = m
+	a.railMu.Unlock()
+}
+
+// railRow is a visible row of the last poll.
+func (a *App) railRow(name string) (railEntry, bool) {
+	a.railMu.Lock()
+	defer a.railMu.Unlock()
+	e, ok := a.rail[name]
+	return e, ok
 }
 
 // NudgePrompt composes the Nudge message for a spinning session, for the
 // operator to edit and send.
 func (a *App) NudgePrompt(name string) (string, error) {
-	a.spinMu.Lock()
-	sp, ok := a.spins[name]
-	a.spinMu.Unlock()
-	if !ok {
+	e, ok := a.railRow(name)
+	if !ok || e.dto.Spin == nil {
 		return "", fmt.Errorf("the session is no longer repeating a failure")
 	}
-	return nudgePrompt(sp), nil
+	return nudgePrompt(*e.dto.Spin), nil
 }
 
 // nudgePrompt names the failure and asks the three questions that break a

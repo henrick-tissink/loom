@@ -62,6 +62,15 @@ When a session's task file is open and has Done-when checks, and the session is 
 
 Git is read in the background at most every 10 seconds per checkout, so a pill can lag a commit by that much. A merge done on the remote counts only after a fetch. Sessions in hidden projects are never named.
 
+**Review sheet.** **Review** in the session header (and the clipboard icon on the row, once its task file says done and it has stopped) opens one page to judge the work by. Nothing on it comes from a model; loom reads it all when you click.
+
+- **Risks**, worst first: a check the stop guard ran and saw fail, the last test run failing, files edited after the last passing test run, no test run at all, checks ticked only on the model's word, a task file still open, new files git isn't tracking yet, a spin, an overlap, a hook that kept holding it. An empty list is not a pass: read the diff.
+- **Finish line**: the task's outcome and each Done-when check, marked by who proved it. `guard ✓` means the stop guard ran the check's command on this version of the task file and it passed; `guard ✗` that it ran and failed. `claimed` is a check with a command the guard hasn't run on this version, ticked by the model. `its word` is a ticked check with no command at all. `open` isn't ticked.
+- **Tests that ran** since the task started, newest first: every test command the transcript shows (the same commands the hooks count as test runs), with how it ended and its telling line. A run is `failed` when it exited non-zero or its output reads as a failing summary, so `go test … | tail` that exits 0 over a FAIL still shows as failed. A run sent to the background gets its exit code from the completion notice.
+- **Changes**: each directory's uncommitted files and new files, and for a worktree, the commits its branch has that no other branch does. **Open diff** shows the full patch.
+
+**Reply** goes back to the session with what you found.
+
 **Control from phone** (the phone icon, on a session waiting on you) sends `/remote-control` to the session and shows its terminal. If claude asks whether to enable Remote Control (it does the first time), answer there. While it is on, the row shows a `phone` pill: click it to open the session at claude.ai/code, or open the Code tab in the Claude app. `/remote-control` in the session disconnects it. To get pinged on your phone when a session waits on you, turn on push notifications in claude's `/config`; that setting is claude's, not loom's.
 
 | Icon | Meaning |

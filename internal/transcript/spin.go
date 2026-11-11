@@ -208,6 +208,10 @@ func (c *Classifier) Spin() *Spin {
 	return &s
 }
 
+func sortEdits(es []Edit) {
+	sort.Slice(es, func(i, j int) bool { return es[i].Path < es[j].Path })
+}
+
 // Edit is a file the session wrote and when it last did (unix seconds;
 // 0 = unknown).
 type Edit struct {
@@ -224,7 +228,7 @@ func (c *Classifier) Edited() []Edit {
 		for p, at := range c.edited {
 			c.editedList = append(c.editedList, Edit{Path: p, At: at})
 		}
-		sort.Slice(c.editedList, func(i, j int) bool { return c.editedList[i].Path < c.editedList[j].Path })
+		sortEdits(c.editedList)
 		c.editedDirty = false
 	}
 	return c.editedList
