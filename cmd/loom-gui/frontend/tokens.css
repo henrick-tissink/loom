@@ -1114,3 +1114,48 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* ---- review comments on the diff (comments.go, diffcomments.js) ---- */
+.dc-modal { width: 920px; }
+.dc-top { display: flex; align-items: center; gap: 12px; }
+.dc-top h2 { margin-right: auto; }
+.dc-scope { display: flex; gap: 2px; background: var(--inset); border-radius: 10px; padding: 2px; }
+.dc-seg { border: 0; background: transparent; color: var(--text-dim); font-size: var(--t-small); font-weight: 700; padding: 5px 10px; border-radius: 8px; cursor: pointer; }
+.dc-seg.on { background: var(--sel); color: var(--text); }
+.dc-scopeline { margin: 0; font-size: var(--t-micro); color: var(--text-faint); }
+.dc-hint { margin-right: auto; align-self: center; font-size: var(--t-micro); color: var(--text-faint); }
+.dc-patch { padding: 6px 0; white-space: normal; }
+.dc-line { display: flex; white-space: pre; padding: 0 12px 0 0; min-width: max-content; }
+.dc-num { flex: none; width: 44px; padding-right: 10px; text-align: right; color: var(--text-faint); user-select: none; font-variant-numeric: tabular-nums; }
+.dc-can { cursor: pointer; }
+.dc-can:hover { background: var(--sel); }
+.dc-sel, .dc-sel:hover { background: var(--accent-soft); }
+.dc-card, .dc-compose {
+  margin: 4px 12px 6px 54px; padding: 8px 10px; border-radius: 8px;
+  background: var(--surface); border: 1px solid var(--sel);
+  font-family: var(--font-ui); font-size: var(--t-small); line-height: 1.45; color: var(--text);
+  white-space: normal; max-width: 680px;
+}
+.dc-list .dc-card { margin: 0; max-width: none; }
+.dc-list { display: flex; flex-direction: column; gap: 6px; }
+.dc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dc-where { font-family: var(--font-mono); font-size: var(--t-micro); color: var(--text-dim); }
+.dc-acts { margin-left: auto; display: inline-flex; gap: 10px; }
+.so-findings .dc-acts { margin-left: 0; margin-top: 2px; }
+.dc-body { margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dc-reason-text { margin-top: 4px; font-size: var(--t-micro); color: var(--st-error); }
+.dc-reason { display: flex; gap: 6px; margin-top: 6px; }
+.dc-reason[hidden] { display: none; }
+.dc-reason input { flex: 1; min-width: 0; }
+.dc-st-resolved .dc-body, .dc-st-invalid .dc-body { color: var(--text-dim); }
+.dc-compose textarea { width: 100%; min-height: 64px; box-sizing: border-box; margin-top: 6px; resize: vertical; font: inherit; color: var(--text); background: var(--inset); border: 0; border-radius: 8px; padding: 8px; }
+.dc-compose .dc-acts { display: flex; justify-content: flex-end; margin-top: 6px; }
+.dc-outdated { display: flex; flex-direction: column; gap: 4px; padding: 4px 0 8px; border-bottom: 1px dashed var(--sel); margin-bottom: 4px; }
+.dc-outdated .du-head { margin-left: 54px; }
+.dc-changed { font-size: var(--t-micro); color: var(--over); background: var(--over-bg); border-radius: 999px; padding: 1px 8px; font-family: var(--font-ui); }
+.dc-count { font-size: var(--t-micro); color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 1px 8px; font-family: var(--font-ui); }
+.dc-viewed { display: inline-flex; align-items: center; gap: 4px; font-size: var(--t-micro); color: var(--text-dim); cursor: pointer; font-family: var(--font-ui); }
+.so-marked > .rs-check > span:first-child { color: var(--text-dim); }
+.dc-modal .diff-body > *, .dc-modal .diff-repo > * { flex-shrink: 0; }
+.dc-compose button, .dc-reason button { font-family: var(--font-ui); font-size: var(--t-small); font-weight: 700; height: 28px; padding: 0 12px; border-radius: 8px; cursor: pointer; border: 0; }
+.dc-compose .dc-acts { gap: 6px; }

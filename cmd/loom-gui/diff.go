@@ -25,6 +25,8 @@ type RepoDiff = gitdiff.RepoDiff
 // part of the preceding file's hunk and corrupt the whole view.
 type DiffDTO struct {
 	Repos []RepoDiff `json:"repos"`
+	// Scopes says, per repo, what the diff covers (SessionDiffSince only).
+	Scopes []string `json:"scopes,omitempty"`
 }
 
 // gitDiff collects the uncommitted changes in cwd (tracked vs HEAD, plus

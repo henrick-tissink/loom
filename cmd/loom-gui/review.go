@@ -378,19 +378,28 @@ func (a *App) ReviewSheet(name string) (ReviewDTO, error) {
 // commits since the task started (when there is a task) and the
 // uncommitted changes and new files.
 func auditDir(dir, label, branch string, started int64) repoAudit {
-	base, scope := "HEAD", "uncommitted changes and new files"
-	if b := branchStart(dir, branch, ""); branch != "" && b != "" {
-		base, scope = b, "commits since branch "+branch+" was cut, plus uncommitted changes and new files"
-	} else if started > 0 { // also a worktree branch with no reflog (a bare repo's)
-		if b := commitAt(dir, started); b != "" {
-			base, scope = b, "commits since the task started, plus uncommitted changes and new files"
-		}
-	}
+	base, scope := diffBase(dir, branch, started)
 	d := gitdiff.Against(dir, base)
 	if d.Error != "" {
 		return repoAudit{label: label, err: d.Error}
 	}
 	return repoAudit{label: label, scope: scope, flags: diffaudit.Audit(d.Patch)}
+}
+
+// diffBase is where a session's work in dir starts, and that scope in
+// words: on a worktree branch, where the branch was cut; else the commit
+// HEAD was at when the task started; else HEAD (uncommitted changes only).
+func diffBase(dir, branch string, started int64) (base, scope string) {
+	base, scope = "HEAD", "uncommitted changes and new files"
+	if b := branchStart(dir, branch, ""); branch != "" && b != "" {
+		return b, "commits since branch " + branch + " was cut, plus uncommitted changes and new files"
+	}
+	if started > 0 { // also a worktree branch with no reflog (a bare repo's)
+		if b := commitAt(dir, started); b != "" {
+			return b, "commits since the task started, plus uncommitted changes and new files"
+		}
+	}
+	return base, scope
 }
 
 // commitAt is the commit HEAD was at when the task started: the newest

@@ -77,6 +77,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.loom/bestof.json` | GUI (rw, atomic) | best-of-N groups: repo, base commit, seed, attempts, the kept one (§4.5) |
 | `~/.loom/attention.json` | GUI (rw, atomic) | per Claude session id: the task file version last reviewed, the ask snoozed (§5.9) |
 | `~/.loom/second-opinions/` | GUI (rw, atomic) | each session's last `/code-review` second opinion (§5.8) |
+| `~/.loom/comments/` | GUI (rw, atomic) | per Claude session id: review comments with their states, files marked viewed, second-opinion finding verdicts (§5.10) |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status, kind and background job id |
 | `claude agents --json --all` | Claude (Loom: runs it, read-only) | background sessions, including the ones the supervisor has stopped |
@@ -657,6 +658,40 @@ home lists and what the count says.
   unsnoozes it with no timer. `needsYouCount` (the title and the dock)
   leaves snoozed rows out. Notifications are unaffected: a new ask is never
   a snoozed one.
+
+
+### 5.10 Review comments (`cmd/loom-gui/comments.go`, `frontend/diffcomments.js`)
+
+Per Claude session id, in `~/.loom/comments/<sid>.json` (written to a temp
+file and renamed; a failed save leaves the in-memory notes unchanged):
+
+- **Comments**: `repo` (the directory whose diff it was made in), `file`
+  relative to it, `side` (`new` for added or context lines, numbered in the
+  new file; `old` for removed lines), `line`..`endLine`, the `quote` (the
+  code as the diff showed it) and the `body`. States: `open`, `sent`
+  (`App.SendComments` marks the comments that were open when it sends),
+  `resolved`, `invalid` (needs a reason). Reopening clears the sent time.
+- **Anchoring** is in the frontend (`diffcomments.anchor`): a comment sits
+  on the nearest line of its side whose code equals its quote's first line,
+  so it follows moved lines; with no such line it is listed as no longer on
+  a line. The diff is numbered from the hunk headers (`numberPatch`).
+- **The message** (`commentsPrompt`): the open comments in file and line
+  order, `path:line[-end]` (a repo other than the session's cwd keeps its
+  path in front), the quote in a fence longer than any backtick run in it,
+  and the note. The operator edits it before `SendComments`, which goes
+  through `SendPrompt` (so a dialog in the pane refuses it).
+- **Viewed** maps `scope\0repo\0file` to an FNV-1a hash of that file's
+  patch in that scope (the two scopes' patches differ); a different hash
+  shows the file unfolded as changed since viewed.
+- In the "since" scope, new files `gitdiff.Against` leaves out of the patch
+  (over its size or count limit) are still listed by name.
+- **Finding verdicts** map `file:line:summary` to `fixed`, `invalid` (with a
+  reason) or `commented` (turned into a line comment), so a rerun of the
+  second opinion that finds the same thing keeps its verdict.
+- **Diff scope**: `App.SessionDiffSince` uses `diffBase`, the base the
+  shortcut checks use (the worktree branch's cut, else the commit HEAD was
+  at when the task started, else HEAD), with `gitdiff.Against`; `scopes`
+  says per directory what was covered.
 
 ## 6. Data model (`~/.loom/loom.db`)
 

@@ -5,6 +5,7 @@ import "@fontsource-variable/jetbrains-mono";
 import "./tokens.css";
 import "@xterm/xterm/css/xterm.css";
 import { statusColor, statusWord, xtermThemeFor } from "./theme.js";
+import { numberPatch, selectRange, anchor, hash as hashPatch, viewedKey, findingKey, unshownNew } from "./diffcomments.js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -834,7 +835,10 @@ function openPromptModal(s, o) {
     sendBtn.disabled = true;
     errEl.textContent = "";
     try {
-      if (o.finished) {
+      if (o.send) {
+        await o.send(text.value);
+        close();
+      } else if (o.finished) {
         const nn = await window.go.main.App.ResumeWithPrompt(s.name, text.value);
         close();
         if (nn) selectSession(nn);
@@ -1551,7 +1555,7 @@ function renderStageHeader(name) {
       (s && s.status === "needs_you" ? `<button class="sh-btn" id="sh-snooze" title="${s.snoozed ? "Back into the queue now" : "Out of the queue until it next comes back to you"}">${s.snoozed ? "Wake" : "Snooze"}</button>` : "") +
       (s && canNudge(s) ? `<button class="sh-btn" id="sh-nudge" title="Ask it to stop retrying and rethink">${icon(NUDGE_ICON)}Nudge</button>` : "") +
       `<button class="sh-btn" id="sh-sheet" title="Review sheet: the finish line, who proved each check, the tests that ran, the changes and the risks">${icon(SHEET_ICON)}Review</button>` +
-      `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
+      `<button class="sh-btn" id="sh-diff" title="Review the changes and comment on lines">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
       (s && overBudget(s) ? `<button class="sh-btn" id="sh-fresh" title="Fresh session from checkpoint (same directory; this one stays open)">Fresh session</button>` : "") +
       `<button class="sh-btn sh-primary" id="sh-reply" title="Quick reply (R)">Reply</button></span>`);
   const diffBtn = el.querySelector("#sh-diff");
@@ -2594,71 +2598,285 @@ function renderPatch(patch) {
   }).join("\n");
 }
 
+// ---- review comments (comments.go, diffcomments.js) ----
+// The operator comments on diff lines; the open comments go to the session
+// as one line-anchored message; each comment keeps a state. Shared by the
+// diff view and the review sheet.
+
+const CM_STATE = {
+  open: ["open", "warn", "Not sent yet"],
+  sent: ["sent", "dim", "Sent to the session; mark it resolved once the revision handles it, or invalid"],
+  resolved: ["resolved", "ok", "Handled"],
+  invalid: ["invalid", "bad", "The comment was wrong"],
+};
+
+function commentWhere(c, withFile) {
+  const ln = c.endLine > c.line ? `${c.line}-${c.endLine}` : `${c.line}`;
+  return `${withFile ? c.file + ":" : "L"}${ln}${c.side === "old" ? " (old)" : ""}`;
+}
+
+function commentCardHtml(c, withFile) {
+  const [word, cls, tip] = CM_STATE[c.state] || [c.state, "dim", ""];
+  const acts = [];
+  if (c.state === "sent") acts.push(`<span class="hr-act" data-cm-state="resolved">Resolve</span>`);
+  if (c.state === "sent" || c.state === "open") acts.push(`<span class="hr-act" data-cm-invalid>Invalid…</span>`);
+  if (c.state === "open") acts.push(`<span class="hr-act" data-cm-state="resolved" title="Handled without sending it">Resolve</span>`);
+  if (c.state !== "open") acts.push(`<span class="hr-act" data-cm-state="open" title="Back to open: it goes out with the next send">Reopen</span>`);
+  acts.push(`<span class="hr-act" data-cm-delete>Delete</span>`);
+  return `<div class="dc-card dc-st-${esc(c.state)}" data-cm="${esc(c.id)}">` +
+    `<div class="dc-head"><span class="rs-proof rs-${cls}" title="${esc(tip)}">${esc(word)}</span>` +
+    `<span class="dc-where">${esc(commentWhere(c, withFile))}</span><span class="dc-acts">${acts.join("")}</span></div>` +
+    `<div class="dc-body">${esc(c.body)}</div>` +
+    (c.reason ? `<div class="dc-reason-text">Invalid: ${esc(c.reason)}</div>` : "") +
+    `<div class="dc-reason" hidden><input type="text" class="search-input" placeholder="Why is it invalid? (kept as the record)" spellcheck="false" /><button class="btn-ghost" data-cm-invalid-ok>Mark invalid</button></div>` +
+    `</div>`;
+}
+
+// wireCommentCards hooks up the cards' actions in root; done(notes) gets
+// the notes after each change, err(e) a refusal.
+function wireCommentCards(root, name, done, err) {
+  const run = (p) => p.then(done).catch(err);
+  root.querySelectorAll("[data-cm]").forEach((card) => {
+    const id = card.dataset.cm;
+    card.querySelectorAll("[data-cm-state]").forEach((b) => b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      run(window.go.main.App.SetCommentState(name, id, b.dataset.cmState, ""));
+    }));
+    const del = card.querySelector("[data-cm-delete]");
+    if (del) del.addEventListener("click", (e) => { e.stopPropagation(); run(window.go.main.App.DeleteComment(name, id)); });
+    const inv = card.querySelector("[data-cm-invalid]");
+    const box = card.querySelector(".dc-reason");
+    if (inv && box) {
+      const input = box.querySelector("input");
+      inv.addEventListener("click", (e) => { e.stopPropagation(); box.hidden = !box.hidden; if (!box.hidden) input.focus(); });
+      const ok = () => { if (input.value.trim()) run(window.go.main.App.SetCommentState(name, id, "invalid", input.value)); };
+      box.querySelector("[data-cm-invalid-ok]").addEventListener("click", (e) => { e.stopPropagation(); ok(); });
+      input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") { e.preventDefault(); ok(); }
+        else if (e.key === "Escape") { e.preventDefault(); box.hidden = true; }
+      });
+    }
+  });
+}
+
+function openComments(notes) { return ((notes && notes.comments) || []).filter((c) => c.state === "open"); }
+
+// sendComments composes the open comments for the operator to read, edit
+// and send to the live session as one message.
+function sendComments(name) {
+  const s = latestSessions.find((x) => x.name === name);
+  if (!s) return;
+  openPromptModal(s, {
+    label: "Send review comments",
+    title: "Review comments",
+    sub: `Sent to ${displayName(s)} as one message; the comments are then marked sent.`,
+    fetch: () => window.go.main.App.CommentsPrompt(name),
+    placeholder: "Composing…",
+    send: (text) => window.go.main.App.SendComments(name, text),
+  });
+}
+
+// ---- the commentable diff view ----
+let diffScope = "since"; // the diff view's last scope: "since" the task started, or "uncommitted"
+
+function diffLineHtml(l, fi, i, picked) {
+  const cls = { add: "d-add", del: "d-del", hunk: "d-hunk", meta: "d-meta", ctx: "" }[l.kind] || "";
+  const num = l.side ? `<span class="dc-num">${l.line}</span>` : `<span class="dc-num"></span>`;
+  return `<div class="dl dc-line ${cls}${l.side ? " dc-can" : ""}${picked ? " dc-sel" : ""}" data-f="${fi}" data-i="${i}"` +
+    `${l.side ? ` title="Click to comment; shift-click to comment on a range"` : ""}>${num}<span class="dc-code">${esc(l.text)}</span></div>`;
+}
+
 async function openDiff(name) {
   if (document.querySelector(".modal-backdrop")) return;
+  const s = latestSessions.find((x) => x.name === name);
+  const canSend = !!(s && !s.external && !s.background);
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
-    <div class="modal diff-modal" role="dialog" aria-label="Uncommitted changes">
-      <h2>Uncommitted changes</h2>
+    <div class="modal diff-modal dc-modal" role="dialog" aria-label="Changes">
+      <div class="dc-top"><h2>Changes</h2>
+        <div class="dc-scope" role="tablist">
+          <button class="dc-seg" data-scope="since" title="Commits since the task started (on a worktree branch, since it was cut), plus uncommitted changes and new files">Since the task started</button>
+          <button class="dc-seg" data-scope="uncommitted" title="Uncommitted changes against HEAD">Uncommitted</button>
+        </div></div>
       <div id="diff-body" class="diff-body">Loading…</div>
-      <div class="modal-actions"><button class="btn-ghost" id="diff-close">Close</button></div>
+      <div class="modal-error" id="dc-err"></div>
+      <div class="modal-actions">
+        <span class="dc-hint">Click a line to comment on it.</span>
+        <button class="btn-ghost" id="diff-close">Close</button>
+        <button class="btn-launch" id="dc-send" disabled>Send comments</button>
+      </div>
     </div>`;
   document.body.appendChild(backdrop);
-  const close = () => backdrop.remove();
+  const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => {
+    if (e.key !== "Escape") return;
+    if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName) && backdrop.contains(e.target)) return; // the field's own Escape
+    e.preventDefault();
+    if (sel) { sel = null; render(); } else close();
+  };
+  document.addEventListener("keydown", onKey, true);
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
   backdrop.querySelector("#diff-close").addEventListener("click", close);
-
   const body = backdrop.querySelector("#diff-body");
-  let d;
-  try { d = await window.go.main.App.SessionDiff(name); }
-  catch (e) { body.textContent = "diff failed: " + e; return; }
+  const errEl = backdrop.querySelector("#dc-err");
+  const sendBtn = backdrop.querySelector("#dc-send");
 
-  const repos = (d && d.repos) || [];
-  if (!repos.length) { body.innerHTML = `<div class="diff-empty">No working directory for this session.</div>`; return; }
-  if (!repos.some((r) => r.dirty || r.error)) {
-    body.innerHTML = `<div class="diff-empty">No uncommitted changes.</div>`;
-    return;
-  }
+  let d = null, scopes = [], notes = null, files = [];
+  let sel = null;   // { f, anchor, range } while a comment is being written
+  let draft = "";
+  const opened = new Map(); // file key -> open, once the operator toggles it
 
-  // One section per repo (§8). The diff is sectioned rather than concatenated
-  // precisely so this splitter keeps working: an injected "── repo ──" header
-  // between two patches would be parsed as part of the preceding file's hunk.
-  // Single-repo sessions get the same markup with the heading suppressed, so
-  // the common case reads exactly as it did before.
-  const solo = repos.length === 1;
-  let html = "";
-  for (const r of repos) {
-    let inner = "";
-    if (r.error) {
-      inner = `<div class="diff-empty">${esc(r.error)}</div>`;
-    } else if (!r.dirty) {
-      inner = `<div class="diff-empty">No uncommitted changes.</div>`;
-    } else {
-      if (r.stat) inner += `<pre class="diff-stat">${esc(r.stat)}</pre>`;
-      if (r.untracked && r.untracked.length) {
-        // git reports untracked paths relative to THEIR repo, while the editor
-        // binding resolves a relative path against the session cwd — which is
-        // the wrong base for every section but the primary. Absolutise here.
-        inner += `<div class="diff-untracked"><span class="du-head">new files</span>` +
-          r.untracked.map((f) => `<span class="du-file" data-path="${esc(r.path ? r.path + "/" + f : f)}">${esc(f)}</span>`).join("") + `</div>`;
+  const showErr = (e) => { errEl.textContent = String(e); };
+  const setNotes = (n) => { notes = n; errEl.textContent = ""; render(); };
+
+  const load = async () => {
+    backdrop.querySelectorAll(".dc-seg").forEach((b) => b.classList.toggle("on", b.dataset.scope === diffScope));
+    body.textContent = "Loading…";
+    sel = null;
+    try {
+      if (diffScope === "since") {
+        const r = await window.go.main.App.SessionDiffSince(name);
+        d = r; scopes = r.scopes || [];
+      } else {
+        d = await window.go.main.App.SessionDiff(name); scopes = [];
       }
-      for (const f of splitPatchByFile(r.patch)) {
-        const c = patchCounts(f.body);
-        inner += `<details class="diff-file" open>
-          <summary><span class="df-name">${esc(f.file)}</span><span class="df-counts"><span class="df-add">+${c.add}</span> <span class="df-del">−${c.del}</span></span></summary>
-          <pre class="diff-patch">${renderPatch(f.body)}</pre>
-        </details>`;
-      }
+    } catch (e) { body.textContent = "diff failed: " + e; return; }
+    try { notes = await window.go.main.App.ReviewNotes(name); } catch (_) { notes = null; }
+    if (!backdrop.isConnected) return;
+    render();
+  };
+
+  function render() {
+    const nOpen = openComments(notes).length;
+    sendBtn.textContent = nOpen ? `Send ${nOpen} comment${nOpen === 1 ? "" : "s"}` : "Send comments";
+    sendBtn.disabled = !nOpen || !canSend;
+    sendBtn.title = !canSend ? "This session has no pane to send into" : nOpen ? "Compose the open comments as one message to the session" : "No open comments";
+    const repos = (d && d.repos) || [];
+    if (!repos.length) { body.innerHTML = `<div class="diff-empty">No working directory for this session.</div>`; return; }
+    if (!repos.some((r) => r.dirty || r.error)) {
+      body.innerHTML = `<div class="diff-empty">${diffScope === "since" ? "No changes since the task started." : "No uncommitted changes."}</div>`;
+      return;
     }
-    html += solo ? inner : `<section class="diff-repo">
-      <div class="dr-head"><span class="dr-label">${esc(r.label || r.path)}</span><span class="dr-path">${esc(r.path)}</span></div>
-      ${inner}</section>`;
+    const keep = body.scrollTop;
+    const solo = repos.length === 1;
+    const comments = (notes && notes.comments) || [];
+    files = [];
+    let html = "";
+    repos.forEach((r, ri) => {
+      let inner = "";
+      if (scopes[ri]) inner += `<p class="dc-scopeline">${esc(scopes[ri])}${r.commits ? ` · ${r.commits} commit${r.commits === 1 ? "" : "s"}` : ""}</p>`;
+      if (r.error) inner += `<div class="diff-empty">${esc(r.error)}</div>`;
+      else if (!r.dirty) inner += `<div class="diff-empty">No changes.</div>`;
+      else {
+        if (r.stat) inner += `<pre class="diff-stat">${esc(r.stat)}</pre>`;
+        const chunks = splitPatchByFile(r.patch);
+        // "since" shows new files' contents in the patch, up to a size and a
+        // count; the rest are still listed, or they would vanish from view
+        const listed = diffScope === "since" ? unshownNew(r.untracked, chunks.map((c) => c.file)) : (r.untracked || []);
+        if (listed.length) {
+          // git reports untracked paths relative to THEIR repo, while the editor
+          // binding resolves a relative path against the session cwd — which is
+          // the wrong base for every section but the primary. Absolutise here.
+          inner += `<div class="diff-untracked"><span class="du-head">${diffScope === "since" ? "new files too large to show" : "new files"}</span>` +
+            listed.map((f) => `<span class="du-file" data-path="${esc(r.path ? r.path + "/" + f : f)}">${esc(f)}</span>`).join("") + `</div>`;
+        }
+        for (const f of chunks) {
+          const fi = files.length;
+          const lines = numberPatch(f.body);
+          const h = hashPatch(f.body);
+          files.push({ repo: r.path, file: f.file, lines, hash: h });
+          const key = viewedKey(diffScope, r.path, f.file);
+          const seen = notes && notes.viewed ? notes.viewed[key] : "";
+          const viewed = !!seen && seen === h;
+          const changed = !!seen && seen !== h;
+          const mine = comments.filter((c) => c.repo === r.path && c.file === f.file);
+          const live = mine.filter((c) => c.state === "open" || c.state === "sent");
+          const { at, outdated } = anchor(lines, mine);
+          const isOpen = opened.has(key) ? opened.get(key) : !viewed;
+          const c = patchCounts(f.body);
+          let rows = "";
+          if (outdated.length) {
+            rows += `<div class="dc-outdated"><span class="du-head">no longer on a line</span>${outdated.map((x) => commentCardHtml(x, false)).join("")}</div>`;
+          }
+          const range = sel && sel.f === fi ? sel.range : null;
+          lines.forEach((l, i) => {
+            rows += diffLineHtml(l, fi, i, range && i >= range.from && i <= range.to && l.side === range.side);
+            for (const x of at.get(i) || []) rows += commentCardHtml(x, false);
+            if (range && i === range.to) {
+              rows += `<div class="dc-compose"><div class="dc-where">${esc(f.file)}:${range.endLine > range.line ? `${range.line}-${range.endLine}` : range.line}${range.side === "old" ? " (removed lines)" : ""}</div>` +
+                `<textarea id="dc-text" spellcheck="false" placeholder="Your comment. ⌘↵ adds it.">${esc(draft)}</textarea>` +
+                `<div class="dc-acts"><button class="btn-ghost" id="dc-cancel">Cancel</button><button class="btn-launch" id="dc-add">Comment</button></div></div>`;
+            }
+          });
+          inner += `<details class="diff-file" data-key="${esc(key)}"${isOpen ? " open" : ""}>
+            <summary><span class="df-name">${esc(f.file)}</span>${changed ? `<span class="dc-changed" title="Its patch changed after you marked it viewed">changed since viewed</span>` : ""}` +
+            `${live.length ? `<span class="dc-count">${live.length} comment${live.length === 1 ? "" : "s"}</span>` : ""}` +
+            `<span class="df-counts"><span class="df-add">+${c.add}</span> <span class="df-del">−${c.del}</span></span>` +
+            `${notes ? `<label class="dc-viewed" data-viewed="${fi}" title="Viewed files fold away and come back when their patch changes"><input type="checkbox"${viewed ? " checked" : ""} tabindex="-1" /> Viewed</label>` : ""}</summary>
+            <div class="diff-patch dc-patch">${rows}</div>
+          </details>`;
+        }
+      }
+      html += solo ? inner : `<section class="diff-repo">
+        <div class="dr-head"><span class="dr-label">${esc(r.label || r.path)}</span><span class="dr-path">${esc(r.path)}</span></div>
+        ${inner}</section>`;
+    });
+    body.innerHTML = html;
+    body.scrollTop = keep;
+    body.querySelectorAll(".du-file").forEach((el) => el.addEventListener("click", () => openFileToken(el.getAttribute("data-path"))));
+    body.querySelectorAll("details.diff-file").forEach((el) => el.addEventListener("toggle", () => opened.set(el.dataset.key, el.open)));
+    body.querySelectorAll("[data-viewed]").forEach((el) => el.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const f = files[+el.dataset.viewed];
+      const key = viewedKey(diffScope, f.repo, f.file);
+      const on = notes.viewed && notes.viewed[key] === f.hash;
+      opened.set(key, on); // marking viewed folds it; unmarking opens it
+      window.go.main.App.SetViewed(name, diffScope, f.repo, f.file, on ? "" : f.hash).then(setNotes).catch(showErr);
+    }));
+    if (notes) {
+      body.querySelectorAll(".dc-can").forEach((el) => el.addEventListener("click", (e) => {
+        if (window.getSelection && String(window.getSelection()).length) return; // copying text, not commenting
+        const fi = +el.dataset.f, i = +el.dataset.i;
+        const from = e.shiftKey && sel && sel.f === fi ? sel.anchor : i;
+        const range = selectRange(files[fi].lines, from, i);
+        if (!range) return;
+        sel = { f: fi, anchor: from, range };
+        render();
+      }));
+    }
+    wireCommentCards(body, name, setNotes, showErr);
+    const ta = body.querySelector("#dc-text");
+    if (ta) {
+      ta.addEventListener("input", () => { draft = ta.value; });
+      const add = () => {
+        if (!ta.value.trim() || !sel) return;
+        const f = files[sel.f], r = sel.range;
+        window.go.main.App.AddComment(name, { repo: f.repo, file: f.file, side: r.side, line: r.line, endLine: r.endLine, quote: r.quote, body: ta.value })
+          .then((n) => { sel = null; draft = ""; setNotes(n); }).catch(showErr);
+      };
+      ta.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); add(); }
+        else if (e.key === "Escape") { e.preventDefault(); sel = null; render(); }
+      });
+      body.querySelector("#dc-add").addEventListener("click", add);
+      body.querySelector("#dc-cancel").addEventListener("click", () => { sel = null; render(); });
+      ta.focus({ preventScroll: true });
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
   }
-  body.innerHTML = html;
-  body.querySelectorAll(".du-file").forEach((el) => {
-    el.addEventListener("click", () => openFileToken(el.getAttribute("data-path")));
-  });
+
+  backdrop.querySelectorAll(".dc-seg").forEach((b) => b.addEventListener("click", () => {
+    if (diffScope === b.dataset.scope) return;
+    diffScope = b.dataset.scope;
+    draft = "";
+    load();
+  }));
+  sendBtn.addEventListener("click", () => { close(); sendComments(name); });
+  if (!bound("ReviewNotes")) backdrop.querySelector(".dc-hint").textContent = "";
+  load();
 }
 
 // ---- terminal ----
@@ -3497,6 +3715,7 @@ function reviewSheetHtml(r) {
   }
   h += `</section>`;
   h += `<section class="rs-sec" id="rs-so"></section>`;
+  h += `<section class="rs-sec" id="rs-cm"></section>`;
 
   h += `<section class="rs-sec"><h3>Finish line${r.taskStatus ? ` <span class="rs-tag">${esc(r.taskStatus)}</span>` : ""}</h3>`;
   if (!r.taskStatus) {
@@ -3563,7 +3782,11 @@ async function openReviewSheet(name) {
     </div>`;
   document.body.appendChild(backdrop);
   const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey, true); };
-  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+  const onKey = (e) => {
+    if (e.key !== "Escape") return;
+    if (e.target && e.target.tagName === "INPUT" && backdrop.contains(e.target)) return; // a reason box's own Escape
+    e.preventDefault(); close();
+  };
   document.addEventListener("keydown", onKey, true);
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
   backdrop.querySelector("#rs-close").addEventListener("click", close);
@@ -3577,7 +3800,15 @@ async function openReviewSheet(name) {
     if (!backdrop.isConnected) return;
     body.innerHTML = reviewSheetHtml(r);
     body.querySelectorAll("[data-path]").forEach((el) => el.addEventListener("click", () => openFileToken(el.getAttribute("data-path"))));
-    mountSecondOpinion(body.querySelector("#rs-so"), name, r.secondOpinion);
+    const notes = { v: null };
+    try { notes.v = await window.go.main.App.ReviewNotes(name); } catch (_) { /* no notes store: no comments */ }
+    if (!backdrop.isConnected) return;
+    const cmEl = body.querySelector("#rs-cm");
+    let redrawSO = () => {};
+    const setNotes = (n) => { notes.v = n; drawComments(); redrawSO(); };
+    const drawComments = () => mountComments(cmEl, name, notes.v, pane, setNotes, () => { close(); });
+    drawComments();
+    redrawSO = mountSecondOpinion(body.querySelector("#rs-so"), name, r.secondOpinion, notes, setNotes);
     // opening the sheet is the review (attention.go)
     const mark = bound("MarkReviewed");
     if (mark) mark([name]).then(() => poll()).catch(() => {});
@@ -3594,7 +3825,7 @@ async function openReviewSheet(name) {
 const SO_LEVELS = [["low", "low · few, sure findings"], ["medium", "medium"], ["high", "high · more findings, some unsure"]];
 let soLevel = "medium";
 
-function secondOpinionHtml(d) {
+function secondOpinionHtml(d, notes) {
   const now = Math.floor(Date.now() / 1000);
   let h = `<h3>Second opinion${d ? ` <span class="rs-dim">/code-review ${esc(d.level)}</span>` : ""}</h3>`;
   const controls = (again) =>
@@ -3613,9 +3844,19 @@ function secondOpinionHtml(d) {
   }
   if (d.changed) h += `<p class="so-changed">The code has changed since this review ran.</p>`;
   if (d.findings.length) {
-    h += `<ul class="so-findings">${d.findings.map((f) =>
-      `<li><span class="so-loc" data-path="${esc(d.dir + "/" + f.file + (f.line ? ":" + f.line : ""))}" title="Open in the editor">${esc(f.file)}${f.line ? ":" + f.line : ""}</span>` +
-      `<span class="rs-check"><span>${esc(f.summary)}</span>${f.detail ? `<span class="rs-evidence">${esc(f.detail)}</span>` : ""}</span></li>`).join("")}</ul>`;
+    const marks = (notes && notes.findings) || {};
+    h += `<ul class="so-findings">${d.findings.map((f, i) => {
+      const m = marks[findingKey(f)];
+      const acts = !notes ? "" : m
+        ? `<span class="hr-act" data-so-clear="${i}" title="Back to open">Reopen</span>`
+        : `<span class="hr-act" data-so-fixed="${i}">Fixed</span><span class="hr-act" data-so-invalid="${i}">Invalid…</span>` +
+          (f.line ? `<span class="hr-act" data-so-comment="${i}" title="Make it a review comment on that line, to send with the others">Comment</span>` : "");
+      return `<li class="${m ? "so-marked" : ""}"><span class="so-loc" data-path="${esc(d.dir + "/" + f.file + (f.line ? ":" + f.line : ""))}" title="Open in the editor">${esc(f.file)}${f.line ? ":" + f.line : ""}</span>` +
+        `<span class="rs-check"><span>${m ? `<span class="rs-proof rs-${m.state === "fixed" ? "ok" : m.state === "commented" ? "warn" : "bad"}">${esc(m.state)}</span> ` : ""}${esc(f.summary)}</span>${f.detail ? `<span class="rs-evidence">${esc(f.detail)}</span>` : ""}` +
+        `${m && m.reason ? `<span class="rs-evidence">Invalid: ${esc(m.reason)}</span>` : ""}` +
+        `${acts ? `<span class="dc-acts">${acts}</span>` : ""}` +
+        `<span class="dc-reason" data-so-reason="${i}" hidden><input type="text" class="search-input" placeholder="Why is it invalid? (kept as the record)" spellcheck="false" /><button class="btn-ghost">Mark invalid</button></span></span></li>`;
+    }).join("")}</ul>`;
   } else if (d.none) {
     h += `<p class="rs-dim">It found nothing to flag. That is not a pass: it reads the diff, not the intent.</p>`;
   } else {
@@ -3629,13 +3870,43 @@ function secondOpinionHtml(d) {
 
 // mountSecondOpinion renders the section and polls while a review runs,
 // until the sheet closes.
-function mountSecondOpinion(el, name, d) {
-  if (!el) return;
-  let timer = 0;
+function mountSecondOpinion(el, name, d, notes, setNotes) {
+  if (!el) return () => {};
+  let timer = 0, last = d;
+  const nv = () => (notes ? notes.v : null);
   const render = (x) => {
     clearTimeout(timer);
+    last = x;
     if (!el.isConnected) return;
-    el.innerHTML = secondOpinionHtml(x);
+    el.innerHTML = secondOpinionHtml(x, nv());
+    const fail = (e) => el.insertAdjacentHTML("beforeend", `<p class="so-failed">${esc(String(e))}</p>`);
+    const fs = (x && x.findings) || [];
+    el.querySelectorAll("[data-so-fixed]").forEach((b) => b.addEventListener("click", () =>
+      window.go.main.App.SetFindingState(name, findingKey(fs[+b.dataset.soFixed]), "fixed", "").then(setNotes).catch(fail)));
+    el.querySelectorAll("[data-so-clear]").forEach((b) => b.addEventListener("click", () =>
+      window.go.main.App.SetFindingState(name, findingKey(fs[+b.dataset.soClear]), "", "").then(setNotes).catch(fail)));
+    el.querySelectorAll("[data-so-invalid]").forEach((b) => b.addEventListener("click", () => {
+      const box = el.querySelector(`[data-so-reason="${b.dataset.soInvalid}"]`);
+      box.hidden = !box.hidden;
+      if (!box.hidden) box.querySelector("input").focus();
+    }));
+    el.querySelectorAll("[data-so-reason]").forEach((box) => {
+      const input = box.querySelector("input");
+      const ok = () => { if (input.value.trim()) window.go.main.App.SetFindingState(name, findingKey(fs[+box.dataset.soReason]), "invalid", input.value).then(setNotes).catch(fail); };
+      box.querySelector("button").addEventListener("click", ok);
+      input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") { e.preventDefault(); ok(); }
+        else if (e.key === "Escape") { e.preventDefault(); box.hidden = true; }
+      });
+    });
+    el.querySelectorAll("[data-so-comment]").forEach((b) => b.addEventListener("click", () => {
+      const f = fs[+b.dataset.soComment];
+      const body = `Second opinion: ${f.summary}${f.detail ? "\n" + f.detail : ""}`;
+      window.go.main.App.AddComment(name, { repo: x.dir, file: f.file, side: "new", line: f.line, endLine: f.line, quote: "", body })
+        .then((n) => window.go.main.App.SetFindingState(name, findingKey(f), "commented", "").catch(() => n))
+        .then((n) => setNotes(n)).catch(fail);
+    }));
     el.querySelectorAll("[data-path]").forEach((p) => p.addEventListener("click", () => openFileToken(p.getAttribute("data-path"))));
     const lvl = el.querySelector("#so-level");
     if (lvl) lvl.addEventListener("change", () => { soLevel = lvl.value; });
@@ -3655,6 +3926,31 @@ function mountSecondOpinion(el, name, d) {
     }
   };
   render(d);
+  return () => render(last);
+}
+
+// mountComments lists a session's review comments on the sheet with their
+// states, and sends the open ones.
+function mountComments(el, name, notes, pane, setNotes, closeSheet) {
+  if (!el) return;
+  if (!notes) { el.innerHTML = ""; return; }
+  const cs = notes.comments || [];
+  const order = { open: 0, sent: 1, resolved: 2, invalid: 3 };
+  const sorted = cs.slice().sort((a, b) => (order[a.state] - order[b.state]) || a.file.localeCompare(b.file) || a.line - b.line);
+  const nOpen = openComments(notes).length;
+  const count = ["open", "sent", "resolved", "invalid"].map((k) => [k, cs.filter((c) => c.state === k).length]).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(" · ");
+  let h = `<h3>Comments${count ? ` <span class="rs-dim">${count}</span>` : ""}</h3>`;
+  if (!cs.length) {
+    h += `<p class="rs-dim">None yet. ${pane ? "Open the diff and click a line to comment on it; the open comments go to the session as one message." : ""}</p>`;
+  } else {
+    h += `<div class="dc-list">${sorted.map((c) => commentCardHtml(c, true)).join("")}</div>`;
+  }
+  if (pane && nOpen) h += `<div class="so-row"><button class="btn-ghost" id="cm-send">Send ${nOpen} comment${nOpen === 1 ? "" : "s"}</button></div>`;
+  el.innerHTML = h;
+  const fail = (e) => el.insertAdjacentHTML("beforeend", `<p class="so-failed">${esc(String(e))}</p>`);
+  wireCommentCards(el, name, setNotes, fail);
+  const send = el.querySelector("#cm-send");
+  if (send) send.addEventListener("click", () => { closeSheet(); sendComments(name); });
 }
 
 function hooksChip(s) {

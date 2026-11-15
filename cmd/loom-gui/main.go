@@ -142,6 +142,7 @@ func run() error {
 	}
 	app.applyClaudeTheme() // match Claude's theme to the terminal
 	app.attn = newAttention(filepath.Join(cfg.LoomDir, "attention.json"), time.Now)
+	app.notes = newCommentStore(filepath.Join(cfg.LoomDir, "comments"), time.Now)
 	app.tasks = taskfile.NewCache(taskfile.Dir(cfg.ClaudeConfigDir))
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
 	// Second opinions run on their own; quitting loom stops them.
