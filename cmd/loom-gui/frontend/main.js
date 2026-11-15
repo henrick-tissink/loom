@@ -3445,6 +3445,9 @@ function reviewSheetHtml(r) {
   h += r.risks.length
     ? `<ul class="rs-risks">${r.risks.map((x) => `<li class="rs-${x.level}">${esc(x.text)}</li>`).join("")}</ul>`
     : `<p class="rs-dim">Nothing loom can see stands out. That is not a pass: read the diff.</p>`;
+  if ((r.audited || []).length) {
+    h += `<p class="rs-dim" title="Pattern checks on the diff: deleted or skipped tests, lost assertions, silenced checks, config, dependencies, secrets, agent files. Advisory: a refactor can trip them, and a clean result proves nothing.">Shortcut checks read ${r.audited.map(esc).join("; ")}.</p>`;
+  }
   h += `</section>`;
 
   h += `<section class="rs-sec"><h3>Finish line${r.taskStatus ? ` <span class="rs-tag">${esc(r.taskStatus)}</span>` : ""}</h3>`;

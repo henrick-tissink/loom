@@ -144,6 +144,7 @@ no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. Removing a project (`App.RemoveProject`) kills its live sessions, forgets its rows, deletes the project and records the root in `ignored_roots`; "+ New project" at that root un-ignores it. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
+| `diffaudit` | Shortcut checks on a patch for the review sheet (tests deleted/skipped, assertions lost, checks silenced, config, dependencies, secrets, agent files) | Pure: text in, flags out; never prints a secret's value. |
 | `forge` | A branch's GitHub PR or GitLab MR, its CI and review state and open review feedback (composed into a prompt), through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
 | `usage` | Plan rate-limit windows from the opt-in status-line tap, token totals from transcripts | Writes settings.json only on the explicit Track / Stop click, after a backup; §5.2. |
 | `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
@@ -559,7 +560,7 @@ Limits: edits through Bash count only in an owned worktree; subagents'
 transcripts are not read; a `/clear` rebind starts the edited set afresh; a
 merge done on the remote counts only after a fetch.
 
-### 5.8 The review sheet (`cmd/loom-gui/review.go`, `transcript/runs.go`)
+### 5.8 The review sheet (`cmd/loom-gui/review.go`, `transcript/runs.go`, `diffaudit`)
 
 `App.ReviewSheet` builds a session's sheet on the click, from the last poll's
 visible rows (`App.noteRail`, the same cache `NudgePrompt` reads; a hidden
@@ -582,8 +583,28 @@ row has no sheet). Nothing calls a model.
   unknown.
 - **Changes** are `gitdiff.WorkingTree` per session directory, the patch
   dropped (Open diff fetches it).
+- **Shortcut checks** are `diffaudit.Audit` over `gitdiff.Against` per
+  directory: from the worktree branch's start (`branchStart`, its reflog)
+  for a worktree's own directory, else from the commit HEAD was at when the
+  task started (`commitAt`, read from `git log`; `rev-list --before` parses
+  a bare number as a year), else HEAD, so new files' contents are read too.
+  `internal/diffaudit` is pure text matching on the patch: test files are
+  code files under a test directory or with a test name; a test file loses
+  assertions when more are removed than added in it, not counting removed
+  lines that reappear in another file (a move); a new unrelated test file
+  does not offset the loss; the patch is asked for with `--no-color
+  --no-ext-diff --no-textconv` and fixed a/ b/ prefixes, so git config
+  can't turn it into something unreadable; lockfiles are listed, not read;
+  credentials need a value that mixes letters and digits; style
+  suppressions (`# noqa`) and coverage pragmas are left out. On the last 30
+  commits of 90 local repositories (2,515 commits) it flagged dependencies
+  253 times, CI/test config 76, assertions lost 63, test files deleted 40,
+  agent files 26, silenced checks 21, possible secrets 14 and skipped
+  tests 13. Before those last three rules, FluentAssertions' `.Should()`
+  alone produced 164 false "assert nothing" flags and `# noqa` 89.
 - **Risks** are rules over the above and the row's spin, overlap and held
-  chip, worst first.
+  chip, worst first: a possible secret is `bad`, the other shortcut checks
+  `warn`. `Audited` says per directory what the shortcut checks read.
 
 ## 6. Data model (`~/.loom/loom.db`)
 

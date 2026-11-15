@@ -91,6 +91,12 @@ func splitNUL(s string) []string {
 	return out
 }
 
+// plain makes Against's patch a standard unified diff whatever the user's
+// git config says: no colour codes, no external diff tool or textconv, and
+// a/ b/ prefixes (diff.noprefix and diff.mnemonicPrefix change them). The
+// review sheet's shortcut checks parse it.
+var plain = []string{"--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"}
+
 // Untracked file contents are added to Against's patch up to these limits;
 // past them a new file is listed but not shown.
 const (
@@ -122,7 +128,7 @@ func Against(dir, base string) RepoDiff {
 		d.Commits, _ = strconv.Atoi(strings.TrimSpace(n))
 	}
 	stat, _ := git(dir, "diff", mb, "--stat")
-	patch, _ := git(dir, "diff", mb)
+	patch, _ := git(dir, append([]string{"diff"}, append(plain, mb)...)...)
 	names, _ := git(dir, "diff", mb, "--name-only", "-z")
 	untr, _ := git(dir, "ls-files", "--others", "--exclude-standard", "-z")
 	d.Stat = strings.TrimRight(stat, "\n")
@@ -138,7 +144,7 @@ func Against(dir, base string) RepoDiff {
 			continue
 		}
 		// --no-index exits 1 when the files differ, which they always do.
-		p, _ := git(dir, "diff", "--no-index", "--", "/dev/null", f)
+		p, _ := git(dir, append(append([]string{"diff", "--no-index"}, plain...), "--", "/dev/null", f)...)
 		if p != "" && !strings.HasSuffix(b.String(), "\n") && b.Len() > 0 {
 			b.WriteString("\n")
 		}

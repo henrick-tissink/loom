@@ -1,10 +1,15 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/henricktissink/loom/internal/diffaudit"
 	"github.com/henricktissink/loom/internal/gitdiff"
 	"github.com/henricktissink/loom/internal/hooklog"
 	"github.com/henricktissink/loom/internal/taskfile"
@@ -134,6 +139,81 @@ func TestReviewTestsAndRisks(t *testing.T) {
 	r = buildReview(reviewIn{dto: SessionDTO{Name: "loom-1"}, task: reviewTask(true), hasTask: true})
 	if !hasRisk(r, "warn", "No test command ran since the task started") {
 		t.Fatalf("risks without tests = %+v", r.Risks)
+	}
+}
+
+func TestReviewAuditFlags(t *testing.T) {
+	audits := []repoAudit{
+		{label: "vega", scope: "uncommitted changes and new files", flags: []diffaudit.Flag{
+			{Kind: "secret", Level: "bad", Text: "Possible secret added; check before it is committed or pushed: conf.go (an AWS access key)."},
+			{Kind: "tests_skipped", Level: "warn", Text: "Tests skipped or focused in the new code: hedge_test.go (t.Skip)."},
+		}},
+		{label: "web", err: "not a git repository"},
+	}
+	r := buildReview(reviewIn{dto: SessionDTO{Name: "loom-1"}, task: reviewTask(true), hasTask: true, audits: audits})
+	if !hasRisk(r, "bad", "vega: Possible secret added") || !hasRisk(r, "warn", "vega: Tests skipped or focused") {
+		t.Fatalf("risks = %+v", r.Risks)
+	}
+	if strings.Join(r.Audited, " | ") != "vega: uncommitted changes and new files | web: not checked (not a git repository)" {
+		t.Fatalf("audited = %q", r.Audited)
+	}
+	// one directory: flags carry no label
+	r = buildReview(reviewIn{dto: SessionDTO{Name: "loom-1"}, audits: audits[:1]})
+	if !hasRisk(r, "bad", "Possible secret added") || hasRisk(r, "bad", "vega: ") {
+		t.Fatalf("single-repo risks = %+v", r.Risks)
+	}
+}
+
+// auditDir reads the commits made since the task started, not only what is
+// uncommitted, and leaves out what was committed before it.
+func TestAuditDirSinceTaskStart(t *testing.T) {
+	dir := t.TempDir()
+	git := func(env []string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), append([]string{"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t"}, env...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := func(ts int64) []string {
+		d := fmt.Sprintf("@%d +0000", ts)
+		return []string{"GIT_AUTHOR_DATE=" + d, "GIT_COMMITTER_DATE=" + d}
+	}
+	git(nil, "init", "-q")
+	write("old_test.go", "package x\nfunc TestOld(t *testing.T) { t.Skip(\"before the task\") }\n")
+	git(at(1000), "add", ".")
+	git(at(1000), "commit", "-qm", "before")
+	write("a_test.go", "package x\nfunc TestA(t *testing.T) { t.Skip(\"during\") }\n")
+	git(at(3000), "add", ".")
+	git(at(3000), "commit", "-qm", "during")
+	write("CLAUDE.md", "- new rule\n")
+	// config that would turn the patch into something parse can't read
+	git(nil, "config", "color.ui", "always")
+	git(nil, "config", "diff.noprefix", "true")
+
+	a := auditDir(dir, "x", "", 2000)
+	kinds := map[string]string{}
+	for _, f := range a.flags {
+		kinds[f.Kind] = f.Text
+	}
+	if !strings.Contains(kinds["tests_skipped"], "a_test.go") || strings.Contains(kinds["tests_skipped"], "old_test.go") ||
+		!strings.Contains(kinds["agent_files"], "CLAUDE.md") || !strings.Contains(a.scope, "since the task started") {
+		t.Fatalf("audit = %+v", a)
+	}
+	// a worktree branch with no reflog falls back to the task's start
+	if a := auditDir(dir, "x", "no-such-branch", 2000); !strings.Contains(a.scope, "since the task started") || len(a.flags) != 3 {
+		t.Fatalf("no-reflog audit = %+v", a)
+	}
+	// no task: only what is uncommitted
+	if a := auditDir(dir, "x", "", 0); len(a.flags) != 1 || a.flags[0].Kind != "agent_files" {
+		t.Fatalf("no-task audit = %+v", a)
 	}
 }
 

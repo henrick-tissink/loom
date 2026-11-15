@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/henricktissink/loom/internal/diffaudit"
 	"github.com/henricktissink/loom/internal/gitdiff"
 	"github.com/henricktissink/loom/internal/hooklog"
 	"github.com/henricktissink/loom/internal/taskfile"
@@ -35,6 +38,9 @@ type ReviewDTO struct {
 	Changes    []ReviewRepo         `json:"changes"`
 	Worktree   *WorktreeDTO         `json:"worktree,omitempty"`
 	Risks      []ReviewRisk         `json:"risks"`
+	// Audited says which changes the shortcut checks read, one line per
+	// directory: they look at more than Changes (commits too).
+	Audited []string `json:"audited"`
 }
 
 // ReviewCheck is one Done-when check and who proved it. Proof is
@@ -101,6 +107,15 @@ type reviewIn struct {
 	act      transcript.Activity
 	repos    []gitdiff.RepoDiff
 	dirs     []string // the session's directories: edits outside them (the task file) don't count
+	audits   []repoAudit
+}
+
+// repoAudit is the shortcut checks over one directory's changes.
+type repoAudit struct {
+	label string
+	scope string // what was read: "uncommitted and new files", plus commits since …
+	flags []diffaudit.Flag
+	err   string
 }
 
 // guardRan is the stop guard's verdicts that ran every `$` check: one that
@@ -120,7 +135,7 @@ func lastGuardRun(recs []hooklog.Record) *hooklog.Record {
 
 func buildReview(in reviewIn) ReviewDTO {
 	d := in.dto
-	out := ReviewDTO{Name: d.Name, Checks: []ReviewCheck{}, Tests: []transcript.TestRun{}, Changes: []ReviewRepo{}, Risks: []ReviewRisk{}, Worktree: d.Worktree}
+	out := ReviewDTO{Name: d.Name, Checks: []ReviewCheck{}, Tests: []transcript.TestRun{}, Changes: []ReviewRepo{}, Risks: []ReviewRisk{}, Audited: []string{}, Worktree: d.Worktree}
 	risk := func(level, f string, a ...any) {
 		out.Risks = append(out.Risks, ReviewRisk{level, fmt.Sprintf(f, a...)})
 	}
@@ -220,6 +235,22 @@ func buildReview(in reviewIn) ReviewDTO {
 			risk("warn", "%s edited after the last passing test run: %s.", plural(len(after), "1 file was", fmt.Sprintf("%d files were", len(after))), list(after))
 		}
 	}
+	// What the diff shows: possible secrets, then shortcuts and edits to
+	// read closely. Several directories: each flag names its own.
+	for _, a := range in.audits {
+		if a.err != "" {
+			out.Audited = append(out.Audited, fmt.Sprintf("%s: not checked (%s)", a.label, a.err))
+			continue
+		}
+		out.Audited = append(out.Audited, a.label+": "+a.scope)
+		for _, f := range a.flags {
+			text := f.Text
+			if len(in.audits) > 1 {
+				text = a.label + ": " + text
+			}
+			risk(f.Level, "%s", text)
+		}
+	}
 	if !in.hasTask {
 		risk("warn", "There is no task file, so there is no finish line to check the work against.")
 	} else {
@@ -313,6 +344,10 @@ func (a *App) ReviewSheet(name string) (ReviewDTO, error) {
 	}
 	labels := a.targetLabels()
 	in.dirs = sessionDirs(row.SessionRow)
+	var started int64
+	if in.hasTask {
+		started = in.task.StartedAt
+	}
 	for _, dir := range in.dirs {
 		r := gitdiff.WorkingTree(dir)
 		r.Patch = ""
@@ -321,6 +356,51 @@ func (a *App) ReviewSheet(name string) (ReviewDTO, error) {
 			r.Label = filepath.Base(dir)
 		}
 		in.repos = append(in.repos, r)
+		if r.Error == "" {
+			branch := ""
+			if dir == row.Cwd && e.dto.Worktree != nil {
+				branch = e.dto.Worktree.Branch
+			}
+			in.audits = append(in.audits, auditDir(dir, r.Label, branch, started))
+		}
 	}
 	return buildReview(in), nil
+}
+
+// auditDir runs the shortcut checks over what a session changed in dir:
+// on a worktree branch, everything since the branch was cut; otherwise the
+// commits since the task started (when there is a task) and the
+// uncommitted changes and new files.
+func auditDir(dir, label, branch string, started int64) repoAudit {
+	base, scope := "HEAD", "uncommitted changes and new files"
+	if b := branchStart(dir, branch, ""); branch != "" && b != "" {
+		base, scope = b, "commits since branch "+branch+" was cut, plus uncommitted changes and new files"
+	} else if started > 0 { // also a worktree branch with no reflog (a bare repo's)
+		if b := commitAt(dir, started); b != "" {
+			base, scope = b, "commits since the task started, plus uncommitted changes and new files"
+		}
+	}
+	d := gitdiff.Against(dir, base)
+	if d.Error != "" {
+		return repoAudit{label: label, err: d.Error}
+	}
+	return repoAudit{label: label, scope: scope, flags: diffaudit.Audit(d.Patch)}
+}
+
+// commitAt is the commit HEAD was at when the task started: the newest
+// first-parent commit no later than started (unix seconds). Read from the
+// log rather than rev-list --before, whose date parser takes a bare number
+// for a year. "" when HEAD's recent history is all newer, or on an error.
+func commitAt(dir string, started int64) string {
+	out, err := exec.Command("git", "-C", dir, "log", "-n", "1000", "--first-parent", "--format=%H %ct", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	for _, ln := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		h, ct, ok := strings.Cut(ln, " ")
+		if t, err := strconv.ParseInt(ct, 10, 64); ok && err == nil && t <= started {
+			return h
+		}
+	}
+	return ""
 }
