@@ -80,6 +80,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.loom/comments/` | GUI (rw, atomic) | per Claude session id: review comments with their states, files marked viewed, second-opinion finding verdicts (§5.10) |
 | `~/.loom/corrections.json` | GUI (rw, atomic) | corrections taught as rules or counted against them (§5.5) |
 | `~/.loom/ledger.json` | GUI (rw, atomic) | settled worktrees on the Work page (§4.2) |
+| `~/.loom/plans/<sid>.md` | GUI (w on approve, atomic) | plans approved from the plan card, shown on the review sheet |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status, kind and background job id |
 | `claude agents --json --all` | Claude (Loom: runs it, read-only) | background sessions, including the ones the supervisor has stopped |
@@ -256,6 +257,28 @@ and a live lock. Worktree paths are compared with symlinks resolved, since
 git lists them resolved and a row keeps the path the person picked. A row
 whose read failed keeps its settle mark.
 Neither uses `--force`, so ignored build output goes with the directory.
+
+**Plan card.** `cmd/loom-gui/plan.go` answers claude's native plan dialog
+and does not run a plan system of its own. While the dialog is open, the
+pending ExitPlanMode call is not in the transcript yet (verified on Claude Code
+2.1.325), so the pane is the only witness. The 1.5 s poll captures only the
+panes of needs-you rows, with soft-wrapped lines joined (`capture-pane -J`), so
+a long plan path still reads as one line in a narrow pane. `parsePlanDialog` requires two things. The first is
+the hint line naming a plan file under `plans/`. The second is a run of options
+numbered 1, 2, 3… with the cursor `❯` on one, read only below the last `─`
+rule, because the plan's own steps above that rule are numbered too. An option
+followed by a "feedback" hint (or labelled "what to change") takes text.
+`AnswerPlan` captures the pane again and refuses unless option n still carries
+the label the card showed. It then sends the digit (`tmux.SendKeys`), which
+submits a plain option. For the feedback option it sends the digit, then waits up
+to 2 s for the pane to show the cursor on that option, then sends the text
+literally and presses Enter. If the cursor never arrives, it types nothing:
+text that reached the option list instead would pick, and a digit in it would
+submit, a plain option. These key
+behaviours were checked live on 2.1.325. The plan file is read only from a
+`plans` directory under the home or the claude config directory. An approved
+plan is copied to `~/.loom/plans/<sid>.md`, only after its key was sent, and
+shown on the review sheet.
 
 **PR / MR status.** Every row, live or finished, shows the pull request
 (GitHub) or merge request (GitLab) of the branch the session last worked on.

@@ -210,6 +210,7 @@ function idleSuffix(s) {
 // so ("dialog open", "shell"); a bare needs-you tells you less than the thing
 // you have to answer.
 function waitingSuffix(s) {
+  if (s.planReady && !s.external && !s.background) return ` <span class="tpill tpill-plan" data-plan="${esc(s.name)}" title="Claude's plan is waiting for approval — click to read and answer it">plan ready</span>`;
   if (!s.waitingFor) return "";
   return ` <span class="tage">${esc(s.waitingFor)}</span>`;
 }
@@ -2565,6 +2566,72 @@ function openReply(name) {
   });
 }
 
+// ---- plan card (plan.go) ----
+// Claude's own plan dialog, answered from loom: the plan file the dialog
+// names and the dialog's own options, read from the pane. Each answer is
+// checked against the pane again before a key is sent.
+document.addEventListener("click", (e) => {
+  const pill = e.target.closest && e.target.closest(".tpill-plan[data-plan]");
+  if (!pill) return;
+  e.stopPropagation();
+  e.preventDefault();
+  openPlanCard(pill.dataset.plan);
+}, true);
+
+async function openPlanCard(name) {
+  if (document.querySelector(".modal-backdrop")) return;
+  const s = latestSessions.find((x) => x.name === name);
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `<div class="modal plan-modal" role="dialog" aria-label="Plan"><h2>Plan from ${esc(s ? displayName(s) : name)}</h2><div class="po-empty">Reading the plan…</div></div>`;
+  document.body.appendChild(backdrop);
+  const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape" && !(e.target.closest && e.target.closest("textarea"))) { e.preventDefault(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  const fn = bound("PlanCard");
+  let c;
+  try { c = await fn(name); } catch (e) {
+    backdrop.querySelector(".modal").innerHTML = `<h2>Plan</h2><div class="modal-error">${esc(String(e))}</div><div class="modal-actions"><button class="btn-ghost" id="pc-close">Close</button></div>`;
+    backdrop.querySelector("#pc-close").addEventListener("click", close);
+    return;
+  }
+  const plain = c.options.filter((o) => !o.input);
+  const input = c.options.find((o) => o.input);
+  backdrop.querySelector(".modal").innerHTML = `
+    <h2>Plan from ${esc(s ? displayName(s) : name)}</h2>
+    <p class="usg-note" title="${esc(c.planFile)}">${esc(c.planFile)}</p>
+    ${c.planErr ? `<div class="modal-error">${esc(c.planErr)}</div>` : `<pre class="plan-text">${esc(c.plan)}</pre>`}
+    <div class="modal-error" id="pc-error"></div>
+    <div class="plan-opts">${plain.map((o) => `<button class="${o.n === 1 ? "btn-launch" : "btn-ghost"} pc-opt" data-n="${o.n}" data-label="${esc(o.label)}">${esc(o.label)}</button>`).join("")}</div>
+    ${input ? `<div class="plan-fb"><textarea id="pc-fb" rows="3" placeholder="${esc(input.label)}…"></textarea>
+      <button class="btn-ghost" id="pc-send" data-n="${input.n}" data-label="${esc(input.label)}">${esc(input.label)}</button></div>` : ""}
+    <div class="modal-actions">
+      <button class="btn-ghost" id="pc-fresh" title="Open New session with this plan as the seed; this session's dialog stays as it is"${c.plan ? "" : " disabled"}>Implement in a fresh session…</button>
+      <button class="btn-ghost" id="pc-close">Close</button>
+    </div>`;
+  const err = backdrop.querySelector("#pc-error");
+  const answer = async (b, text) => {
+    b.disabled = true;
+    try { await bound("AnswerPlan")(name, +b.dataset.n, b.dataset.label, text); }
+    catch (e) { err.textContent = String(e); b.disabled = false; return; }
+    close();
+    poll();
+  };
+  backdrop.querySelectorAll(".pc-opt").forEach((b) => b.addEventListener("click", () => answer(b, "")));
+  const sendB = backdrop.querySelector("#pc-send");
+  if (sendB) sendB.addEventListener("click", () => {
+    const t = backdrop.querySelector("#pc-fb").value.trim();
+    if (!t) { err.textContent = "Write what Claude should change."; return; }
+    answer(sendB, t);
+  });
+  backdrop.querySelector("#pc-close").addEventListener("click", close);
+  backdrop.querySelector("#pc-fresh").addEventListener("click", () => {
+    close();
+    openLauncher(s && s.projectRoot, "Implement this approved plan. Write the task file first.\n\n" + c.plan);
+  });
+}
+
 // ---- diff review ----
 // Split a unified diff into per-file chunks (each starts with "diff --git"),
 // pulling the file path from the header for the collapsible section title.
@@ -3891,6 +3958,7 @@ function reviewSheetHtml(r) {
   h += `<section class="rs-sec" id="rs-so"></section>`;
   h += `<section class="rs-sec" id="rs-cm"></section>`;
 
+  if (r.plan) h += `<section class="rs-sec"><details><summary><h3 class="rs-inline">Approved plan</h3></summary><pre class="plan-text">${esc(r.plan)}</pre></details></section>`;
   h += `<section class="rs-sec"><h3>Finish line${r.taskStatus ? ` <span class="rs-tag">${esc(r.taskStatus)}</span>` : ""}</h3>`;
   if (!r.taskStatus) {
     h += `<p class="rs-dim">No task file for this session.</p>`;
@@ -4539,7 +4607,7 @@ function optionsHtml(pairs) {
 // The launcher's target picker (§5): a project root, a single repo, or a
 // multi-repo selection. In multi mode the PRIMARY is the topmost checked repo
 // in LIST order, not the first one clicked.
-async function openLauncher(preselect) {
+async function openLauncher(preselect, seed) {
   if (document.querySelector(".modal-backdrop")) return; // don't stack modals
   // Append the backdrop synchronously BEFORE any await, so a second rapid click
   // sees it via the guard above and can't stack a duplicate during the load.
@@ -4591,6 +4659,7 @@ async function openLauncher(preselect) {
       </div>
     </div>`;
   document.body.appendChild(backdrop);
+  if (seed) backdrop.querySelector("#f-seed").value = seed;
 
   const close = () => backdrop.remove();
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });

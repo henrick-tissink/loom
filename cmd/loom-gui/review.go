@@ -45,6 +45,8 @@ type ReviewDTO struct {
 	// SecondOpinion is the latest native /code-review run on the
 	// session's directory, or nil (secondopinion.go).
 	SecondOpinion *SecondOpinionDTO `json:"secondOpinion"`
+	// Plan is the plan approved from the plan card, or "" (plan.go).
+	Plan string `json:"plan,omitempty"`
 }
 
 // ReviewCheck is one Done-when check and who proved it. Proof is
@@ -370,6 +372,7 @@ func (a *App) ReviewSheet(name string) (ReviewDTO, error) {
 	}
 	out := buildReview(in)
 	out.SecondOpinion = a.opinionFor(sid)
+	out.Plan = a.approvedPlan(sid)
 	return out, nil
 }
 

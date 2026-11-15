@@ -268,6 +268,26 @@ func (c *Client) SendEnter(name string) error {
 	return nil
 }
 
+// SendKeys sends tmux key names ("Escape", "3", "Down") to a pane, each
+// as a key press, not literal text.
+func (c *Client) SendKeys(name string, keys ...string) error {
+	out, err := c.run(append([]string{"send-keys", "-t", paneTarget(name)}, keys...)...)
+	if err != nil {
+		return fmt.Errorf("tmux send-keys %s: %s: %w", name, strings.TrimSpace(out), err)
+	}
+	return nil
+}
+
+// CapturePaneJoined is CapturePane with soft-wrapped lines joined back
+// into one, so a long line reads the same at any pane width.
+func (c *Client) CapturePaneJoined(name string) (string, error) {
+	out, err := c.run("capture-pane", "-p", "-J", "-t", paneTarget(name))
+	if err != nil {
+		return "", fmt.Errorf("tmux capture-pane %s: %s: %w", name, strings.TrimSpace(out), err)
+	}
+	return out, nil
+}
+
 func (c *Client) CapturePane(name string) (string, error) {
 	out, err := c.run("capture-pane", "-p", "-t", paneTarget(name))
 	if err != nil {

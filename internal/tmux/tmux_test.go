@@ -326,3 +326,36 @@ func TestListPanesOneCall(t *testing.T) {
 		t.Fatalf("pane = %+v", p)
 	}
 }
+
+func TestSendKeys(t *testing.T) {
+	c := testClient(t)
+	name := "loom-44444444-4444-4444-4444-444444444444"
+	if err := c.NewSession(name, t.TempDir(), "cat", 80, 24); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if err := c.SendKeys(name, "4", "2", "Enter"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	out, _ := c.CapturePane(name)
+	if !strings.Contains(out, "42") {
+		t.Fatalf("keys not sent:\n%s", out)
+	}
+}
+
+func TestCapturePaneJoined(t *testing.T) {
+	c := testClient(t)
+	name := "loom-77777777-7777-7777-7777-777777777777"
+	line := "ctrl+g to edit in Vim · ~/.claude/plans/a-rather-long-generated-plan-name.md"
+	if err := c.NewSession(name, t.TempDir(), "printf '%s\\n' '"+line+"'; sleep 30", 30, 24); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if out, _ := c.CapturePane(name); strings.Contains(out, line) {
+		t.Skip("the pane did not wrap the line")
+	}
+	out, err := c.CapturePaneJoined(name)
+	if err != nil || !strings.Contains(out, line) {
+		t.Fatalf("joined capture = %q, %v", out, err)
+	}
+}

@@ -37,6 +37,7 @@ type App struct {
 	notes      *commentStore    // review comments, viewed files (comments.go)
 	corr       *correctionStore // corrections taught or held against rules (teach.go)
 	ledger     *ledgerStore     // settled worktrees on the Work page (ledger.go)
+	planDir    string           // approved plans, ~/.loom/plans (plan.go)
 	tasks      *taskfile.Cache  // task files, for ended sessions (attention.go)
 
 	// disc is the Agent Discipline layer (discipline.go); nil in tests that
@@ -163,6 +164,9 @@ func (a *App) ListSessions() (out []SessionDTO) {
 		out[i].Worktree = a.wt.info(out[i].Cwd, false)
 		out[i].PR = a.prs.info(out[i].Cwd, a.transcriptFor(out[i].Cwd, ids[out[i].Name]), true)
 		out[i].Jobs = a.scripts.info(out[i].Cwd)
+		if out[i].Status == "needs_you" {
+			out[i].PlanReady = a.planReady(out[i].Name)
+		}
 	}
 	if a.hooks != nil {
 		a.hooks.reader.Refresh()

@@ -43,6 +43,8 @@ type SessionDTO struct {
 	// RemoteURL is the session's claude.ai/code link while it is under
 	// Remote Control, else "".
 	RemoteURL string `json:"remoteUrl"`
+	// PlanReady: the pane shows claude's plan-approval dialog (plan.go).
+	PlanReady bool `json:"planReady,omitempty"`
 	// CheckpointAt is when the session last wrote a hand-over checkpoint
 	// (unix seconds; 0 = never) and NextStep its one-line next step.
 	CheckpointAt int64  `json:"checkpointAt"`

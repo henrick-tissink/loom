@@ -1173,3 +1173,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .wk-err { color: var(--st-error); font-size: var(--t-micro); }
 .wk-act { text-align: right; white-space: nowrap; }
 #wk-clean { margin-left: auto; }
+
+/* Plan card (plan.go) */
+.tpill-plan { color: var(--accent-ink); background: var(--sel); cursor: pointer; }
+.plan-modal { width: min(720px, 92vw); }
+.plan-text { white-space: pre-wrap; font-family: var(--font-mono); font-size: var(--t-small); max-height: 50vh; overflow: auto; background: var(--inset); padding: 10px 12px; border-radius: 8px; margin: 8px 0; }
+.plan-opts { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.plan-fb { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; }
+.plan-fb textarea { flex: 1; min-height: 3.5em; font: inherit; }
+.rs-inline { display: inline; }

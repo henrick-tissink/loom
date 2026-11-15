@@ -178,6 +178,16 @@ From the terminal: `loom brief <project> --window 3d` writes a brief. `--evidenc
 Use the attention queue and session rows to inspect activity and select terminals.
 The old terminal UI's `W` wall shortcut is no longer a current GUI control.
 
+### Plan ready
+
+When a session stops at Claude's plan-approval dialog, its row shows a **plan ready** pill. Click it to read the plan, which comes from the plan file the dialog names under `~/.claude/plans/`. Below the plan are the dialog's own choices:
+
+- **The approve options** (for example "Yes, and use auto mode" or "Yes, manually approve edits") answer the dialog as if you had pressed that number in the terminal. Approving also saves the plan to `~/.loom/plans/<session id>.md`, and the session's review sheet shows it under **Approved plan**.
+- **Tell Claude what to change** sends your feedback (one line) through the dialog's own feedback field, and Claude comes back with a revised plan.
+- **Implement in a fresh session…** opens New session with the plan as the seed. The original session's dialog is left as it is.
+
+Loom reads the pane again before every answer, and refuses if the dialog has changed or closed. On the phone, use Claude's Remote Control, which shows the same dialog.
+
 ## 7a. Usage
 
 The gauge button in the sidebar opens **Usage**. Its dot turns amber at 70% and red at 90% of your tightest plan window.
