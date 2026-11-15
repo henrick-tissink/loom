@@ -34,6 +34,10 @@ type SessionDTO struct {
 	TaskDone    int    `json:"taskDone"`
 	TaskTotal   int    `json:"taskTotal"`
 	TaskOutcome string `json:"taskOutcome"`
+	// ReviewReady: its task says done and that version is unreviewed;
+	// Snoozed: its current ask is snoozed (attention.go).
+	ReviewReady bool `json:"reviewReady"`
+	Snoozed     bool `json:"snoozed"`
 	// Goal is the session's /goal, once one was set.
 	Goal *GoalDTO `json:"goal,omitempty"`
 	// RemoteURL is the session's claude.ai/code link while it is under
@@ -155,6 +159,10 @@ type FinishedDTO struct {
 	// Outcome is the last conclusion the indexer extracted from the
 	// transcript — what the session ended with, without an LLM call.
 	Outcome string `json:"outcome"`
+	// TaskStatus is its task file's status ("" without one) and
+	// ReviewReady whether that finished task waits for review (attention.go).
+	TaskStatus  string `json:"taskStatus"`
+	ReviewReady bool   `json:"reviewReady"`
 	// Worktree is set while the finished session's worktree is still on
 	// disk, so the row can offer to remove it.
 	Worktree *WorktreeDTO `json:"worktree,omitempty"`

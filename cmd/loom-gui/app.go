@@ -14,6 +14,7 @@ import (
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
+	"github.com/henricktissink/loom/internal/taskfile"
 	"github.com/henricktissink/loom/internal/tmux"
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -32,6 +33,8 @@ type App struct {
 	settings   *settingsStore
 	summarizer *memory.Summarizer
 	opinions   *secondOpinions // second opinions (secondopinion.go)
+	attn       *attention      // reviewed and snoozed marks (attention.go)
+	tasks      *taskfile.Cache // task files, for ended sessions (attention.go)
 
 	// disc is the Agent Discipline layer (discipline.go); nil in tests that
 	// do not set one.
@@ -163,6 +166,7 @@ func (a *App) ListSessions() (out []SessionDTO) {
 		applyHooks(out, snap, a.hooks.reader)
 	}
 	a.ov.apply(out, snap.Live)
+	a.attn.applyLive(out, snap.Live)
 	a.noteRail(out, snap.Live)
 	a.onSnapshot(snap, out, res)
 	return out
@@ -192,11 +196,12 @@ func (a *App) onSnapshot(snap status.Snapshot, dtos []SessionDTO, res *projects.
 // needsYouCount is the badge/title number. It counts the DTOs, which are
 // already §6-filtered, so hiding a project takes its attention count with it —
 // the count is a listed leak surface (§6.3): "3 need you" over a two-session
-// demo names a project the user just put out of view.
+// demo names a project the user just put out of view. A snoozed ask does not
+// count until it comes back (attention.go).
 func needsYouCount(dtos []SessionDTO) int {
 	n := 0
 	for _, d := range dtos {
-		if d.Status == "needs_you" {
+		if d.Status == "needs_you" && !d.Snoozed {
 			n++
 		}
 	}
@@ -314,6 +319,7 @@ func (a *App) ListRecent() []FinishedDTO {
 	if len(out) > recentLimit {
 		out = out[:recentLimit]
 	}
+	a.attn.applyFinished(out, sids, a.tasks)
 	// after the trim: git runs only for rows that reach the screen
 	places := a.bestof.places()
 	for i := range out {

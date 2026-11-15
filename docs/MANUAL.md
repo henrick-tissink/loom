@@ -50,6 +50,11 @@ override. History indexing runs in the background and refreshes every ten minute
 
 The sidebar organizes projects and sessions; the attention queue highlights work waiting on you. Select a row to open its terminal.
 
+**The home** lists what needs you, freshest ask first, then what's in flight and what finished today. It also tracks two marks, kept in `~/.loom/attention.json`:
+
+- **Ready for review**: sessions whose task file says done and that you haven't reviewed since, both live ones that have stopped and ones that ended. Tasks finished more than 7 days ago aren't listed. Opening a session's review sheet marks it reviewed, and so does **Reviewed** on its row (or **Mark all reviewed**). It comes back only when its task file is written again, for a new task or more work on this one. These sessions are listed here instead of under the asks. When any are waiting, the New session launcher says so, and clicking that line opens the queue.
+- **Snooze**: on an ask card (hover it) or in the session header. A snoozed session leaves the queue, the "needs you" capsule, the window title and the Dock count until it next comes back to you. Its next ask brings it back. The rail still shows it, dimmed, as `needs you · snoozed`. **Wake** brings it back now. An ask whose time loom can't read can't be snoozed, because loom couldn't tell when the next one came.
+
 **Reading a row:** status icon · project · *activity* (state + Claude's own session title) · context tokens · model·mode · age.
 
 When the branch a session worked on has a pull request (GitHub, via `gh`) or merge request (GitLab, via `glab`), the row shows it: `PR #77 · ✓ checks`, `MR !55 · ● checks`, `PR #12 · merged`. Red means failing checks or changes requested. Click the pill to open it in your browser. `PR ?` means the forge couldn't be asked (hover for why: usually `gh auth login` or `glab auth login`). Status refreshes about once a minute for live sessions.

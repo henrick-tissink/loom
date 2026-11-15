@@ -75,6 +75,8 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.loom/settings.json` | GUI (rw, atomic) | editor, notifications, auto-summarize, theme (dark default) |
 | `~/.loom/scripts.json` | GUI (rw, atomic) | each project's setup and run scripts, and each workspace's port block (§5.6) |
 | `~/.loom/bestof.json` | GUI (rw, atomic) | best-of-N groups: repo, base commit, seed, attempts, the kept one (§4.5) |
+| `~/.loom/attention.json` | GUI (rw, atomic) | per Claude session id: the task file version last reviewed, the ask snoozed (§5.9) |
+| `~/.loom/second-opinions/` | GUI (rw, atomic) | each session's last `/code-review` second opinion (§5.8) |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status, kind and background job id |
 | `claude agents --json --all` | Claude (Loom: runs it, read-only) | background sessions, including the ones the supervisor has stopped |
@@ -633,6 +635,28 @@ which runs only when the user asks for it.
   written, so a format change degrades to raw output, not to "no findings".
   `TestLiveReview` (`LOOM_LIVE_REVIEW=1`) runs the real command on a planted
   off-by-one.
+
+### 5.9 Reviewed and snoozed (`cmd/loom-gui/attention.go`)
+
+A "looked at" layer over the status, kept per Claude session id in
+`~/.loom/attention.json`. Nothing here changes a status; it changes what the
+home lists and what the count says.
+
+- **Ready for review** (`reviewReady` on live and finished DTOs): the task
+  file says `done`, its mtime is within 7 days (so the first run doesn't
+  list months of history), the mark's `reviewed` is older than that mtime,
+  and a live session isn't running. The mark is set by opening the review
+  sheet or clicking Reviewed (`App.MarkReviewed`). It stores the review
+  time, so the session comes back only when the task file is written
+  again, for a new task or more work on this one. Ended sessions read their
+  task file through `App.tasks` (a `taskfile.Cache`), only for the trimmed
+  Finished page.
+- **Snoozed** (`snoozed` on live DTOs): `App.Snooze` records the ask time
+  (`Row.Since`) the user snoozed. The session is snoozed while it is
+  `needs_you` and its `Since` is still that value, so the next ask
+  unsnoozes it with no timer. `needsYouCount` (the title and the dock)
+  leaves snoozed rows out. Notifications are unaffected: a new ask is never
+  a snoozed one.
 
 ## 6. Data model (`~/.loom/loom.db`)
 

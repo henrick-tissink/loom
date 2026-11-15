@@ -90,7 +90,7 @@ if (_getPrefs) {
 // The capsule at the top of the threads island: how many need you and how
 // long the oldest has waited. Hidden while the queue itself is on screen.
 function renderAttention(sessions) {
-  const q = sessions.filter((s) => s.status === "needs_you");
+  const q = sessions.filter((s) => s.status === "needs_you" && !s.snoozed);
   const n = q.length;
   attnEl.classList.toggle("here", selProject === ATTENTION);
   if (n > 0) {
@@ -1044,13 +1044,13 @@ function emptyRow(html) {
 // mixes projects, so it shows each thread's PROJECT there instead.
 function appendLiveRow(s, projLabel) {
   const li = document.createElement("li");
-  li.className = "thread" + (s.name === activeName ? " active" : "") + (s.external ? " external" : "");
+  li.className = "thread" + (s.name === activeName ? " active" : "") + (s.external ? " external" : "") + (s.snoozed ? " snoozed" : "");
   const color = statusColor(s.status);
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
     `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${bestOfTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}${spinChip(s)}${overlapChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
-    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}</span><span class="tactions"></span></span>`;
+    `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}${s.snoozed ? " · snoozed" : ""}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
   // No pane, so nothing to reply into, hand over from, or kill: the row is
@@ -1193,7 +1193,7 @@ function railSections(sessions, recent) {
   for (const s of sessions) bucket(s.projectRoot || "", s.projectName).live.push(s);
   for (const s of recent || []) bucket(s.projectRoot || "", s.projectName).finished.push(s);
 
-  const urgent = (b) => b.live.some((s) => s.status === "needs_you");
+  const urgent = (b) => b.live.some((s) => s.status === "needs_you" && !s.snoozed);
   const byName = (a, b) => a.name.localeCompare(b.name);
   const named = [...byRoot.values()].filter((b) => b.root !== "");
   const ung = byRoot.get("");
@@ -1232,7 +1232,7 @@ function projectCounts() {
   for (const s of latestSessions) {
     const root = s.projectRoot || "";
     let c = m.get(root); if (!c) { c = { need: 0, run: 0 }; m.set(root, c); }
-    if (s.status === "needs_you") c.need++;
+    if (s.status === "needs_you" && !s.snoozed) c.need++;
     else if (s.status === "running") c.run++;
   }
   return m;
@@ -1257,7 +1257,7 @@ function orderedProjects() {
   return [...withC, ...ung];
 }
 
-function totalNeed() { return latestSessions.filter((s) => s.status === "needs_you").length; }
+function totalNeed() { return latestSessions.filter((s) => s.status === "needs_you" && !s.snoozed).length; }
 
 function initials(name) {
   const w = String(name).split(/[ /_.-]/).filter(Boolean);
@@ -1338,7 +1338,7 @@ function buildThreads() {
     // than sitting between live questions as if it were one. `since` only
     // changes on a new ask, so rows do not shuffle between polls.
     const now = Math.floor(Date.now() / 1000);
-    const queue = latestSessions.filter((s) => s.status === "needs_you").slice()
+    const queue = latestSessions.filter((s) => s.status === "needs_you" && !s.snoozed).slice()
       .sort((a, b) => (b.since || 0) - (a.since || 0));
     const stale = queue.filter((s) => s.since && now - s.since >= 86400);
     const fresh = queue.filter((s) => !stale.includes(s));
@@ -1406,27 +1406,52 @@ function renderAttentionStage(force) {
   for (const el of stage.querySelectorAll("[data-proj]")) el.addEventListener("click", () => selectProject(el.dataset.proj));
   for (const el of stage.querySelectorAll(".home .tglyph.i-running")) phase(el, BREATHE_MS);
   const nb = stage.querySelector(".home-new"); if (nb) nb.addEventListener("click", () => openLauncher());
+  wireAttentionMarks(stage);
+}
+
+// The reviewed and snoozed marks (attention.go). Each control stops the
+// click so the card or row under it does not open the session too.
+function wireAttentionMarks(root) {
+  const on = (sel, fn) => root.querySelectorAll(sel).forEach((el) => el.addEventListener("click", (e) => { e.stopPropagation(); fn(el); }));
+  const after = (p) => p.then(() => poll()).catch((e) => console.error("attention", e));
+  on("[data-snooze]", (el) => after(window.go.main.App.Snooze(el.dataset.snooze, true)));
+  on("[data-wake]", (el) => after(window.go.main.App.Snooze(el.dataset.wake, false)));
+  on("[data-reviewed]", (el) => after(window.go.main.App.MarkReviewed([el.dataset.reviewed])));
+  on("[data-sheet]", (el) => openReviewSheet(el.dataset.sheet));
+  on("[data-all-reviewed]", (el) => after(window.go.main.App.MarkReviewed(el.dataset.allReviewed.split("\n"))));
+}
+
+// reviewQueue: finished work whose task says done and that you haven't
+// reviewed since (live rows that stopped, and ended sessions).
+function reviewQueue() {
+  return [...latestSessions.filter((s) => s.reviewReady && s.status !== "running"), ...latestRecent.filter((s) => s.reviewReady)];
 }
 
 function homeMarkup() {
   const now = Math.floor(Date.now() / 1000);
-  const queue = latestSessions.filter((s) => s.status === "needs_you").slice()
+  const queue = latestSessions.filter((s) => s.status === "needs_you" && !s.snoozed && !s.reviewReady).slice()
     .sort((a, b) => (b.since || 0) - (a.since || 0));
-  const flight = latestSessions.filter((s) => s.status !== "needs_you");
+  const ready = reviewQueue();
+  const snoozed = latestSessions.filter((s) => s.status === "needs_you" && s.snoozed && !s.reviewReady);
+  const flight = latestSessions.filter((s) => s.status !== "needs_you" && !(s.reviewReady && s.status !== "running"));
   const running = flight.filter((s) => s.status === "running").length;
   const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
   const today = latestRecent.filter((s) => s.endedAt && s.endedAt * 1000 >= midnight.getTime())
     .sort((a, b) => b.endedAt - a.endedAt);
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
-  const head = queue.length
-    ? `${plural(queue.length, "thread needs", "threads need")} you`
+  const need = latestSessions.filter((s) => s.status === "needs_you" && !s.snoozed).length;
+  const head = need
+    ? `${plural(need, "thread needs", "threads need")} you`
+    : ready.length ? `${plural(ready.length, "thread is", "threads are")} ready for review`
     : running ? `Nothing needs you. ${plural(running, "thread is", "threads are")} working.` : "All quiet.";
   const counts = [];
   if (running) counts.push(`${running} running`);
   const idle = flight.length - running;
   if (idle) counts.push(`${idle} idle`);
   if (today.length) counts.push(`${today.length} finished today`);
+  if (need && ready.length) counts.push(`${ready.length} ready for review`);
+  if (snoozed.length) counts.push(`${snoozed.length} snoozed`);
   const sub = queue.length ? counts.join(" · ") || "Freshest ask first."
     : counts.length ? counts.join(" · ") + " — walk away, loom pulls you back." : "Walk away — loom pulls you back.";
 
@@ -1443,9 +1468,28 @@ function homeMarkup() {
         `<span class="ha-top"><span class="ha-proj">${projOf(s)}</span>${age ? `<span class="ha-age">${age}</span>` : ""}</span>` +
         `<span class="ha-name">${esc(displayName(s))}</span>` +
         (s.ask ? `<span class="ha-q">${esc(sumPreview(s.ask))}</span>` : `<span class="ha-q ha-none">Waiting at the prompt.</span>`) +
+        `<span class="ha-snooze" data-snooze="${esc(s.name)}" title="Out of the queue until it next comes back to you">Snooze</span>` +
         `</button>`;
     }).join("");
     body += `<section class="home-sec"><div class="group">Waiting on you</div><div class="home-asks">${cards}</div>${more(queue.length - HOME_ASKS, "asks")}</section>`;
+  }
+  if (ready.length) {
+    const rows = ready.slice(0, HOME_LIST).map((s) => {
+      const live = !s.endedAt;
+      const line = live ? s.taskOutcome : (s.summary || s.outcome || "");
+      const when = live ? (s.since ? fmtAge(Math.max(0, now - s.since)) + " ago" : "") : fmtAge(Math.max(0, now - s.endedAt)) + " ago";
+      const open = live ? ` data-sess="${esc(s.name)}"` : (projectByRoot(s.projectRoot || "") ? ` data-proj="${esc(s.projectRoot)}"` : "");
+      return `<li class="home-row ready${live ? "" : " fin"}"${open}>${glyph(s)}<span class="hr-name">${esc(displayName(s))}${line ? `<span class="hr-line">${esc(sumPreview(line))}</span>` : ""}</span>` +
+        `<span class="hr-proj">${projOf(s)}</span><span class="hr-st">${esc(when)}</span>` +
+        `<span class="hr-acts">${live ? `<span class="hr-act" data-sheet="${esc(s.name)}" title="Open the review sheet (marks it reviewed)">Review</span>` : ""}` +
+        `<span class="hr-act" data-reviewed="${esc(s.name)}" title="Mark it reviewed: it comes back only with a new version of its task file">Reviewed</span></span></li>`;
+    }).join("");
+    const all = ready.length > 1 ? `<span class="hr-act" data-all-reviewed="${esc(ready.map((s) => s.name).join("\n"))}">Mark all reviewed</span>` : "";
+    body += `<section class="home-sec"><div class="group home-group-row"><span>Ready for review</span>${all}</div><ul class="home-list">${rows}</ul>${more(ready.length - HOME_LIST, "to review")}</section>`;
+  }
+  if (snoozed.length) {
+    body += `<section class="home-sec"><div class="home-snoozed">Snoozed until they next come back: ${snoozed.map((s) =>
+      `<span class="hs-item"><span data-sess="${esc(s.name)}">${esc(displayName(s))}</span> <span class="hr-act" data-wake="${esc(s.name)}" title="Back into the queue now">wake</span></span>`).join(" · ")}</div></section>`;
   }
   if (flight.length) {
     const rows = flight.slice(0, HOME_LIST).map((s) =>
@@ -1464,7 +1508,7 @@ function homeMarkup() {
   }
 
   return `<div class="home"><div class="home-inner">` +
-    `<div class="home-hero${queue.length ? " asking" : ""}"><div class="br-empty-mark">${briefWave}</div><h2>${esc(head)}</h2><p>${esc(sub)}</p></div>` +
+    `<div class="home-hero${need ? " asking" : ""}"><div class="br-empty-mark">${briefWave}</div><h2>${esc(head)}</h2><p>${esc(sub)}</p></div>` +
     body +
     `<div class="home-keys"><button class="home-new">+ New thread</button><span><kbd>${isLinux ? "Ctrl+Shift+P" : "⌘K"}</kbd> commands</span><span><kbd>/</kbd> search</span></div>` +
     `</div></div>`;
@@ -1504,6 +1548,7 @@ function renderStageHeader(name) {
     (s && s.remoteUrl ? `<span class="sh-chip" data-url="${esc(s.remoteUrl)}" title="${esc(`Under Remote Control: ${s.remoteUrl}\nClick to open`)}">phone</span>` : "") + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
     (s && (s.external || s.background) ? "" :
       `<span class="sh-acts">` +
+      (s && s.status === "needs_you" ? `<button class="sh-btn" id="sh-snooze" title="${s.snoozed ? "Back into the queue now" : "Out of the queue until it next comes back to you"}">${s.snoozed ? "Wake" : "Snooze"}</button>` : "") +
       (s && canNudge(s) ? `<button class="sh-btn" id="sh-nudge" title="Ask it to stop retrying and rethink">${icon(NUDGE_ICON)}Nudge</button>` : "") +
       `<button class="sh-btn" id="sh-sheet" title="Review sheet: the finish line, who proved each check, the tests that ran, the changes and the risks">${icon(SHEET_ICON)}Review</button>` +
       `<button class="sh-btn" id="sh-diff" title="Review uncommitted changes">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
@@ -1513,6 +1558,8 @@ function renderStageHeader(name) {
   if (diffBtn) diffBtn.addEventListener("click", () => openDiff(name));
   const sheetBtn = el.querySelector("#sh-sheet");
   if (sheetBtn) sheetBtn.addEventListener("click", () => openReviewSheet(name));
+  const snoozeBtn = el.querySelector("#sh-snooze");
+  if (snoozeBtn) snoozeBtn.addEventListener("click", () => window.go.main.App.Snooze(name, !s.snoozed).then(() => poll()).catch((e) => console.error("snooze", e)));
   const nudgeBtn = el.querySelector("#sh-nudge");
   if (nudgeBtn) nudgeBtn.addEventListener("click", () => openNudge(s));
   const hooksBtn = el.querySelector("#sh-hooks");
@@ -3531,6 +3578,9 @@ async function openReviewSheet(name) {
     body.innerHTML = reviewSheetHtml(r);
     body.querySelectorAll("[data-path]").forEach((el) => el.addEventListener("click", () => openFileToken(el.getAttribute("data-path"))));
     mountSecondOpinion(body.querySelector("#rs-so"), name, r.secondOpinion);
+    // opening the sheet is the review (attention.go)
+    const mark = bound("MarkReviewed");
+    if (mark) mark([name]).then(() => poll()).catch(() => {});
   } catch (e) {
     body.innerHTML = `<div class="diff-empty">${esc(String(e))}</div>`;
   }
@@ -4024,6 +4074,7 @@ async function openLauncher(preselect) {
   backdrop.innerHTML = `
     <div class="modal" role="dialog" aria-label="New session">
       <h2>New session</h2>
+      ${(() => { const n = reviewQueue().length; return n ? `<div class="f-warn" id="f-review-warn" title="Open the queue">${n} finished ${n === 1 ? "session is" : "sessions are"} waiting for your review.</div>` : ""; })()}
       <div class="field">
         <label>Target</label>
         <div class="seg" id="f-seg">
@@ -4070,6 +4121,8 @@ async function openLauncher(preselect) {
   const close = () => backdrop.remove();
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
   backdrop.querySelector("#f-cancel").addEventListener("click", close);
+  const warn = backdrop.querySelector("#f-review-warn");
+  if (warn) warn.addEventListener("click", () => { close(); openAttention(); });
 
   // Load targets and fill the (already-mounted) controls. The list is ordered
   // by the Go side; both the select and the checklist keep that order, which

@@ -367,6 +367,19 @@ body {
   padding: 9px 12px; border-radius: 10px; cursor: pointer; transition: background 0.12s ease;
 }
 .home-row:hover { background: var(--sel); }
+/* the reviewed and snoozed marks (attention.go) */
+.home-row.ready { grid-template-columns: 12px minmax(0, 1fr) auto 76px auto; }
+.hr-acts { display: flex; gap: 6px; }
+.hr-act, .ha-snooze { cursor: pointer; font-size: var(--t-micro); font-weight: 700; color: var(--text-dim); background: var(--sel); border-radius: 6px; padding: 2px 8px; white-space: nowrap; }
+.hr-act:hover, .ha-snooze:hover { color: var(--text); }
+.ha-snooze { align-self: flex-end; opacity: 0; transition: opacity 0.12s ease; }
+.home-ask:hover .ha-snooze, .home-ask:focus-within .ha-snooze { opacity: 1; }
+.home-group-row { display: flex; align-items: baseline; justify-content: space-between; }
+.home-snoozed { font-size: var(--t-small); color: var(--text-faint); line-height: 1.8; }
+.home-snoozed [data-sess] { cursor: pointer; color: var(--text-dim); }
+.home-snoozed [data-sess]:hover { text-decoration: underline; }
+.thread.snoozed .tglyph { opacity: 0.45; }
+.f-warn { cursor: pointer; font-size: var(--t-small); color: var(--over); background: var(--over-bg); border-radius: 8px; padding: 8px 12px; margin-bottom: 4px; }
 .home-row.fin:not([data-proj]) { cursor: default; }
 .home-row.fin:not([data-proj]):hover { background: transparent; }
 .home-row .tglyph { margin-top: 0; }

@@ -24,6 +24,7 @@ import (
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
+	"github.com/henricktissink/loom/internal/taskfile"
 	"github.com/henricktissink/loom/internal/tmux"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -140,6 +141,8 @@ func run() error {
 		app.rules = newRulesState(l)
 	}
 	app.applyClaudeTheme() // match Claude's theme to the terminal
+	app.attn = newAttention(filepath.Join(cfg.LoomDir, "attention.json"), time.Now)
+	app.tasks = taskfile.NewCache(taskfile.Dir(cfg.ClaudeConfigDir))
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
 	// Second opinions run on their own; quitting loom stops them.
 	soCtx, cancelSO := context.WithCancel(context.Background())
