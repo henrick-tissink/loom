@@ -5,6 +5,9 @@ package main
 /*
 #cgo CFLAGS: -x objective-c
 #cgo LDFLAGS: -framework Cocoa
+// Wails v2.13.0's WailsContext.m uses UTType (file dialog filters) without
+// linking its framework; newer Xcode linkers no longer pull it in for us.
+#cgo LDFLAGS: -framework UniformTypeIdentifiers
 #include <stdlib.h>
 #import <Cocoa/Cocoa.h>
 
