@@ -3449,6 +3449,7 @@ function reviewSheetHtml(r) {
     h += `<p class="rs-dim" title="Pattern checks on the diff: deleted or skipped tests, lost assertions, silenced checks, config, dependencies, secrets, agent files. Advisory: a refactor can trip them, and a clean result proves nothing.">Shortcut checks read ${r.audited.map(esc).join("; ")}.</p>`;
   }
   h += `</section>`;
+  h += `<section class="rs-sec" id="rs-so"></section>`;
 
   h += `<section class="rs-sec"><h3>Finish line${r.taskStatus ? ` <span class="rs-tag">${esc(r.taskStatus)}</span>` : ""}</h3>`;
   if (!r.taskStatus) {
@@ -3529,9 +3530,81 @@ async function openReviewSheet(name) {
     if (!backdrop.isConnected) return;
     body.innerHTML = reviewSheetHtml(r);
     body.querySelectorAll("[data-path]").forEach((el) => el.addEventListener("click", () => openFileToken(el.getAttribute("data-path"))));
+    mountSecondOpinion(body.querySelector("#rs-so"), name, r.secondOpinion);
   } catch (e) {
     body.innerHTML = `<div class="diff-empty">${esc(String(e))}</div>`;
   }
+}
+
+// ---- the review sheet's second opinion (secondopinion.go) ----
+// Claude Code's own /code-review, run headless and read-only in the
+// session's directory. Loom launches it and shows what it found; the run
+// goes on if the sheet closes.
+
+const SO_LEVELS = [["low", "low · few, sure findings"], ["medium", "medium"], ["high", "high · more findings, some unsure"]];
+let soLevel = "medium";
+
+function secondOpinionHtml(d) {
+  const now = Math.floor(Date.now() / 1000);
+  let h = `<h3>Second opinion${d ? ` <span class="rs-dim">/code-review ${esc(d.level)}</span>` : ""}</h3>`;
+  const controls = (again) =>
+    `<div class="so-row"><select id="so-level" title="How hard /code-review looks">${SO_LEVELS.map(([v, l]) => `<option value="${v}"${v === soLevel ? " selected" : ""}>${l}</option>`).join("")}</select>` +
+    `<button class="btn-ghost" id="so-start" title="Run Claude Code's /code-review on this session's changes as a fresh, read-only run. It costs tokens.">${again ? "Run again" : "Get a second opinion"}</button></div>`;
+  if (!d) {
+    h += `<p class="rs-dim">A fresh Claude run reviews the changes in this session's directory with Claude Code's own <code>/code-review</code>, without the session's context. It can only read. Treat its findings as a second opinion, not a verdict.</p>`;
+    return h + controls(false);
+  }
+  if (d.status === "running") {
+    return h + `<div class="so-row"><span class="so-spin"></span><span class="rs-dim">Reviewing ${esc(d.dir)} · ${fmtAge(Math.max(0, now - d.started))}</span><button class="btn-ghost" id="so-cancel">Cancel</button></div>`;
+  }
+  if (d.status === "failed" || d.status === "cancelled") {
+    h += `<p class="${d.status === "failed" ? "so-failed" : "rs-dim"}">${d.status === "failed" ? "It failed: " : ""}${esc(d.error || d.status)}</p>`;
+    return h + controls(true);
+  }
+  if (d.changed) h += `<p class="so-changed">The code has changed since this review ran.</p>`;
+  if (d.findings.length) {
+    h += `<ul class="so-findings">${d.findings.map((f) =>
+      `<li><span class="so-loc" data-path="${esc(d.dir + "/" + f.file + (f.line ? ":" + f.line : ""))}" title="Open in the editor">${esc(f.file)}${f.line ? ":" + f.line : ""}</span>` +
+      `<span class="rs-check"><span>${esc(f.summary)}</span>${f.detail ? `<span class="rs-evidence">${esc(f.detail)}</span>` : ""}</span></li>`).join("")}</ul>`;
+  } else if (d.none) {
+    h += `<p class="rs-dim">It found nothing to flag. That is not a pass: it reads the diff, not the intent.</p>`;
+  } else {
+    h += `<p class="rs-dim">Loom could not read findings from its reply; here it is as written:</p><pre class="so-text">${esc(d.text || "(empty)")}</pre>`;
+  }
+  const meta = [`${d.findings.length} finding${d.findings.length === 1 ? "" : "s"}`,
+    d.finished ? `${fmtAge(Math.max(0, now - d.finished))} ago` : "", d.costUsd ? `$${d.costUsd.toFixed(2)}` : ""].filter(Boolean).join(" · ");
+  h += `<p class="rs-dim">${meta}</p>`;
+  return h + controls(true);
+}
+
+// mountSecondOpinion renders the section and polls while a review runs,
+// until the sheet closes.
+function mountSecondOpinion(el, name, d) {
+  if (!el) return;
+  let timer = 0;
+  const render = (x) => {
+    clearTimeout(timer);
+    if (!el.isConnected) return;
+    el.innerHTML = secondOpinionHtml(x);
+    el.querySelectorAll("[data-path]").forEach((p) => p.addEventListener("click", () => openFileToken(p.getAttribute("data-path"))));
+    const lvl = el.querySelector("#so-level");
+    if (lvl) lvl.addEventListener("change", () => { soLevel = lvl.value; });
+    const start = el.querySelector("#so-start");
+    if (start) start.addEventListener("click", async () => {
+      start.disabled = true;
+      try { render(await window.go.main.App.StartSecondOpinion(name, soLevel)); }
+      catch (e) { start.disabled = false; el.insertAdjacentHTML("beforeend", `<p class="so-failed">${esc(String(e))}</p>`); }
+    });
+    const cancel = el.querySelector("#so-cancel");
+    if (cancel) cancel.addEventListener("click", () => { cancel.disabled = true; window.go.main.App.CancelSecondOpinion(name).catch(() => {}); });
+    if (x && x.status === "running") {
+      timer = setTimeout(async () => {
+        if (!el.isConnected) return;
+        try { render(await window.go.main.App.SecondOpinion(name)); } catch (_) { render(x); }
+      }, 3000);
+    }
+  };
+  render(d);
 }
 
 function hooksChip(s) {

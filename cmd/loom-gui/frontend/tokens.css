@@ -1079,6 +1079,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .rs-repo { display: flex; flex-direction: column; gap: 6px; }
 .rs-path { cursor: pointer; font-family: var(--font-mono); font-size: var(--t-micro); overflow-wrap: anywhere; }
 .rs-path:hover { text-decoration: underline; }
+/* the second opinion (secondopinion.go) */
+.so-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.so-row select { font-size: var(--t-small); }
+.so-findings { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.so-findings li { display: flex; gap: 10px; align-items: flex-start; font-size: var(--t-small); line-height: 1.45; color: var(--text); }
+.so-loc { flex: none; max-width: 40%; cursor: pointer; font-family: var(--font-mono); font-size: var(--t-micro); color: var(--text-dim); background: var(--inset); border-radius: 6px; padding: 2px 6px; overflow-wrap: anywhere; }
+.so-loc:hover { color: var(--text); text-decoration: underline; }
+.so-changed { font-size: var(--t-small); color: var(--over); background: var(--over-bg); padding: 6px 10px; border-radius: 8px; }
+.so-failed { font-size: var(--t-small); color: var(--st-error); }
+.so-text { margin: 0; white-space: pre-wrap; font-family: var(--font-mono); font-size: var(--t-micro); color: var(--text-dim); background: var(--inset); border-radius: 8px; padding: 8px 10px; max-height: 240px; overflow: auto; }
+.so-spin { width: 8px; height: 8px; border-radius: 50%; background: var(--st-running); flex: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .so-spin { animation: loom-pulse 2.4s ease-in-out infinite; }
+}
 
 /* Linux has compositor decorations, not macOS traffic-light controls. */
 :root[data-platform="linux"] { --ground-tint: 100%; }

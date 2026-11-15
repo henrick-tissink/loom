@@ -20,7 +20,8 @@ import (
 // task's finish line next to who proved each check (the stop guard ran it,
 // or the model only says so), the test commands the transcript shows ran
 // and how they ended, what changed, and the risks loom can see for itself.
-// All of it is read on the click; nothing is asked of a model.
+// All of it is read on the click; nothing is asked of a model, except
+// the second opinion, which runs only when asked (secondopinion.go).
 
 // ReviewDTO is a session's review sheet.
 type ReviewDTO struct {
@@ -41,6 +42,9 @@ type ReviewDTO struct {
 	// Audited says which changes the shortcut checks read, one line per
 	// directory: they look at more than Changes (commits too).
 	Audited []string `json:"audited"`
+	// SecondOpinion is the latest native /code-review run on the
+	// session's directory, or nil (secondopinion.go).
+	SecondOpinion *SecondOpinionDTO `json:"secondOpinion"`
 }
 
 // ReviewCheck is one Done-when check and who proved it. Proof is
@@ -364,7 +368,9 @@ func (a *App) ReviewSheet(name string) (ReviewDTO, error) {
 			in.audits = append(in.audits, auditDir(dir, r.Label, branch, started))
 		}
 	}
-	return buildReview(in), nil
+	out := buildReview(in)
+	out.SecondOpinion = a.opinionFor(sid)
+	return out, nil
 }
 
 // auditDir runs the shortcut checks over what a session changed in dir:

@@ -31,6 +31,7 @@ type App struct {
 	notifier   *notifier
 	settings   *settingsStore
 	summarizer *memory.Summarizer
+	opinions   *secondOpinions // second opinions (secondopinion.go)
 
 	// disc is the Agent Discipline layer (discipline.go); nil in tests that
 	// do not set one.

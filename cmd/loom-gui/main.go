@@ -20,6 +20,7 @@ import (
 	"github.com/henricktissink/loom/internal/memory"
 	"github.com/henricktissink/loom/internal/projects"
 	"github.com/henricktissink/loom/internal/registry"
+	"github.com/henricktissink/loom/internal/secondopinion"
 	"github.com/henricktissink/loom/internal/session"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
@@ -140,6 +141,13 @@ func run() error {
 	}
 	app.applyClaudeTheme() // match Claude's theme to the terminal
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
+	// Second opinions run on their own; quitting loom stops them.
+	soCtx, cancelSO := context.WithCancel(context.Background())
+	defer cancelSO()
+	app.opinions = newSecondOpinions(soCtx, filepath.Join(cfg.LoomDir, "second-opinions"),
+		func(ctx context.Context, dir, level string) (secondopinion.Result, error) {
+			return secondopinion.Run(ctx, "claude", dir, level)
+		}, time.Now)
 	app.briefs = newBriefState(&brief.Service{
 		Store: st, ClaudeConfigDir: cfg.ClaudeConfigDir,
 		Archive: brief.Archive{Dir: filepath.Join(cfg.LoomDir, "briefs")},

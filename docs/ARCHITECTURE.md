@@ -140,11 +140,12 @@ one) and kill runs `claude stop <id>`, which keeps the conversation; there is
 no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `status` | Fuse transcript state with tmux liveness | The reconcile loop. The only writer of live-session status. |
 | `store` | SQLite: schema, sessions, projects, memory index | Migrations are transactional & re-entrant. |
-| `memory` | Index / extract / summarize | Reads the whole Claude archive; one of the two packages that call out to an LLM (the other is `brief`, §10a). Also records each indexed file's `mcp__` calls (`indexed_files.mcp`) for the diet report, backfilling older files a bounded batch per sweep. |
+| `memory` | Index / extract / summarize | Reads the whole Claude archive; one of the three packages that call out to an LLM (the others are `brief`, §10a, and `secondopinion`, §5.8). Also records each indexed file's `mcp__` calls (`indexed_files.mcp`) for the diet report, backfilling older files a bounded batch per sweep. |
 | `projects` | Discovery reconciliation, attribution, hide/solo visibility | `loom.db` is the runtime source of truth for launch targets; queried read-through. Removing a project (`App.RemoveProject`) kills its live sessions, forgets its rows, deletes the project and records the root in `ignored_roots`; "+ New project" at that root un-ignores it. |
 | `registry` | Workspace project discovery | `.git` or an existing transcript dir; one nesting level. |
 | `gitdiff` | `git diff` capture for the review panel | Shells out; never writes to a repo. |
 | `diffaudit` | Shortcut checks on a patch for the review sheet (tests deleted/skipped, assertions lost, checks silenced, config, dependencies, secrets, agent files) | Pure: text in, flags out; never prints a secret's value. |
+| `secondopinion` | Runs Claude Code's native `/code-review <level>` headless in a directory and parses its printed findings | Only on a click; read-only tool allowlist, no user settings or hooks, no session persistence, 20 min deadline; §5.8. |
 | `forge` | A branch's GitHub PR or GitLab MR, its CI and review state and open review feedback (composed into a prompt), through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
 | `usage` | Plan rate-limit windows from the opt-in status-line tap, token totals from transcripts | Writes settings.json only on the explicit Track / Stop click, after a backup; §5.2. |
 | `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
@@ -564,7 +565,8 @@ merge done on the remote counts only after a fetch.
 
 `App.ReviewSheet` builds a session's sheet on the click, from the last poll's
 visible rows (`App.noteRail`, the same cache `NudgePrompt` reads; a hidden
-row has no sheet). Nothing calls a model.
+row has no sheet). Nothing calls a model, except the second opinion below,
+which runs only when the user asks for it.
 
 - **Checks** come from the task file the engine already read. A check's proof
   follows the stop guard's own records: `name: $ command` is an executable
@@ -605,6 +607,32 @@ row has no sheet). Nothing calls a model.
 - **Risks** are rules over the above and the row's spin, overlap and held
   chip, worst first: a possible secret is `bad`, the other shortcut checks
   `warn`. `Audited` says per directory what the shortcut checks read.
+- **Second opinion** (`cmd/loom-gui/secondopinion.go`, `internal/secondopinion`):
+  loom writes no reviewer prompt. `App.StartSecondOpinion` runs
+  `claude -p "/code-review <low|medium|high>" --output-format json
+  --no-session-persistence --setting-sources "" --allowedTools Read Grep Glob
+  Bash(git diff|log|show|status|merge-base|rev-parse|branch:*)` in the
+  session's cwd (add-dirs are not reviewed), with a scrubbed env
+  (`memory.ScrubEnv`), stdin from /dev/null and a 20 min deadline. The base
+  context is cancelled when loom quits. `--setting-sources ""` keeps the
+  user's hooks out of the reviewer's run but keeps its login (`--bare`
+  would drop OAuth). One run per Claude session at a time. The result is
+  kept in `~/.loom/second-opinions/<sid>.json`, and the file is removed
+  when a new run starts. The result carries a fingerprint of the working
+  tree's content: index blob ids for unchanged files, plus
+  `git hash-object` (without `-w`) for modified and untracked files.
+  The sheet marks the result `changed` when that no longer matches.
+  Committing the reviewed work leaves it unchanged. Editing any file,
+  including a new one, marks it changed. In 2.1.325 the envelope's `result`
+  is prose: at low, `path:line — text` lines or `(none)`; at medium/high,
+  numbered `` `path:line`: summary `` items with an indented
+  `Failure scenario:` paragraph. The JSON array the review's subagent
+  returns is re-rendered before it reaches `result`. `secondopinion.Parse`
+  reads those shapes and a bare or fenced JSON array. When it reads no
+  findings and the reply does not say "none", the sheet shows the text as
+  written, so a format change degrades to raw output, not to "no findings".
+  `TestLiveReview` (`LOOM_LIVE_REVIEW=1`) runs the real command on a planted
+  off-by-one.
 
 ## 6. Data model (`~/.loom/loom.db`)
 
