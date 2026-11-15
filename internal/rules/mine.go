@@ -13,7 +13,7 @@ import (
 // tool call that returned an error.
 type Event struct {
 	Key     string    `json:"key"`    // hook/<hook>/<decision> or tool/<tool>/<hash>
-	Source  string    `json:"source"` // hook | tool
+	Source  string    `json:"source"` // hook | tool | correction
 	Title   string    `json:"title"`
 	Session string    `json:"session"`
 	Cwd     string    `json:"cwd"`
@@ -31,6 +31,8 @@ const (
 	// DefaultLapse is how long an adopted rule holds before loom asks
 	// whether it is still needed.
 	DefaultLapse = 30 * 24 * time.Hour
+	// TrialLapse is how long a rule taught from a correction is on trial.
+	TrialLapse = 14 * 24 * time.Hour
 )
 
 // FromHooks picks the failures out of the hooks' records: every hold, and
@@ -90,7 +92,8 @@ func Mine(events []Event, adopted []Rule, since, hookSince time.Time) []Proposal
 	}
 	groups := map[string]*group{}
 	for _, e := range events {
-		if e.TS.Before(since) || (e.Source == "hook" && e.TS.Before(hookSince)) || have[e.Key] {
+		// corrections are taught one at a time, never mined
+		if e.TS.Before(since) || (e.Source == "hook" && e.TS.Before(hookSince)) || have[e.Key] || e.Source == "correction" {
 			continue
 		}
 		g := groups[e.Key]
@@ -142,7 +145,8 @@ func Mine(events []Event, adopted []Rule, since, hookSince time.Time) []Proposal
 type RuleStatus struct {
 	Rule
 	Lapsed        bool `json:"lapsed"`
-	After         int  `json:"after"` // its failure since the rule was adopted
+	Trial         bool `json:"trial"` // adopted on trial (TrialPrefix)
+	After         int  `json:"after"` // its failure (for a taught rule, corrections against it) since adoption
 	AfterSessions int  `json:"afterSessions"`
 	Before        int  `json:"before"` // in the Window before that
 }
@@ -151,7 +155,7 @@ type RuleStatus struct {
 func Status(adopted []Rule, events []Event, now time.Time) []RuleStatus {
 	out := make([]RuleStatus, 0, len(adopted))
 	for _, r := range adopted {
-		st := RuleStatus{Rule: r, Lapsed: r.Lapsed(now)}
+		st := RuleStatus{Rule: r, Lapsed: r.Lapsed(now), Trial: r.Trial()}
 		since, err := time.ParseInLocation(SinceLayout, r.Since, now.Location())
 		if err == nil {
 			sessions := map[string]bool{}

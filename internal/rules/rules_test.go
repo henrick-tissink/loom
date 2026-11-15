@@ -254,3 +254,35 @@ func TestNormalizeAndSkip(t *testing.T) {
 		t.Fatal("a real failure was skipped")
 	}
 }
+
+func TestTrialAndPromote(t *testing.T) {
+	b, err := Add(nil, Rule{Text: "Name constants.", Why: TrialPrefix + "taught", Key: "corr/a/1", Since: "2026-10-20 11:00", Lapses: "2026-11-03"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := Parse(b)
+	if len(rs) != 1 || !rs[0].Trial() {
+		t.Fatalf("parsed %+v", rs)
+	}
+	now := time.Date(2026, 10, 25, 9, 0, 0, 0, time.Local)
+	st := Status(rs, []Event{
+		{Key: "corr/a/1", Source: "correction", Session: "s1", TS: time.Date(2026, 10, 20, 10, 59, 0, 0, time.Local)},
+		{Key: "corr/a/1", Source: "correction", Session: "s2", TS: time.Date(2026, 10, 22, 9, 0, 0, 0, time.Local)},
+	}, now)
+	if !st[0].Trial || st[0].Before != 1 || st[0].After != 1 || st[0].AfterSessions != 1 {
+		t.Fatalf("status %+v", st[0])
+	}
+	p, err := Promote(b, "corr/a/1", "2027-01-31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := Parse(p)[0]; r.Trial() || r.Why != "taught" || r.Lapses != "2027-01-31" {
+		t.Fatalf("promoted %+v", r)
+	}
+	if _, err := Promote(p, "corr/a/1", "2027-02-01"); err == nil {
+		t.Fatal("promoted a rule not on trial")
+	}
+	if _, err := Promote(p, "nope", "2027-02-01"); err == nil {
+		t.Fatal("promoted a missing rule")
+	}
+}

@@ -31,6 +31,14 @@ const (
 	SinceLayout = "2006-01-02 15:04"
 )
 
+// TrialPrefix opens the Why of a rule adopted on trial (taught from a
+// correction): it holds for a short lapse, and at the end it is promoted
+// (the prefix goes, a longer lapse) or retired (dropped).
+const TrialPrefix = "On trial: "
+
+// Trial reports whether the rule is on trial.
+func (r Rule) Trial() bool { return strings.HasPrefix(r.Why, TrialPrefix) }
+
 // Lapsed reports whether the rule's lapse day is before now's day: a rule
 // holds through the day it lapses.
 func (r Rule) Lapsed(now time.Time) bool {
@@ -182,6 +190,32 @@ func Remove(content []byte, key string) ([]byte, error) {
 		}
 		kept := append(append([]string{}, lines[:it.line]...), rest...)
 		return []byte(strings.TrimRight(strings.Join(kept, "\n"), "\n") + "\n"), nil
+	}
+	return nil, fmt.Errorf("no adopted rule for %s", key)
+}
+
+// Promote ends a rule's trial: the trial mark leaves its Why and it lapses
+// on the new day. A rule not on trial is refused.
+func Promote(content []byte, key, lapses string) ([]byte, error) {
+	lines := strings.Split(string(content), "\n")
+	for _, it := range parse(string(content)) {
+		if it.Key != key {
+			continue
+		}
+		r := it.Rule
+		if !r.Trial() {
+			return nil, fmt.Errorf("the rule for %s is not on trial", key)
+		}
+		r.Why = strings.TrimPrefix(r.Why, TrialPrefix)
+		if r.Why == "" {
+			r.Why = "kept after its trial"
+		}
+		r.Lapses = lapses
+		if err := Validate(r); err != nil {
+			return nil, err
+		}
+		lines[it.line+1] = whyLine(r)
+		return []byte(strings.Join(lines, "\n")), nil
 	}
 	return nil, fmt.Errorf("no adopted rule for %s", key)
 }

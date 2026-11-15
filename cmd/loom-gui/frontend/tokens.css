@@ -1159,3 +1159,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .dc-modal .diff-body > *, .dc-modal .diff-repo > * { flex-shrink: 0; }
 .dc-compose button, .dc-reason button { font-family: var(--font-ui); font-size: var(--t-small); font-weight: 700; height: 28px; padding: 0 12px; border-radius: 8px; cursor: pointer; border: 0; }
 .dc-compose .dc-acts { gap: 6px; }
+.dsc-trial { color: var(--over); background: var(--over-bg); }
+.dc-breaks select { flex: 1; min-width: 0; font: inherit; font-size: var(--t-small); color: var(--text); background: var(--inset); border: 0; border-radius: 8px; padding: 4px 6px; }
+.so-findings .dc-breaks { margin-top: 4px; }

@@ -2622,20 +2622,71 @@ function commentCardHtml(c, withFile) {
   if (c.state === "sent" || c.state === "open") acts.push(`<span class="hr-act" data-cm-invalid>Invalid…</span>`);
   if (c.state === "open") acts.push(`<span class="hr-act" data-cm-state="resolved" title="Handled without sending it">Resolve</span>`);
   if (c.state !== "open") acts.push(`<span class="hr-act" data-cm-state="open" title="Back to open: it goes out with the next send">Reopen</span>`);
+  if (c.state === "sent" || c.state === "resolved") acts.push(...TEACH_ACTS);
   acts.push(`<span class="hr-act" data-cm-delete>Delete</span>`);
-  return `<div class="dc-card dc-st-${esc(c.state)}" data-cm="${esc(c.id)}">` +
+  return `<div class="dc-card dc-st-${esc(c.state)}" data-cm="${esc(c.id)}" data-teach-ref="${esc(c.id)}" data-teach-text="${esc(c.body)}" data-teach-where="${esc(commentWhere(c, true))}">` +
     `<div class="dc-head"><span class="rs-proof rs-${cls}" title="${esc(tip)}">${esc(word)}</span>` +
     `<span class="dc-where">${esc(commentWhere(c, withFile))}</span><span class="dc-acts">${acts.join("")}</span></div>` +
     `<div class="dc-body">${esc(c.body)}</div>` +
     (c.reason ? `<div class="dc-reason-text">Invalid: ${esc(c.reason)}</div>` : "") +
     `<div class="dc-reason" hidden><input type="text" class="search-input" placeholder="Why is it invalid? (kept as the record)" spellcheck="false" /><button class="btn-ghost" data-cm-invalid-ok>Mark invalid</button></div>` +
-    `</div>`;
+    BREAKS_BOX + `</div>`;
+}
+
+// ---- teach (teach.go): a correction becomes a rule on trial ----
+const TEACH_ACTS = [
+  `<span class="hr-act" data-teach title="Make this correction a rule on trial for every session (reviewed before it is written)">Teach…</span>`,
+  `<span class="hr-act" data-breaks title="Count this against a rule you adopted: the agent did what the rule says not to">Breaks a rule…</span>`,
+];
+const BREAKS_BOX = `<div class="dc-reason dc-breaks" hidden><select class="dc-rule"></select><button class="btn-ghost" data-breaks-ok>Count it</button></div>`;
+
+// wireTeach hooks up Teach… and Breaks a rule… on the elements in root that
+// carry data-teach-ref/-text/-where. reopen() brings back the dialog the
+// operator came from once the rule sheet is done.
+function wireTeach(root, name, reopen, fail) {
+  root.querySelectorAll("[data-teach-ref]").forEach((el) => {
+    const ref = el.dataset.teachRef, text = el.dataset.teachText, where = el.dataset.teachWhere;
+    const teach = el.querySelector("[data-teach]");
+    if (teach) teach.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      let d;
+      try { d = await window.go.main.App.TeachDraft(name, ref, text, where); } catch (x) { fail(x); return; }
+      const shut = document.querySelector(".modal-backdrop #diff-close, .modal-backdrop #rs-close");
+      if (shut) shut.click();
+      openRuleSheet("adopt", -1, { key: d.key, why: d.why, draft: d.draft, lapses: d.lapses, title: "Teach a rule on trial", after: reopen });
+    });
+    const breaks = el.querySelector("[data-breaks]");
+    const box = el.querySelector(".dc-breaks");
+    if (breaks && box) {
+      breaks.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!box.hidden) { box.hidden = true; return; }
+        let rs = [];
+        try { rs = await window.go.main.App.AdoptedRules(); } catch (x) { fail(x); return; }
+        const sel = box.querySelector("select");
+        sel.innerHTML = rs.length
+          ? rs.map((r) => `<option value="${esc(r.key)}">${r.why.startsWith("On trial: ") ? "[trial] " : ""}${esc(r.text)}</option>`).join("")
+          : `<option value="">No rules adopted yet</option>`;
+        box.querySelector("[data-breaks-ok]").disabled = !rs.length;
+        box.hidden = false;
+      });
+      box.querySelector("[data-breaks-ok]").addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const key = box.querySelector("select").value;
+        if (!key) return;
+        try { await window.go.main.App.BreaksRule(name, key, ref, text); } catch (x) { fail(x); return; }
+        box.hidden = true;
+        breaks.textContent = "Counted ✓";
+      });
+    }
+  });
 }
 
 // wireCommentCards hooks up the cards' actions in root; done(notes) gets
 // the notes after each change, err(e) a refusal.
-function wireCommentCards(root, name, done, err) {
+function wireCommentCards(root, name, done, err, reopen) {
   const run = (p) => p.then(done).catch(err);
+  wireTeach(root, name, reopen || (() => {}), err);
   root.querySelectorAll("[data-cm]").forEach((card) => {
     const id = card.dataset.cm;
     card.querySelectorAll("[data-cm-state]").forEach((b) => b.addEventListener("click", (e) => {
@@ -2846,7 +2897,7 @@ async function openDiff(name) {
         render();
       }));
     }
-    wireCommentCards(body, name, setNotes, showErr);
+    wireCommentCards(body, name, setNotes, showErr, () => openDiff(name));
     const ta = body.querySelector("#dc-text");
     if (ta) {
       ta.addEventListener("input", () => { draft = ta.value; });
@@ -3522,11 +3573,13 @@ function rulesHtml(dto) {
   const adopted = dto.rules.map((r, i) => `
     <li class="po-repo dsc-rerun">
       <span class="po-rlabel">${esc(r.text)}</span>
-      <span class="po-tag${r.lapsed ? " dsc-lapsed" : ""}" title="Adopted ${esc(r.since)}">${r.lapsed ? "lapsed" : "until"} ${esc(r.lapses)}</span>
-      <span class="dsc-num${r.after ? " hold" : ""}"><b>${r.after}</b> since adopted${r.after ? ` <small>${r.afterSessions} sessions</small>` : ""}</span>
-      <span class="dsc-num"><b>${r.before}</b> in the 14 days before</span>
-      <button class="tact" data-rule-op="renew" data-i="${i}">Renew…</button>
-      <button class="tact" data-rule-op="drop" data-i="${i}">Drop…</button>
+      ${r.trial ? `<span class="po-tag dsc-trial" title="Taught from a correction: at the end of its trial, promote it or retire it">on trial</span>` : ""}
+      <span class="po-tag${r.lapsed ? " dsc-lapsed" : ""}" title="Adopted ${esc(r.since)}">${r.lapsed ? (r.trial ? "trial ended" : "lapsed") : "until"} ${esc(r.lapses)}</span>
+      <span class="dsc-num${r.after ? " hold" : ""}"><b>${r.after}</b> ${r.trial ? "times contradicted" : "since adopted"}${r.after ? ` <small>${r.afterSessions} sessions</small>` : ""}</span>
+      <span class="dsc-num"><b>${r.before}</b> ${r.trial ? "correction before" : "in the 14 days before"}</span>
+      ${r.trial ? `<button class="tact" data-rule-op="promote" data-i="${i}" title="Keep it: the trial mark goes and it lapses later">Promote…</button>
+      <button class="tact" data-rule-op="drop" data-i="${i}" title="It did not earn its place">Retire…</button>` : `<button class="tact" data-rule-op="renew" data-i="${i}">Renew…</button>
+      <button class="tact" data-rule-op="drop" data-i="${i}">Drop…</button>`}
       <div class="po-rpath dsc-top">${esc(r.why)}</div>
     </li>`).join("");
   const hook = dto.hookSince ? `; hook holds since the last hook change, ${esc(fmtTS(dto.hookSince * 1000))}` : "";
@@ -3541,13 +3594,15 @@ function rulesHtml(dto) {
 // lapse day) or drop. Review plans the change and shows its diff; Apply is
 // enabled only for the plan on screen, and any edit after it disables Apply
 // until it is reviewed again.
-async function openRuleSheet(op, i) {
-  if (document.querySelector(".modal-backdrop") || !rulesDto) return;
+async function openRuleSheet(op, i, given) {
+  if (document.querySelector(".modal-backdrop") || (!rulesDto && !given)) return;
   const planFn = bound("RulePlan"), applyFn = bound("RuleApply");
   if (!planFn || !applyFn) return;
-  const item = op === "adopt" ? rulesDto.proposals[i] : rulesDto.rules[i];
+  // given: a draft from elsewhere (teach.go), with its own lapse and title
+  const item = given || (op === "adopt" ? rulesDto.proposals[i] : rulesDto.rules[i]);
   if (!item) return;
-  const titles = { adopt: "Adopt a rule", renew: "Renew a rule", drop: "Drop a rule" };
+  const lapse = given ? given.lapses : rulesDto.lapse;
+  const titles = { adopt: given && given.title ? given.title : "Adopt a rule", renew: "Renew a rule", drop: item.trial ? "Retire a rule" : "Drop a rule", promote: "Promote a rule" };
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
@@ -3558,7 +3613,7 @@ async function openRuleSheet(op, i) {
           <p class="po-empty">${esc(item.why)}</p>
           <div class="field"><label for="rs-text">Rule</label><textarea id="rs-text" spellcheck="false" placeholder="Loom has no wording for this one: write the rule the agent should follow.">${esc(item.draft)}</textarea></div>` : `
           <p class="dsc-headline">${esc(item.text)}</p><p class="po-empty">${esc(item.why)} · adopted ${esc(item.since)}</p>`}
-        ${op !== "drop" ? `<div class="field"><label for="rs-lapses">Lapses after</label><input id="rs-lapses" type="date" value="${esc(rulesDto.lapse)}"></div>` : ""}
+        ${op !== "drop" ? `<div class="field"><label for="rs-lapses">${op === "adopt" && given ? "Trial ends" : "Lapses after"}</label><input id="rs-lapses" type="date" value="${esc(lapse)}"></div>` : ""}
         <div id="rs-diff"></div>
       </div>
       <div class="modal-error" id="rs-error"></div>
@@ -3572,7 +3627,12 @@ async function openRuleSheet(op, i) {
   const $ = (id) => backdrop.querySelector("#" + id);
   const errEl = $("rs-error"), diffEl = $("rs-diff"), applyBtn = $("rs-apply"), reviewBtn = $("rs-review");
   let plan = null, busy = false;
-  const close = () => { if (busy) return; document.removeEventListener("keydown", onEsc, true); backdrop.remove(); };
+  const close = () => {
+    if (busy) return;
+    document.removeEventListener("keydown", onEsc, true);
+    backdrop.remove();
+    if (given && given.after) setTimeout(given.after, 0); // back to where the correction was
+  };
   const onEsc = (e) => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", onEsc, true);
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
@@ -3848,13 +3908,15 @@ function secondOpinionHtml(d, notes) {
     h += `<ul class="so-findings">${d.findings.map((f, i) => {
       const m = marks[findingKey(f)];
       const acts = !notes ? "" : m
-        ? `<span class="hr-act" data-so-clear="${i}" title="Back to open">Reopen</span>`
+        ? `<span class="hr-act" data-so-clear="${i}" title="Back to open">Reopen</span>` + (m.state === "fixed" || m.state === "commented" ? TEACH_ACTS.join("") : "")
         : `<span class="hr-act" data-so-fixed="${i}">Fixed</span><span class="hr-act" data-so-invalid="${i}">Invalid…</span>` +
           (f.line ? `<span class="hr-act" data-so-comment="${i}" title="Make it a review comment on that line, to send with the others">Comment</span>` : "");
-      return `<li class="${m ? "so-marked" : ""}"><span class="so-loc" data-path="${esc(d.dir + "/" + f.file + (f.line ? ":" + f.line : ""))}" title="Open in the editor">${esc(f.file)}${f.line ? ":" + f.line : ""}</span>` +
+      const teachable = notes && m && (m.state === "fixed" || m.state === "commented");
+      return `<li class="${m ? "so-marked" : ""}"${teachable ? ` data-teach-ref="${esc(findingKey(f))}" data-teach-text="${esc(f.summary)}" data-teach-where="${esc(f.file + (f.line ? ":" + f.line : ""))}"` : ""}><span class="so-loc" data-path="${esc(d.dir + "/" + f.file + (f.line ? ":" + f.line : ""))}" title="Open in the editor">${esc(f.file)}${f.line ? ":" + f.line : ""}</span>` +
         `<span class="rs-check"><span>${m ? `<span class="rs-proof rs-${m.state === "fixed" ? "ok" : m.state === "commented" ? "warn" : "bad"}">${esc(m.state)}</span> ` : ""}${esc(f.summary)}</span>${f.detail ? `<span class="rs-evidence">${esc(f.detail)}</span>` : ""}` +
         `${m && m.reason ? `<span class="rs-evidence">Invalid: ${esc(m.reason)}</span>` : ""}` +
         `${acts ? `<span class="dc-acts">${acts}</span>` : ""}` +
+        (teachable ? BREAKS_BOX : "") +
         `<span class="dc-reason" data-so-reason="${i}" hidden><input type="text" class="search-input" placeholder="Why is it invalid? (kept as the record)" spellcheck="false" /><button class="btn-ghost">Mark invalid</button></span></span></li>`;
     }).join("")}</ul>`;
   } else if (d.none) {
@@ -3900,6 +3962,7 @@ function mountSecondOpinion(el, name, d, notes, setNotes) {
         else if (e.key === "Escape") { e.preventDefault(); box.hidden = true; }
       });
     });
+    wireTeach(el, name, () => openReviewSheet(name), fail);
     el.querySelectorAll("[data-so-comment]").forEach((b) => b.addEventListener("click", () => {
       const f = fs[+b.dataset.soComment];
       const body = `Second opinion: ${f.summary}${f.detail ? "\n" + f.detail : ""}`;
@@ -3948,7 +4011,7 @@ function mountComments(el, name, notes, pane, setNotes, closeSheet) {
   if (pane && nOpen) h += `<div class="so-row"><button class="btn-ghost" id="cm-send">Send ${nOpen} comment${nOpen === 1 ? "" : "s"}</button></div>`;
   el.innerHTML = h;
   const fail = (e) => el.insertAdjacentHTML("beforeend", `<p class="so-failed">${esc(String(e))}</p>`);
-  wireCommentCards(el, name, setNotes, fail);
+  wireCommentCards(el, name, setNotes, fail, () => openReviewSheet(name));
   const send = el.querySelector("#cm-send");
   if (send) send.addEventListener("click", () => { closeSheet(); sendComments(name); });
 }

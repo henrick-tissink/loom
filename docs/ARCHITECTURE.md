@@ -78,6 +78,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.loom/attention.json` | GUI (rw, atomic) | per Claude session id: the task file version last reviewed, the ask snoozed (§5.9) |
 | `~/.loom/second-opinions/` | GUI (rw, atomic) | each session's last `/code-review` second opinion (§5.8) |
 | `~/.loom/comments/` | GUI (rw, atomic) | per Claude session id: review comments with their states, files marked viewed, second-opinion finding verdicts (§5.10) |
+| `~/.loom/corrections.json` | GUI (rw, atomic) | corrections taught as rules or counted against them (§5.5) |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status, kind and background job id |
 | `claude agents --json --all` | Claude (Loom: runs it, read-only) | background sessions, including the ones the supervisor has stopped |
@@ -487,6 +488,22 @@ adopted rule shows how often its failure happened since adoption and in the
 14 days before. A lapsed one is flagged and offered for renewal or removal;
 nothing is applied or removed automatically. Changing a hook's behaviour stays
 a bundle revision through the install gate.
+
+**Teach** (`cmd/loom-gui/teach.go`): a correction becomes a rule on trial.
+`App.TeachDraft` keys the rule `corr/<sid[:8]>/<hash of sid+ref>` (ref: the
+comment id or finding key), drafts its wording from the correction, gives it
+a Why starting `rules.TrialPrefix` ("On trial: ") and a `rules.TrialLapse`
+(14 day) lapse, and records the correction. The adopt then goes through
+`PlanRule`/`ApplyRule` like any other. `App.BreaksRule` records a later
+correction against an adopted rule's key. Corrections are kept in
+`~/.loom/corrections.json` (one per key, session and ref) and join the rules
+tab's events with source `correction`, which `rules.Mine` never proposes
+from; `rules.Status` then counts them like failures, so `before` is the
+correction it was taught from and `after` is how often it was contradicted.
+`RuleChange` op `promote` (`rules.Promote`) ends a trial: the prefix leaves
+the Why and the lapse moves; a rule not on trial is refused. Retiring is
+`drop`. Only rule text is taught: there is no path to install one hook
+outside the bundle gate.
 
 ### 5.6 Setup and run scripts (`internal/scripts`)
 

@@ -198,6 +198,8 @@ Each proposal shows how often it happened, in how many sessions and projects, an
 
 Adopted rules show how often their failure happened since you adopted them, against the 14 days before. When a rule lapses it is marked; **Renew…** or **Drop…** it (both are reviewed the same way). Loom never adds, changes or removes a rule on its own.
 
+**Teach: rules from your corrections.** A correction can become a rule too. On a review comment you have sent (or resolved), or a second-opinion finding you marked fixed or turned into a comment, **Teach…** opens the same adopt sheet with the correction as the rule's wording (edit it into a rule for every session) and adopts it **on trial**: its Why starts `On trial:` and the trial ends in 14 days. When the agent does it again in a later session, **Breaks a rule…** on that comment or finding counts it against the rule you pick. The rules tab shows a trial rule's tag, the correction it came from, and how many times it was contradicted since. When the trial ends, **Promote…** keeps it (the trial mark goes and you choose a new lapse) and **Retire…** drops it; both are reviewed like any other change. Corrections are kept in `~/.loom/corrections.json`. Loom proposes rule text only; hooks are not taught.
+
 ## 8. Under the hood
 
 | Thing | Where |

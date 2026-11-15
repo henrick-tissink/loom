@@ -32,10 +32,11 @@ type App struct {
 	notifier   *notifier
 	settings   *settingsStore
 	summarizer *memory.Summarizer
-	opinions   *secondOpinions // second opinions (secondopinion.go)
-	attn       *attention      // reviewed and snoozed marks (attention.go)
-	notes      *commentStore   // review comments, viewed files (comments.go)
-	tasks      *taskfile.Cache // task files, for ended sessions (attention.go)
+	opinions   *secondOpinions  // second opinions (secondopinion.go)
+	attn       *attention       // reviewed and snoozed marks (attention.go)
+	notes      *commentStore    // review comments, viewed files (comments.go)
+	corr       *correctionStore // corrections taught or held against rules (teach.go)
+	tasks      *taskfile.Cache  // task files, for ended sessions (attention.go)
 
 	// disc is the Agent Discipline layer (discipline.go); nil in tests that
 	// do not set one.

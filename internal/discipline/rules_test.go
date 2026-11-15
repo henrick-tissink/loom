@@ -124,3 +124,34 @@ func TestPruneKeepsSetupBackupsAndRestoreExact(t *testing.T) {
 		t.Fatal("rule backups pruned the setup backup")
 	}
 }
+
+func TestRulePromoteEndsATrial(t *testing.T) {
+	home := t.TempDir()
+	l := NewLayout(filepath.Join(home, ".claude"), home, "")
+	must(t, os.MkdirAll(l.ConfigDir, 0o755))
+	now := time.Date(2026, 10, 20, 11, 0, 0, 0, time.Local)
+	apply := func(c RuleChange) error {
+		p, err := PlanRule(l, c, now)
+		if err != nil {
+			return err
+		}
+		_, err = ApplyRule(l, p.Change, p.Token, now)
+		return err
+	}
+	must(t, apply(RuleChange{Op: "adopt", Key: "corr/abc/1", Text: "Name constants.", Why: "On trial: taught from a review comment.", Lapses: "2026-11-03"}))
+	must(t, apply(RuleChange{Op: "adopt", Key: "tool/Write/aa", Text: "Read first.", Why: "w", Lapses: "2026-11-03"}))
+	if err := apply(RuleChange{Op: "promote", Key: "tool/Write/aa", Lapses: "2027-01-31"}); err == nil {
+		t.Fatal("promoted a rule that was not on trial")
+	}
+	if err := apply(RuleChange{Op: "promote", Key: "corr/abc/1", Lapses: "2026-10-01"}); err == nil {
+		t.Fatal("promoted to a past lapse")
+	}
+	must(t, apply(RuleChange{Op: "promote", Key: "corr/abc/1", Lapses: "2027-01-31"}))
+	rb, _ := os.ReadFile(l.RulesPath())
+	if !strings.Contains(string(rb), "  Why: taught from a review comment. · since 2026-10-20 11:00 · lapses 2027-01-31 · key corr/abc/1\n") {
+		t.Fatalf("rules.md:\n%s", rb)
+	}
+	if err := apply(RuleChange{Op: "promote", Key: "corr/abc/1", Lapses: "2027-02-01"}); err == nil {
+		t.Fatal("promoted twice")
+	}
+}

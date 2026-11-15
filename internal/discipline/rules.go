@@ -30,11 +30,11 @@ func (l Layout) RulesPath() string { return filepath.Join(l.DisciplineDir(), "ru
 
 // RuleChange is what the person asked for.
 type RuleChange struct {
-	Op     string `json:"op"` // adopt | drop | renew
+	Op     string `json:"op"` // adopt | drop | renew | promote (end a trial)
 	Key    string `json:"key"`
 	Text   string `json:"text,omitempty"`   // adopt
 	Why    string `json:"why,omitempty"`    // adopt
-	Lapses string `json:"lapses,omitempty"` // adopt, renew: YYYY-MM-DD
+	Lapses string `json:"lapses,omitempty"` // adopt, renew, promote: YYYY-MM-DD
 	// Since is the adoption time PlanRule stamps on an adopt; the apply
 	// writes that one, so the bytes written are the bytes reviewed.
 	Since string `json:"since,omitempty"`
@@ -71,7 +71,7 @@ func PlanRule(l Layout, c RuleChange, now time.Time) (*RulePlan, error) {
 		return nil, err
 	}
 	today := now.Format(rules.DateLayout)
-	if c.Op == "adopt" || c.Op == "renew" {
+	if c.Op == "adopt" || c.Op == "renew" || c.Op == "promote" {
 		lapses, err := time.ParseInLocation(rules.DateLayout, c.Lapses, now.Location())
 		switch {
 		case err != nil:
@@ -93,6 +93,8 @@ func PlanRule(l Layout, c RuleChange, now time.Time) (*RulePlan, error) {
 		after, err = rules.Remove(before, c.Key)
 	case "renew":
 		after, err = rules.Renew(before, c.Key, c.Lapses)
+	case "promote":
+		after, err = rules.Promote(before, c.Key, c.Lapses)
 	default:
 		err = fmt.Errorf("unknown rule change %q", c.Op)
 	}

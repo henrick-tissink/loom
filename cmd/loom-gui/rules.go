@@ -127,6 +127,9 @@ func (a *App) RuleProposals() RulesDTO {
 		}
 		events = append(events, rules.FromHooks(all)...)
 	}
+	if a.corr != nil {
+		events = append(events, a.corr.events()...)
+	}
 	events, out.Hidden = a.visibleEvents(events)
 	sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
 
