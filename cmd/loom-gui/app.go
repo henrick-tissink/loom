@@ -36,6 +36,7 @@ type App struct {
 	attn       *attention       // reviewed and snoozed marks (attention.go)
 	notes      *commentStore    // review comments, viewed files (comments.go)
 	corr       *correctionStore // corrections taught or held against rules (teach.go)
+	ledger     *ledgerStore     // settled worktrees on the Work page (ledger.go)
 	tasks      *taskfile.Cache  // task files, for ended sessions (attention.go)
 
 	// disc is the Agent Discipline layer (discipline.go); nil in tests that

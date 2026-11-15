@@ -3275,6 +3275,7 @@ function renderUsageDot() {
   const btn = document.getElementById("usage-btn");
   if (!dot || !btn) return;
   btn.classList.toggle("on", stageView.kind === "usage");
+  renderWorkBtn();
   const now = Date.now() / 1000;
   // a window that has reset since the capture says nothing about now
   const live = usage && usage.windows ? usage.windows.filter((w) => w.resetsAt > now) : [];
@@ -3354,6 +3355,119 @@ function renderUsage() {
     const el = document.getElementById(id);
     if (el) el.addEventListener("click", (e) => { e.preventDefault(); tap(id === "usg-tap-on"); });
   }
+}
+
+// ---- Work: the ledger of claude worktrees (ledger.go) ----
+// One row per worktree in every repo loom has run a session in: what it
+// still holds, its PR, and whether it is settled. Reading it runs git in
+// each worktree, so it refreshes every 15 s while open, never on the 1.5 s
+// poll.
+let work = null, workErr = "", workBusy = false, workTimer = null, workConfirm = false, workNote = "";
+
+function renderWorkBtn() {
+  const btn = document.getElementById("work-btn");
+  if (btn) btn.classList.toggle("on", stageView.kind === "work");
+}
+
+async function workPoll() {
+  const fn = bound("Ledger");
+  if (!fn || workBusy) return;
+  workBusy = true;
+  try { work = await fn(); workErr = ""; } catch (e) { workErr = String(e); }
+  workBusy = false;
+  if (stageView.kind === "work") renderWork();
+}
+
+function openWork() {
+  teardownTerminal();
+  activeName = null;
+  stageView = { kind: "work" };
+  workConfirm = false;
+  workNote = "";
+  renderWork();
+  renderRail();
+  renderUsageDot();
+  workPoll();
+  clearInterval(workTimer);
+  workTimer = setInterval(() => { if (stageView.kind === "work") workPoll(); else { clearInterval(workTimer); workTimer = null; } }, 15000);
+}
+
+function workRowHtml(r) {
+  const n = (k, one, many) => (k ? `${k} ${k === 1 ? one : many}` : "");
+  const held = [
+    n(r.changed, "changed file", "changed files"),
+    r.ahead ? `${r.ahead} ahead of ${esc(r.base || "main")}` : "",
+    n(r.unique, "commit on no other branch", "commits on no other branch"),
+    n(r.stashes, "stash", "stashes"),
+  ].filter(Boolean);
+  const tags = [];
+  if (r.orphan) tags.push(`<span class="tpill tpill-bad" title="Holds work, with no session running in it and no open or merged PR">orphan</span>`);
+  if (r.live) tags.push(`<span class="tpill tpill-held" title="${esc(r.waiting ? "Waiting on " + r.waiting : "A session is running in it")}">${r.waiting ? "waiting on you" : "running"}</span>`);
+  if (r.settled) tags.push(`<span class="tpill tpill-ok" title="Settled ${esc(new Date(r.settledAt * 1000).toLocaleString())}">${r.auto ? "settled: PR merged" : "settled"}</span>`);
+  const pr = r.pr ? prTag({ pr: r.pr }) : "";
+  const act = r.settled
+    ? `<button class="sh-btn wk-undo" data-root="${esc(r.root)}" title="Undo the settle; a merged PR won't settle it again">Undo</button>`
+    : `<button class="sh-btn wk-settle" data-root="${esc(r.root)}"${r.blocker ? ` disabled title="${esc("Can't settle: " + r.blocker)}"` : ` title="Mark this work settled, ready for cleanup"`}>Settle</button>`;
+  return `<tr class="${r.settled ? "wk-settled" : ""}">
+    <td><div class="wk-name" title="${esc(r.root)}">${esc(r.name)}</div><div class="wk-sub">${esc(r.title || r.session || "no loom session")}</div></td>
+    <td><code>${esc(r.branch || "detached")}</code> ${pr}</td>
+    <td>${held.length ? esc(held.join(" · ")) : `<span class="wk-sub">clean</span>`}${r.err ? `<div class="wk-err">${esc(r.err)}</div>` : ""}${!r.settled && r.blocker && !r.live ? `<div class="wk-sub">${esc(r.blocker)}</div>` : ""}</td>
+    <td>${tags.join(" ")}</td>
+    <td class="wk-act">${act}</td></tr>`;
+}
+
+function renderWork() {
+  const note = workNote;
+  const stage = document.getElementById("stage");
+  if (!stage || stageView.kind !== "work") return;
+  renderWorkBtn();
+  const rows = work || [];
+  const settled = rows.filter((r) => r.settled).length;
+  const orphans = rows.filter((r) => r.orphan).length;
+  const byRepo = new Map();
+  for (const r of rows) { if (!byRepo.has(r.repo)) byRepo.set(r.repo, []); byRepo.get(r.repo).push(r); }
+  const body = !work
+    ? `<div class="po-empty">${workErr ? "" : "Reading worktrees…"}</div>`
+    : !rows.length
+      ? `<div class="po-empty">No claude worktrees in the repositories loom has run sessions in.</div>`
+      : [...byRepo].map(([repo, rs]) => `<div class="po-block"><h3 title="${esc(repo)}">${esc(repo.split("/").pop() || repo)}</h3>
+          <table class="wk-table"><tr><th>worktree</th><th>branch</th><th>holds</th><th></th><th></th></tr>${rs.map(workRowHtml).join("")}</table></div>`).join("");
+  const sig = JSON.stringify([rows, workErr, workConfirm, note || ""]);
+  if (stage.dataset.workSig === sig && stage.querySelector("#wk-root")) return;
+  stage.dataset.workSig = sig;
+  stage.innerHTML = `
+    <div id="stage-header" class="stage-head po-head"><span class="sh-name">Work</span>
+      <button class="sh-btn${workConfirm ? " sh-danger" : ""}" id="wk-clean"${settled ? "" : " disabled"} title="Remove the settled worktrees' directories, build output included. Branches are kept; anything that could lose work is kept.">${workConfirm ? `Remove ${settled} worktree${settled === 1 ? "" : "s"}?` : `Clean up settled (${settled})`}</button></div>
+    <div class="po" id="wk-root">
+      <div class="modal-error" id="wk-error">${esc(workErr)}</div>
+      ${note ? `<p class="usg-note">${note}</p>` : ""}
+      <p class="usg-note">Every claude worktree in the repositories your sessions ran in.${orphans ? ` <b>${orphans} orphan${orphans === 1 ? "" : "s"}</b>: work with no session and no open or merged PR.` : ""} A row settles itself when its PR merges, and never while a session runs in it or it holds work a removal could lose.</p>
+      ${body}
+    </div>`;
+  const fail = (e) => { workErr = String(e); renderWork(); };
+  stage.querySelectorAll(".wk-settle, .wk-undo").forEach((b) => b.addEventListener("click", async () => {
+    const fn = bound(b.classList.contains("wk-settle") ? "Settle" : "Unsettle");
+    if (!fn) return;
+    b.disabled = true;
+    workNote = "";
+    try { await fn(b.dataset.root); } catch (e) { fail(e); }
+    workPoll();
+  }));
+  const clean = document.getElementById("wk-clean");
+  if (clean) clean.addEventListener("click", async () => {
+    if (!workConfirm) { workConfirm = true; renderWork(); return; }
+    workConfirm = false;
+    const fn = bound("CleanupSettled");
+    if (!fn) return;
+    clean.disabled = true;
+    let res = [];
+    try { res = await fn(); } catch (e) { fail(e); return; }
+    const gone = res.filter((x) => !x.err).length;
+    const kept = res.filter((x) => x.err).map((x) => `${esc(x.name)}: ${esc(x.err)}`);
+    workNote = `Removed ${gone} worktree${gone === 1 ? "" : "s"}.${kept.length ? " Kept " + kept.join("; ") + "." : ""}`;
+    await workPoll();
+    renderWork();
+  });
 }
 
 // A session started before the last hook flip still runs the previous
@@ -4375,6 +4489,7 @@ async function openGateSheet(action) {
 
 document.getElementById("disc-btn").addEventListener("click", openDiscipline);
 document.getElementById("usage-btn").addEventListener("click", openUsage);
+document.getElementById("work-btn").addEventListener("click", openWork);
 discPoll(false);
 setInterval(() => discPoll(false), DISC_POLL_MS);
 usagePoll();

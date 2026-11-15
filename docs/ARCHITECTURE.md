@@ -79,6 +79,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.loom/second-opinions/` | GUI (rw, atomic) | each session's last `/code-review` second opinion (§5.8) |
 | `~/.loom/comments/` | GUI (rw, atomic) | per Claude session id: review comments with their states, files marked viewed, second-opinion finding verdicts (§5.10) |
 | `~/.loom/corrections.json` | GUI (rw, atomic) | corrections taught as rules or counted against them (§5.5) |
+| `~/.loom/ledger.json` | GUI (rw, atomic) | settled worktrees on the Work page (§4.2) |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status, kind and background job id |
 | `claude agents --json --all` | Claude (Loom: runs it, read-only) | background sessions, including the ones the supervisor has stopped |
@@ -152,7 +153,7 @@ no pane to reply into. Removing one (`claude rm`) stays in Claude's hands.
 | `secondopinion` | Runs Claude Code's native `/code-review <level>` headless in a directory and parses its printed findings | Only on a click; read-only tool allowlist, no user settings or hooks, no session persistence, 20 min deadline; §5.8. |
 | `forge` | A branch's GitHub PR or GitLab MR, its CI and review state and open review feedback (composed into a prompt), through `gh` / `glab` | Read-only; never called from a poll directly (the GUI caches and refreshes in the background); §4.2. |
 | `usage` | Plan rate-limit windows from the opt-in status-line tap, token totals from transcripts | Writes settings.json only on the explicit Track / Stop click, after a backup; §5.2. |
-| `worktree` | Claude's `--worktree` worktrees: parse a path, read branch / changed / unique commits, remove safely | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
+| `worktree` | Claude's `--worktree` worktrees: parse a path, list a repo's claude worktrees, read branch / changed / unique commits / commits ahead / stashes, remove safely (RemoveMerged for a merged PR) | The one package that writes to a repo, and only `git worktree unlock|remove` on an explicit click; §4.2. |
 | `overlap` | Live sessions with pending changes to the same files: a directory's checkout (main or linked worktree, keyed by the common git dir), a checkout's dirty files and its branch's unique commits' files, the pairwise match | Read-only (`git status`, `git log`); the GUI decides what each session owns and caches the git reads; §5.7. |
 | `bestof` | Best-of-N groups (the same seed launched as 2–3 worktree sessions) | Only the group file; each attempt's change comes from `gitdiff.Against`, its removal from `worktree.Discard`; §4.5. |
 | `scripts` | A project's setup and run scripts, each workspace's port block (with a free check on both loopbacks), job names and the job's command line | The scripts are the person's, kept in `~/.loom/scripts.json`; nothing reads or writes a repo config; §5.6. |
@@ -233,6 +234,28 @@ holds changes, unique commits or a running claude's lock. A lock left by a
 dead claude is released first: loom kills a pane, so claude never runs its
 own exit cleanup. A session whose worktree was removed is not resumable from
 loom (its cwd is gone).
+
+**Work ledger.** The Work page (`cmd/loom-gui/ledger.go`) lists every claude
+worktree of every repository loom's session rows ran in (`worktree.List` over
+`git worktree list --porcelain`, so worktrees without a row show too). Each
+row joins the newest session row whose cwd is that worktree, the PR of the
+worktree's own branch (`prCache.forBranch`), `worktree.Read`,
+`worktree.Ahead` (commits not on origin's HEAD, main or master) and
+`worktree.Stashes` (stashes are per repository, so they are matched by the
+branch they were made on). A row is an orphan when nothing runs in it, it
+holds work, and no open or merged PR covers it. Settle marks are kept in
+`~/.loom/ledger.json` keyed by worktree directory. A merged PR settles a row
+with nothing blocking it, unless the person undid a settle there. A blocker
+appearing on a settled row clears the mark. Cleanup reads each row again and
+calls `worktree.Remove`, or `worktree.RemoveMerged` when its PR merged.
+RemoveMerged accepts commits on no other branch (a squash merge with the
+remote branch deleted) only when HEAD is the PR's head commit or behind it
+(`worktree.Covered`; the head is gh's `headRefOid` or glab's `sha`), so a
+commit made after the merge still keeps the worktree, as do changed files
+and a live lock. Worktree paths are compared with symlinks resolved, since
+git lists them resolved and a row keeps the path the person picked. A row
+whose read failed keeps its settle mark.
+Neither uses `--force`, so ignored build output goes with the directory.
 
 **PR / MR status.** Every row, live or finished, shows the pull request
 (GitHub) or merge request (GitLab) of the branch the session last worked on.

@@ -200,6 +200,16 @@ Adopted rules show how often their failure happened since you adopted them, agai
 
 **Teach: rules from your corrections.** A correction can become a rule too. On a review comment you have sent (or resolved), or a second-opinion finding you marked fixed or turned into a comment, **Teach…** opens the same adopt sheet with the correction as the rule's wording (edit it into a rule for every session) and adopts it **on trial**: its Why starts `On trial:` and the trial ends in 14 days. When the agent does it again in a later session, **Breaks a rule…** on that comment or finding counts it against the rule you pick. The rules tab shows a trial rule's tag, the correction it came from, and how many times it was contradicted since. When the trial ends, **Promote…** keeps it (the trial mark goes and you choose a new lapse) and **Retire…** drops it; both are reviewed like any other change. Corrections are kept in `~/.loom/corrections.json`. Loom proposes rule text only; hooks are not taught.
 
+## 7c. Work: worktrees, settle and cleanup
+
+The branch button in the sidebar opens **Work**: one row for every claude worktree (`<repo>/.claude/worktrees/…`) in every repository your sessions ran in, including worktrees no loom session knows about. Each row shows its session, branch, PR, and what it still holds: changed files, commits ahead of the default branch, commits on no other branch or remote, and stashes made on its branch.
+
+- **Orphan** rows come first: they hold work, with no session running in them and no open or merged PR. Check these before anything else is cleaned up.
+- **Settle** marks a row's work finished. It is refused, with the reason, while a session runs in it, waits on you, or the worktree holds changed files, stashes, or commits on no other branch. A row settles itself when its PR merges. **Undo** takes a settle back, and a merged PR will not settle that row again. A settled row that gets new work stops being settled.
+- **Clean up settled** (click twice to confirm) removes each settled worktree's directory, ignored build output included, and keeps its branch. Each worktree is checked again first. A worktree whose PR merged may still hold commits found on no other branch, which happens after a squash merge when the remote branch is deleted, but only the commits that PR took. A commit made after the merge keeps the worktree, as does anything else that could lose work. Settle marks live in `~/.loom/ledger.json`.
+
+Code that only exists in a transcript is not found here.
+
 ## 8. Under the hood
 
 | Thing | Where |

@@ -144,6 +144,7 @@ func run() error {
 	app.attn = newAttention(filepath.Join(cfg.LoomDir, "attention.json"), time.Now)
 	app.notes = newCommentStore(filepath.Join(cfg.LoomDir, "comments"), time.Now)
 	app.corr = newCorrectionStore(filepath.Join(cfg.LoomDir, "corrections.json"), time.Now)
+	app.ledger = newLedgerStore(filepath.Join(cfg.LoomDir, "ledger.json"))
 	app.tasks = taskfile.NewCache(taskfile.Dir(cfg.ClaudeConfigDir))
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
 	// Second opinions run on their own; quitting loom stops them.

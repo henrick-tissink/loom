@@ -94,9 +94,10 @@ func (a *App) worktreeInUse(cwd string) string {
 	if !ok {
 		return ""
 	}
+	root = realPath(root)
 	in := func(c string) bool {
 		_, _, r, ok := worktree.Parse(c)
-		return ok && r == root
+		return ok && (r == root || realPath(r) == root)
 	}
 	if live, err := a.st.Live(); err == nil {
 		for _, r := range live {

@@ -145,3 +145,77 @@ func TestDiscard(t *testing.T) {
 		t.Fatal("discarding a gone worktree should say so")
 	}
 }
+
+func TestListAheadStashesRemoveMerged(t *testing.T) {
+	ctx := context.Background()
+	repo, root := newWorktree(t)
+	es, err := List(ctx, repo)
+	if err != nil || len(es) != 1 || es[0].Root != root || es[0].Branch != "worktree-loom-1a2b3c4d" {
+		t.Fatalf("List = %+v, %v", es, err)
+	}
+	if n, base := Ahead(ctx, root); n != 0 || base != "main" {
+		t.Fatalf("fresh Ahead = %d %q", n, base)
+	}
+	os.WriteFile(filepath.Join(root, "f"), []byte("x"), 0o644)
+	run(t, root, "add", "f")
+	run(t, root, "commit", "-q", "-m", "b")
+	if n, _ := Ahead(ctx, root); n != 1 {
+		t.Fatalf("Ahead = %d", n)
+	}
+	os.WriteFile(filepath.Join(root, "f"), []byte("y"), 0o644)
+	run(t, root, "stash", "-q")
+	if n := Stashes(ctx, root, "worktree-loom-1a2b3c4d"); n != 1 {
+		t.Fatalf("Stashes = %d", n)
+	}
+	if n := Stashes(ctx, root, "main"); n != 0 {
+		t.Fatalf("main Stashes = %d", n)
+	}
+	// a squash-merged branch: its commit is on no other branch, so Remove
+	// keeps it; RemoveMerged does not
+	if err := Remove(ctx, root); err == nil {
+		t.Fatal("Remove must keep a unique commit")
+	}
+	head := strings.TrimSpace(gitOut(t, root, "rev-parse", "HEAD"))
+	// a commit made after the merge is not covered by it
+	run(t, root, "commit", "-q", "--allow-empty", "-m", "after the merge")
+	if Covered(ctx, root, head) {
+		t.Fatal("a commit after the PR head is covered")
+	}
+	if err := RemoveMerged(ctx, root, head); err == nil || !strings.Contains(err.Error(), "on no other branch") {
+		t.Fatalf("RemoveMerged must keep a commit after the merge: %v", err)
+	}
+	if err := RemoveMerged(ctx, root, ""); err == nil {
+		t.Fatal("RemoveMerged without a head must keep unique commits")
+	}
+	run(t, root, "reset", "-q", "--hard", head)
+	if !Covered(ctx, root, head) {
+		t.Fatal("HEAD at the PR head is covered")
+	}
+	os.WriteFile(filepath.Join(root, "g"), []byte("x"), 0o644)
+	if err := RemoveMerged(ctx, root, head); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("RemoveMerged must keep untracked files: %v", err)
+	}
+	os.Remove(filepath.Join(root, "g"))
+	// ignored build output does not keep it, and goes with it
+	os.WriteFile(filepath.Join(repo, ".git", "info", "exclude"), []byte("build/\n"), 0o644)
+	os.MkdirAll(filepath.Join(root, "build"), 0o755)
+	os.WriteFile(filepath.Join(root, "build", "out"), []byte("x"), 0o644)
+	if err := RemoveMerged(ctx, root, head); err != nil {
+		t.Fatalf("RemoveMerged: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("worktree dir and its build output still there: %v", err)
+	}
+	if es, _ := List(ctx, repo); len(es) != 0 {
+		t.Fatalf("List after remove = %+v", es)
+	}
+}
+
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return string(out)
+}

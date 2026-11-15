@@ -27,6 +27,9 @@ type PR struct {
 	// Comments counts an open PR's review feedback (see Feedback); 0 when
 	// there is none or it could not be read.
 	Comments int
+	// Head is the PR's head commit (GitHub headRefOid, GitLab sha): what a
+	// merge took, so a worktree whose HEAD is in it lost nothing to it.
+	Head string
 }
 
 // Runner runs name with args in dir and returns its stdout. An error should
@@ -116,6 +119,7 @@ type ghPR struct {
 	IsDraft        bool   `json:"isDraft"`
 	URL            string `json:"url"`
 	ReviewDecision string `json:"reviewDecision"`
+	HeadRefOid     string `json:"headRefOid"`
 	Checks         []struct {
 		Typename   string `json:"__typename"`
 		Status     string `json:"status"`     // CheckRun
@@ -126,7 +130,7 @@ type ghPR struct {
 
 func github(ctx context.Context, run Runner, dir, branch string) (*PR, error) {
 	out, err := run(ctx, dir, "gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "1",
-		"--json", "number,title,state,isDraft,url,reviewDecision,statusCheckRollup")
+		"--json", "number,title,state,isDraft,url,reviewDecision,statusCheckRollup,headRefOid")
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +142,7 @@ func github(ctx context.Context, run Runner, dir, branch string) (*PR, error) {
 		return nil, nil
 	}
 	p := prs[0]
-	pr := &PR{Kind: "github", Number: p.Number, Title: p.Title, URL: p.URL, State: strings.ToLower(p.State)}
+	pr := &PR{Kind: "github", Number: p.Number, Title: p.Title, URL: p.URL, State: strings.ToLower(p.State), Head: p.HeadRefOid}
 	if pr.State == "open" && p.IsDraft {
 		pr.State = "draft"
 	}
@@ -182,6 +186,7 @@ type glMR struct {
 	Draft               bool   `json:"draft"`
 	WebURL              string `json:"web_url"`
 	DetailedMergeStatus string `json:"detailed_merge_status"`
+	SHA                 string `json:"sha"`
 	HeadPipeline        *struct {
 		Status string `json:"status"`
 	} `json:"head_pipeline"`
@@ -208,7 +213,7 @@ func gitlab(ctx context.Context, run Runner, dir, branch string) (*PR, error) {
 			m = v
 		}
 	}
-	pr := &PR{Kind: "gitlab", Number: m.IID, Title: m.Title, URL: m.WebURL}
+	pr := &PR{Kind: "gitlab", Number: m.IID, Title: m.Title, URL: m.WebURL, Head: m.SHA}
 	switch m.State {
 	case "opened":
 		pr.State = "open"

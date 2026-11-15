@@ -167,7 +167,26 @@ func samePath(a, b string) bool {
 // running claude or by anyone else. A lock left by a claude that has exited
 // (loom kills a session's pane, so claude never runs its own exit cleanup)
 // is released first. git itself refuses a dirty worktree too: no --force.
-func Remove(ctx context.Context, path string) error {
+func Remove(ctx context.Context, path string) error { return remove(ctx, path, "") }
+
+// RemoveMerged is Remove for a worktree whose pull request merged with head
+// commit head: when the worktree's HEAD is that commit or behind it, its
+// commits went into the target branch even if a squash merge and a deleted
+// remote branch leave them on no other branch here, so those are no reason
+// to keep it. A commit made after the merge still is, as are changed or
+// untracked files and a live lock.
+func RemoveMerged(ctx context.Context, path, head string) error { return remove(ctx, path, head) }
+
+// Covered reports whether root's HEAD is head or an ancestor of it.
+func Covered(ctx context.Context, root, head string) bool {
+	if head == "" {
+		return false
+	}
+	_, err := git(ctx, root, "merge-base", "--is-ancestor", "HEAD", head)
+	return err == nil
+}
+
+func remove(ctx context.Context, path, mergedHead string) error {
 	repo, _, root, ok := Parse(path)
 	if !ok {
 		return fmt.Errorf("%s is not a claude worktree", path)
@@ -182,7 +201,7 @@ func Remove(ctx context.Context, path string) error {
 	if st.Changed > 0 {
 		return fmt.Errorf("kept: %d changed or untracked %s", st.Changed, plural(st.Changed, "file", "files"))
 	}
-	if st.Unique > 0 {
+	if st.Unique > 0 && !Covered(ctx, root, mergedHead) {
 		return fmt.Errorf("kept: %d %s on no other branch or remote", st.Unique, plural(st.Unique, "commit", "commits"))
 	}
 	reason, locked, err := lockReason(ctx, repo, root)
@@ -243,4 +262,78 @@ func plural(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// Entry is one claude worktree of a repository.
+type Entry struct {
+	Root   string // the worktree's directory
+	Branch string // "" when detached
+}
+
+// List returns the claude worktrees (those under Dir) of the repository at
+// repo, from git's own list, so worktrees no session row knows of show too.
+func List(ctx context.Context, repo string) ([]Entry, error) {
+	out, err := git(ctx, repo, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	var es []Entry
+	cur := -1
+	for _, l := range strings.Split(out, "\n") {
+		if p, ok := strings.CutPrefix(l, "worktree "); ok {
+			cur = -1
+			if _, _, root, ok := Parse(p + string(filepath.Separator)); ok && root == p {
+				es = append(es, Entry{Root: p})
+				cur = len(es) - 1
+			}
+			continue
+		}
+		if b, ok := strings.CutPrefix(l, "branch "); ok && cur >= 0 {
+			es[cur].Branch = strings.TrimPrefix(b, "refs/heads/")
+		}
+	}
+	return es, nil
+}
+
+// Ahead counts the commits on HEAD that the default branch (origin's HEAD,
+// else main, else master) does not have, and names that branch. It is 0
+// and "" when no default branch is found.
+func Ahead(ctx context.Context, root string) (int, string) {
+	for _, base := range []string{"origin/HEAD", "main", "master"} {
+		if _, err := git(ctx, root, "rev-parse", "--verify", "--quiet", base+"^{commit}"); err != nil {
+			continue
+		}
+		n, err := git(ctx, root, "rev-list", "--count", base+"..HEAD")
+		if err != nil {
+			return 0, ""
+		}
+		c, _ := strconv.Atoi(n)
+		if base == "origin/HEAD" {
+			if b, err := git(ctx, root, "rev-parse", "--abbrev-ref", base); err == nil {
+				base = b
+			}
+		}
+		return c, base
+	}
+	return 0, ""
+}
+
+// Stashes counts the repository's stashes made on branch ("WIP on b:" or
+// "On b:"). Stashes are shared by every worktree of a repository, so they
+// are matched by the branch they were made on.
+func Stashes(ctx context.Context, root, branch string) int {
+	if branch == "" {
+		return 0
+	}
+	out, err := git(ctx, root, "stash", "list", "--format=%gs")
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "WIP on "+branch+":") || strings.HasPrefix(l, "On "+branch+":") {
+			n++
+		}
+	}
+	return n
 }

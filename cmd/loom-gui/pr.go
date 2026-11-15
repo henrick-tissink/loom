@@ -30,6 +30,7 @@ type PRDTO struct {
 	// Comments counts an open PR's review feedback: unresolved threads,
 	// and reviews and comments since its latest commit.
 	Comments int    `json:"comments"`
+	Head     string `json:"head,omitempty"` // the PR's head commit
 	Err      string `json:"err,omitempty"`
 }
 
@@ -99,8 +100,12 @@ func (c *prCache) info(cwd, transcriptPath string, live bool) *PRDTO {
 	if dir == "" {
 		return nil
 	}
-	branch := c.branch(transcriptPath)
-	if branch == "" {
+	return c.forBranch(dir, c.branch(transcriptPath), live)
+}
+
+// forBranch is info for a known branch, looked up from dir.
+func (c *prCache) forBranch(dir, branch string, live bool) *PRDTO {
+	if dir == "" || branch == "" {
 		return nil
 	}
 	key := dir + "\x00" + branch
@@ -146,7 +151,7 @@ func (c *prCache) refresh(key, dir, branch string) {
 		e.dto = nil
 		if pr != nil {
 			e.dto = &PRDTO{Kind: pr.Kind, Number: pr.Number, Title: pr.Title, State: pr.State,
-				URL: pr.URL, Checks: pr.Checks, Review: pr.Review, Branch: branch, Comments: pr.Comments}
+				URL: pr.URL, Checks: pr.Checks, Review: pr.Review, Branch: branch, Comments: pr.Comments, Head: pr.Head}
 		}
 	}
 	c.prs[key] = e
