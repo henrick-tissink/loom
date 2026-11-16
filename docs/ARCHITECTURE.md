@@ -644,6 +644,20 @@ calls, 150k output tokens, 2 agreements. `NudgePrompt` composes the spin
 message when a spin shows, else a drift message that asks for evidence and one
 checkable next step, or the blocker.
 
+**Restart with a brief** (`cmd/loom-gui/restart.go`). `RestartBrief` composes
+a brief from the rail row (title, spin, drift), the task file (outcome,
+checks with their ticks, and its `## Scope` and `## Notes` read from the file,
+skipping the template's placeholder), the transcript's test runs since the
+task started (`lastFailures`: the latest run of each distinct command, kept
+only when it failed, at most 5) and the files `gitdiff.Against` names over
+the diff's "since" span (at most 40). `RestartWithBrief` launches the
+session's recipe (`freshRecipe`, shared with `FreshSession`) with the brief
+as the seed. Asked to end the old session, it polls the new row's
+`SeedStatus` (`endAfterSeed`, up to 16 minutes, past the launcher's trust
+wait) and kills the old session only on `sent`; a failed or late seed, or a
+failed kill, leaves it open and is logged. Without a task file the span
+starts at the row's `CreatedAt`.
+
 **Overlap.** `Classifier.Edited` is the absolute paths of successful
 Edit/Write/MultiEdit/NotebookEdit calls (relative ones resolved against the
 record's `cwd`). `cmd/loom-gui/overlap.go` gives each visible row a set of

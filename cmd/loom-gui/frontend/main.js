@@ -818,7 +818,7 @@ function openPromptModal(s, o) {
     <div class="modal review-modal" role="dialog" aria-label="${esc(o.label)}">
       <h2>${esc(o.title)}</h2>
       <p class="review-sub">${esc(o.sub)} Edit it as you like first.</p>
-      <div class="field"><textarea id="review-text" spellcheck="false" placeholder="${esc(o.placeholder)}" disabled></textarea></div>
+      <div class="field"><textarea id="review-text" spellcheck="false" placeholder="${esc(o.placeholder)}" disabled></textarea></div>${o.extra || ""}
       <div class="modal-error" id="review-err"></div>
       <div class="modal-actions">
         <button class="btn-ghost" id="review-cancel">Cancel</button>
@@ -849,7 +849,7 @@ function openPromptModal(s, o) {
     errEl.textContent = "";
     try {
       if (o.send) {
-        await o.send(text.value);
+        await o.send(text.value, backdrop);
         close();
       } else if (o.finished) {
         const nn = await window.go.main.App.ResumeWithPrompt(s.name, text.value);
@@ -1079,6 +1079,7 @@ function appendLiveRow(s, projLabel) {
   const acts = li.querySelector(".tactions");
   acts.appendChild(actionBtn('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', "Quick reply", () => openReply(s.name)));
   if (canNudge(s)) acts.appendChild(nudgeButton(s));
+  if (canRestart(s)) acts.appendChild(restartButton(s));
   if (readyForReview(s)) acts.appendChild(reviewSheetButton(s));
   // not while a dialog is open: the paste's Enter would answer it
   if (hasReview(s) && !(s.waitingFor && s.waitingFor !== "shell")) acts.appendChild(reviewButton(s, false));
@@ -1569,6 +1570,7 @@ function renderStageHeader(name) {
       (s && canNudge(s) ? `<button class="sh-btn" id="sh-nudge" title="${s.spin ? "Ask it to stop retrying and rethink" : "Ask for evidence and the next checkable step"}">${icon(NUDGE_ICON)}Nudge</button>` : "") +
       `<button class="sh-btn" id="sh-sheet" title="Review sheet: the finish line, who proved each check, the tests that ran, the changes and the risks">${icon(SHEET_ICON)}Review</button>` +
       `<button class="sh-btn" id="sh-diff" title="Review the changes and comment on lines">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
+      (s && canRestart(s) ? `<button class="sh-btn" id="sh-restart" title="End this session and start a fresh one with a brief of the task, the files and what didn't work">${icon(RESTART_ICON)}Restart…</button>` : "") +
       (s && overBudget(s) ? `<button class="sh-btn" id="sh-fresh" title="Fresh session from checkpoint (same directory; this one stays open)">Fresh session</button>` : "") +
       `<button class="sh-btn sh-primary" id="sh-reply" title="Quick reply (R)">Reply</button></span>`);
   const diffBtn = el.querySelector("#sh-diff");
@@ -1583,6 +1585,8 @@ function renderStageHeader(name) {
   if (hooksBtn) hooksBtn.addEventListener("click", () => openHooksPanel(name));
   const replyBtn = el.querySelector("#sh-reply");
   if (replyBtn) replyBtn.addEventListener("click", () => openReply(name));
+  const restartBtn = el.querySelector("#sh-restart");
+  if (restartBtn) restartBtn.addEventListener("click", () => openRestart(s));
   const freshBtn = el.querySelector("#sh-fresh");
   if (freshBtn) freshBtn.addEventListener("click", async () => {
     try { const nn = await window.go.main.App.FreshSession(name); if (nn) selectSession(nn); poll(); }
@@ -4054,6 +4058,34 @@ function openNudge(s) {
     fetch: () => window.go.main.App.NudgePrompt(s.name),
     placeholder: "Composing…",
     sendLabel: "Send nudge",
+  });
+}
+
+// ---- per-session: restart with a brief (restart.go) ----
+// A drifting, spinning or over-budget session ends and a fresh one starts
+// in the same place, its first message a brief loom composed from the task
+// file, the diff and the transcript, for the operator to edit.
+function canRestart(s) {
+  return !!(s.spin || (s.drift && s.drift.length) || overBudget(s)) && !s.external && !s.background;
+}
+const RESTART_ICON = '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/>';
+function restartButton(s) {
+  return actionBtn(RESTART_ICON, "Restart with a brief: a fresh session, first told the task, the files and what didn't work", () => openRestart(s));
+}
+function openRestart(s) {
+  openPromptModal(s, {
+    label: "Restart with a brief",
+    title: "Restart with a brief",
+    sub: `A fresh session starts in ${s.cwd || "the same directory"} with the same model and mode, and this brief as its first message.`,
+    fetch: () => window.go.main.App.RestartBrief(s.name),
+    placeholder: "Composing…",
+    sendLabel: "Restart",
+    extra: `<label class="rs-end" title="If the brief never reaches the new session, this one stays open"><input type="checkbox" id="restart-end" checked /> End ${esc(displayName(s))} once the brief has reached the new session</label>`,
+    send: async (text, bd) => {
+      const end = bd.querySelector("#restart-end").checked;
+      const r = await window.go.main.App.RestartWithBrief(s.name, text, end);
+      if (r.name) selectSession(r.name);
+    },
   });
 }
 

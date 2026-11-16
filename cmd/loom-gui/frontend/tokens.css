@@ -1152,6 +1152,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .dc-compose .dc-acts { display: flex; justify-content: flex-end; margin-top: 6px; }
 .dc-outdated { display: flex; flex-direction: column; gap: 4px; padding: 4px 0 8px; border-bottom: 1px dashed var(--sel); margin-bottom: 4px; }
 .dc-outdated .du-head { margin-left: 54px; }
+.rs-end { display: flex; align-items: center; gap: 8px; font-size: var(--t-small); color: var(--text-dim); margin: 4px 0 0; cursor: pointer; }
 .dc-must { font-size: var(--t-micro); font-weight: 700; color: var(--st-error); background: var(--bad-bg); border-radius: 999px; padding: 1px 8px; font-family: var(--font-ui); white-space: nowrap; }
 .mr-file { cursor: pointer; font-family: var(--font-mono); font-size: var(--t-micro); }
 .mr-file:hover { text-decoration: underline; }

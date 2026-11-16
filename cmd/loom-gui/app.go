@@ -449,23 +449,11 @@ func (a *App) DismissSession(name string) error {
 // the old one wrote. The old session is left running for the user to read
 // and kill; nothing here touches it.
 func (a *App) FreshSession(name string) (string, error) {
-	if a.launcher == nil || a.st == nil {
-		return "", fmt.Errorf("launcher unavailable")
-	}
-	row, ok, err := a.st.Get(name)
+	r, err := a.freshRecipe(name)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
-		return "", fmt.Errorf("session %q not found", name)
-	}
-	if row.Cwd == "" {
-		return "", fmt.Errorf("session has no recorded directory")
-	}
-	return a.launcher.Launch(session.Recipe{
-		ProjectLabel: row.ProjectLabel, Cwd: row.Cwd, Model: row.Model, Mode: row.Mode,
-		AddDirs: session.DecodeAddDirs(row.AddDirs), Fenced: session.IsFenced(row.Tags),
-	}, launchCols, launchRows, a.now())
+	return a.launcher.Launch(r, launchCols, launchRows, a.now())
 }
 
 // ResumeSession relaunches a finished session via `claude --resume` and returns
