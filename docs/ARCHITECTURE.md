@@ -658,6 +658,14 @@ wait) and kills the old session only on `sent`; a failed or late seed, or a
 failed kill, leaves it open and is logged. Without a task file the span
 starts at the row's `CreatedAt`.
 
+**Claude's own commands** (`cmd/loom-gui/commands.go`). `SendCommand` types
+one of a fixed list (`/code-review`, `/recap`, `/rewind`, `/goal clear`) with
+`SendLiteral` (typed, not pasted, so claude reads a command) and Enter.
+`commandRefusal` refuses anything else, an external or background session,
+a running turn, a session not at rest, and an open dialog (`dialogOpen`, the
+same gate as `SendPrompt`). The frontend's 80% usage warning (`usageWarning`)
+reads the status-line tap's windows that have not reset since the capture.
+
 **Overlap.** `Classifier.Edited` is the absolute paths of successful
 Edit/Write/MultiEdit/NotebookEdit calls (relative ones resolved against the
 record's `cwd`). `cmd/loom-gui/overlap.go` gives each visible row a set of

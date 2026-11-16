@@ -1565,9 +1565,10 @@ function renderStageHeader(name) {
     (s && s.overlaps && s.overlaps.length ? `<span class="sh-chip over"${s.overlaps.length === 1 ? ` data-session="${esc(s.overlaps[0].with)}"` : ""} title="${esc(overlapTip(s))}">${esc(overlapLabel(s))}</span>` : "") +
     (s && s.remoteUrl ? `<span class="sh-chip" data-url="${esc(s.remoteUrl)}" title="${esc(`Under Remote Control: ${s.remoteUrl}\nClick to open`)}">phone</span>` : "") + ctx + hooksChip(s) + (needsRestart(s) ? `<span class="sh-chip over" title="Started before the hooks were last changed; it keeps the previous hooks until restarted">restart for new hooks</span>` : "") +
     (s && (s.external || s.background) ? "" :
-      `<span class="sh-acts">` +
+      `<span class="sh-acts">` + headerErrHtml(name) +
       (s && s.status === "needs_you" ? `<button class="sh-btn" id="sh-snooze" title="${s.snoozed ? "Back into the queue now" : "Out of the queue until it next comes back to you"}">${s.snoozed ? "Wake" : "Snooze"}</button>` : "") +
       (s && canNudge(s) ? `<button class="sh-btn" id="sh-nudge" title="${s.spin ? "Ask it to stop retrying and rethink" : "Ask for evidence and the next checkable step"}">${icon(NUDGE_ICON)}Nudge</button>` : "") +
+      `<button class="sh-btn" id="sh-claude"${canCommand(s || {}) ? ` title="Claude Code's own commands: review, recap, rewind"` : ` disabled title="Once it hands back (and no dialog is open)"`}>Claude ▾</button>` +
       `<button class="sh-btn" id="sh-sheet" title="Review sheet: the finish line, who proved each check, the tests that ran, the changes and the risks">${icon(SHEET_ICON)}Review</button>` +
       `<button class="sh-btn" id="sh-diff" title="Review the changes and comment on lines">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
       (s && canRestart(s) ? `<button class="sh-btn" id="sh-restart" title="End this session and start a fresh one with a brief of the task, the files and what didn't work">${icon(RESTART_ICON)}Restart…</button>` : "") +
@@ -1585,6 +1586,8 @@ function renderStageHeader(name) {
   if (hooksBtn) hooksBtn.addEventListener("click", () => openHooksPanel(name));
   const replyBtn = el.querySelector("#sh-reply");
   if (replyBtn) replyBtn.addEventListener("click", () => openReply(name));
+  const claudeBtn = el.querySelector("#sh-claude");
+  if (claudeBtn) claudeBtn.addEventListener("click", (e) => { e.stopPropagation(); claudeMenu(s, claudeBtn); });
   const restartBtn = el.querySelector("#sh-restart");
   if (restartBtn) restartBtn.addEventListener("click", () => openRestart(s));
   const freshBtn = el.querySelector("#sh-fresh");
@@ -1827,10 +1830,17 @@ function projectMenu(p, x, y) {
     items.push([hidden ? "Show" : "Hide", () => projectAction(() => window.go.main.App.SetProjectHidden(p.root, !hidden))]);
     items.push(["Remove…", () => removeProjectFlow(p.root), "danger"]);
   }
-  for (const [label, fn, cls] of items) {
+  showMenu(m, items, x, y);
+}
+
+// showMenu fills and places a menu made by projectMenu or claudeMenu:
+// items are [label, fn, class, title].
+function showMenu(m, items, x, y) {
+  for (const [label, fn, cls, title] of items) {
     const b = document.createElement("button");
     b.textContent = label;
     if (cls) b.classList.add(cls);
+    if (title) b.title = title;
     b.addEventListener("click", () => { closeProjectMenu(); fn(); });
     m.appendChild(b);
   }
@@ -3368,6 +3378,15 @@ function fmtIn(secs) {
 
 const WINDOW_LABEL = { five_hour: "5-hour", seven_day: "7-day" };
 
+// usageWarning is a sentence for each plan window at 80% or more that has
+// not reset since the capture, or "" (the status-line tap's numbers).
+const USAGE_WARN_PCT = 80;
+function usageWarning() {
+  const now = Date.now() / 1000;
+  const hot = (usage && usage.windows ? usage.windows : []).filter((w) => w.resetsAt > now && w.usedPct >= USAGE_WARN_PCT);
+  return hot.map((w) => `The ${WINDOW_LABEL[w.name] || w.name} window is ${Math.round(w.usedPct)}% used (${Math.max(0, 100 - Math.round(w.usedPct))}% left); it resets in ${fmtIn(w.resetsAt - now)}.`).join(" ");
+}
+
 function renderUsageDot() {
   const dot = document.getElementById("usage-dot");
   const btn = document.getElementById("usage-btn");
@@ -3440,6 +3459,7 @@ function renderUsage() {
     <div id="stage-header" class="stage-head po-head"><span class="sh-name">Usage</span></div>
     <div class="po" id="usg-root">
       <div class="modal-error" id="usg-error">${u && u.err ? esc(u.err) : ""}</div>
+      ${usageWarning() ? `<div class="f-warn usg-warn">${esc(usageWarning())}</div>` : ""}
       <div class="po-block"><h3>Plan limits</h3>${limits}</div>
       <div class="po-block"><h3>Tokens</h3><p class="usg-note">From the transcripts, subagents included; a message counts once. Refreshed every minute.</p>${tokens}</div>
     </div>`;
@@ -4059,6 +4079,40 @@ function openNudge(s) {
     placeholder: "Composing…",
     sendLabel: "Send nudge",
   });
+}
+
+// ---- per-session: claude's own commands (commands.go) ----
+// The header's Claude menu types one of claude's slash commands into the
+// pane: loom surfaces them rather than rebuilding them. Only at rest with
+// no dialog open; the command then runs in the terminal as if typed there.
+const CLAUDE_CMDS = [
+  ["/code-review", "Review", "claude's own code review of the changes, in this session"],
+  ["/recap", "Recap", "claude's summary of the session so far"],
+  ["/rewind", "Rewind…", "claude's picker to go back to an earlier point (code, conversation or both)"],
+];
+function canCommand(s) {
+  return !s.external && !s.background && (s.status === "needs_you" || s.status === "idle") && !(s.waitingFor && s.waitingFor !== "shell");
+}
+function claudeMenu(s, btn) {
+  closeProjectMenu();
+  const m = document.createElement("div");
+  m.className = "ctxmenu";
+  m.id = "ctxmenu";
+  const run = (cmd) => window.go.main.App.SendCommand(s.name, cmd).then(() => poll()).catch((e) => flashHeaderError(s.name, String(e)));
+  const items = CLAUDE_CMDS.map(([cmd, label, tip]) => [`${label}  ${cmd}`, () => run(cmd), "", tip]);
+  if (s.goal && (s.goal.state === "active" || s.goal.state === "paused")) items.push(["Stop goal  /goal clear", () => run("/goal clear"), "danger", "Clear the running /goal"]);
+  const r = btn.getBoundingClientRect();
+  showMenu(m, items, r.left, r.bottom + 4);
+}
+// headerErr is a refused command, shown in its session's header for a
+// while; the header redraws on every poll, so it lives here, not in the DOM.
+let headerErr = null;
+function flashHeaderError(name, msg) {
+  headerErr = { name, msg, until: Date.now() + 8000 };
+  if (stageView.kind === "session" && stageView.name === name) renderStageHeader(name);
+}
+function headerErrHtml(name) {
+  return headerErr && headerErr.name === name && Date.now() < headerErr.until ? `<span class="sh-err" title="${esc(headerErr.msg)}">${esc(headerErr.msg)}</span>` : "";
 }
 
 // ---- per-session: restart with a brief (restart.go) ----
@@ -4829,6 +4883,7 @@ async function openLauncher(preselect, seed) {
   backdrop.innerHTML = `
     <div class="modal" role="dialog" aria-label="New session">
       <h2>New session</h2>
+      ${(() => { const w = usageWarning(); return w ? `<div class="f-warn" id="f-usage-warn" title="Open Usage">${esc(w)}</div>` : ""; })()}
       ${(() => { const n = reviewQueue().length; return n ? `<div class="f-warn" id="f-review-warn" title="Open the queue">${n} finished ${n === 1 ? "session is" : "sessions are"} waiting for your review.</div>` : ""; })()}
       <div class="field">
         <label>Target</label>
@@ -4890,6 +4945,8 @@ async function openLauncher(preselect, seed) {
   backdrop.querySelector("#f-cancel").addEventListener("click", close);
   const warn = backdrop.querySelector("#f-review-warn");
   if (warn) warn.addEventListener("click", () => { close(); openAttention(); });
+  const uwarn = backdrop.querySelector("#f-usage-warn");
+  if (uwarn) uwarn.addEventListener("click", () => { close(); openUsage(); });
 
   // Load targets and fill the (already-mounted) controls. The list is ordered
   // by the Go side; both the select and the checklist keep that order, which
