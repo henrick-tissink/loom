@@ -55,6 +55,10 @@ type toolCall struct {
 	subject string
 	// path is the file an edit tool writes, absolute; "" otherwise.
 	path string
+	// test: a Bash call that runs tests (IsTestCommand); background: it
+	// ran with run_in_background, so its result comes later.
+	test       bool
+	background bool
 }
 
 type failure struct {
@@ -67,6 +71,7 @@ var editTools = map[string]bool{"Edit": true, "Write": true, "MultiEdit": true, 
 
 type toolInput struct {
 	Command      string `json:"command"`
+	Background   bool   `json:"run_in_background"`
 	FilePath     string `json:"file_path"`
 	NotebookPath string `json:"notebook_path"`
 }
@@ -78,6 +83,8 @@ func callOf(b block, cwd string) toolCall {
 	switch {
 	case b.Name == "Bash":
 		call.subject = strings.Join(strings.Fields(in.Command), " ")
+		call.test = IsTestCommand(in.Command)
+		call.background = in.Background
 	case in.FilePath != "" || in.NotebookPath != "":
 		p := in.FilePath
 		if p == "" {
@@ -114,12 +121,14 @@ func (c *Classifier) noteTurn(r record, blocks []block) {
 		if r.PromptID != c.turn {
 			c.turn = r.PromptID
 			c.resetTurn()
+			c.startTurnStats(parseTS(r.Timestamp))
 		}
 		return
 	}
 	if _, ok := findBlock(blocks, "tool_result"); !ok && !r.IsMeta {
 		c.turn = ""
 		c.resetTurn()
+		c.startTurnStats(parseTS(r.Timestamp))
 	}
 }
 
@@ -143,6 +152,7 @@ func (c *Classifier) noteResults(blocks []block, at int64) {
 			continue // its call is not in this transcript: nothing to key on
 		}
 		delete(c.calls, b.ToolUseID)
+		c.noteTestRun(call, b.IsError, contentText(b.Content))
 		if b.IsError {
 			c.failed(call, contentText(b.Content), at)
 			continue
@@ -259,16 +269,10 @@ var notTheAgents = []string{
 // output to go on it keys on the command and exit code. sample is the
 // line that tells the failure, for the row.
 func failureKey(call toolCall, text string) (key, sample string, ok bool) {
-	text = strings.TrimSpace(toolErrTag.ReplaceAllString(text, ""))
-	low := strings.ToLower(text)
-	for _, s := range notTheAgents {
-		if strings.Contains(low, s) {
-			return "", "", false
-		}
-	}
-	if strings.HasPrefix(low, "blocked:") {
+	if !agentsFailure(text) {
 		return "", "", false
 	}
+	text = strings.TrimSpace(toolErrTag.ReplaceAllString(text, ""))
 	body, exit := text, ""
 	if call.name == "Bash" {
 		first, rest, _ := strings.Cut(text, "\n")
@@ -299,6 +303,18 @@ func failureKey(call toolCall, text string) (key, sample string, ok bool) {
 		}
 	}
 	return strconv.FormatUint(h.Sum64(), 16), cut(sample, sampleLimit), true
+}
+
+// agentsFailure: a failed call's text is the agent's own failure, not one
+// of notTheAgents or a hook's "Blocked:".
+func agentsFailure(text string) bool {
+	low := strings.ToLower(strings.TrimSpace(toolErrTag.ReplaceAllString(text, "")))
+	for _, s := range notTheAgents {
+		if strings.Contains(low, s) {
+			return false
+		}
+	}
+	return !strings.HasPrefix(low, "blocked:")
 }
 
 func normalize(s string) string {

@@ -63,6 +63,7 @@ type record struct {
 		// on the absence of a tool_use BLOCK instead misfired on every mid-turn
 		// thinking/text message — the "needs you while busy" bug.
 		StopReason string `json:"stop_reason"`
+		ID         string `json:"id"`
 	} `json:"message"`
 }
 
@@ -126,6 +127,16 @@ type Classifier struct {
 	edited      map[string]int64
 	editedList  []Edit
 	editedDirty bool
+	// drift.go: the current turn's counts.
+	turnStart   int64
+	turnCalls   int
+	testFails   int
+	lastTest    string
+	outByMsg    map[string]int64
+	outLoose    int64
+	agreeNow    int
+	agreePast   []int
+	agreeSample string
 }
 
 func (c *Classifier) Feed(line []byte) {
@@ -148,6 +159,12 @@ func (c *Classifier) Feed(line []byte) {
 	blocks := parseBlocks(r)
 	if r.Type == "assistant" {
 		c.noteCalls(blocks, r.Cwd)
+		var u *usage
+		id := ""
+		if r.Message != nil {
+			u, id = r.Message.Usage, r.Message.ID
+		}
+		c.noteAssistant(id, u, blocks)
 	} else {
 		c.noteTurn(r, blocks)
 		c.noteResults(blocks, parseTS(r.Timestamp))

@@ -1066,7 +1066,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${bestOfTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${limitPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}${spinChip(s)}${overlapChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${bestOfTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${limitPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}${spinChip(s)}${driftChip(s)}${overlapChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}${s.snoozed ? " · snoozed" : ""}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -1566,7 +1566,7 @@ function renderStageHeader(name) {
     (s && (s.external || s.background) ? "" :
       `<span class="sh-acts">` +
       (s && s.status === "needs_you" ? `<button class="sh-btn" id="sh-snooze" title="${s.snoozed ? "Back into the queue now" : "Out of the queue until it next comes back to you"}">${s.snoozed ? "Wake" : "Snooze"}</button>` : "") +
-      (s && canNudge(s) ? `<button class="sh-btn" id="sh-nudge" title="Ask it to stop retrying and rethink">${icon(NUDGE_ICON)}Nudge</button>` : "") +
+      (s && canNudge(s) ? `<button class="sh-btn" id="sh-nudge" title="${s.spin ? "Ask it to stop retrying and rethink" : "Ask for evidence and the next checkable step"}">${icon(NUDGE_ICON)}Nudge</button>` : "") +
       `<button class="sh-btn" id="sh-sheet" title="Review sheet: the finish line, who proved each check, the tests that ran, the changes and the risks">${icon(SHEET_ICON)}Review</button>` +
       `<button class="sh-btn" id="sh-diff" title="Review the changes and comment on lines">${icon('<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2M18 11.4v.6a4 4 0 0 1-4 4H8.4"/>')}Diff</button>` +
       (s && overBudget(s) ? `<button class="sh-btn" id="sh-fresh" title="Fresh session from checkpoint (same directory; this one stays open)">Fresh session</button>` : "") +
@@ -3991,6 +3991,17 @@ function spinChip(s) {
   return `<span class="tpill tpill-bad" title="${esc(spinTip(s))}">spinning ×${s.spin.count}</span>`;
 }
 
+// driftChip: the turn's stall and drift signals (drift.go), advisory: a
+// long turn, many tool calls or tokens, test runs failing in a row, or
+// repeated "you're right". One chip names the first; the tip lists all.
+function driftChip(s) {
+  if (!s.drift || !s.drift.length) return "";
+  const more = s.drift.length > 1 ? ` +${s.drift.length - 1}` : "";
+  const tip = s.drift.map((d) => d.detail).join("\n") +
+    (canNudge(s) ? "\nNudge asks it for evidence and one checkable next step, or the blocker" : "");
+  return `<span class="tpill tpill-drift" title="${esc(tip)}">${esc(s.drift[0].label)}${more}</span>`;
+}
+
 // overlapTip names the other live sessions with pending changes to the same
 // files. In one checkout they overwrite each other; on two branches they
 // conflict at merge. A pill naming one session goes to it on click.
@@ -4020,21 +4031,21 @@ document.addEventListener("click", (e) => {
   selectSession(pill.dataset.session);
 }, true);
 
-// canNudge: a spinning session loom has a pane for, with no dialog open (the
+// canNudge: a spinning or drifting session loom has a pane for, with no dialog open (the
 // paste's Enter would answer it). A busy session takes it as a queued message.
 function canNudge(s) {
-  return !!s.spin && !s.external && !s.background && !(s.waitingFor && s.waitingFor !== "shell");
+  return !!(s.spin || (s.drift && s.drift.length)) && !s.external && !s.background && !(s.waitingFor && s.waitingFor !== "shell");
 }
 const NUDGE_ICON = '<circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/>';
 function nudgeButton(s) {
-  return actionBtn(NUDGE_ICON, "Nudge: ask it to stop retrying and rethink", () => openNudge(s));
+  return actionBtn(NUDGE_ICON, s.spin ? "Nudge: ask it to stop retrying and rethink" : "Nudge: ask for evidence and the next checkable step", () => openNudge(s));
 }
-// openNudge shows the stop-and-rethink message, composed from the failure,
+// openNudge shows the Nudge message, composed from the failure or the drift,
 // for the operator to edit; it is sent only on the click.
 function openNudge(s) {
   openPromptModal(s, {
     label: "Nudge",
-    title: "Nudge: stop and rethink",
+    title: s.spin ? "Nudge: stop and rethink" : "Nudge: show the evidence",
     sub: `Sent to ${displayName(s)} as one message; if it is mid-turn, claude takes it as a queued message.`,
     fetch: () => window.go.main.App.NudgePrompt(s.name),
     placeholder: "Composing…",

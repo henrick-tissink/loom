@@ -50,7 +50,9 @@ type Row struct {
 	// Spin is the same tool failure repeating in the current turn, or nil;
 	// Edited the files the session wrote through its file tools (shared
 	// with the transcript reader: read-only).
-	Spin   *transcript.Spin
+	Spin *transcript.Spin
+	// Turn is the current turn's counts, for drift signals.
+	Turn   transcript.TurnStats
 	Edited []transcript.Edit
 	// RemoteURL is the session's claude.ai/code link while it is under
 	// Remote Control (claude's registry), else "".
@@ -407,7 +409,7 @@ func (e *Engine) row(r store.SessionRow, rs transcript.ReaderSnapshot, st Status
 	activity int64, ent ccsessions.Entry, hasEnt bool) Row {
 	row := Row{SessionRow: r, Status: st, LastTool: rs.LastTool,
 		Activity: activity, Title: r.Title, CtxTokens: rs.CtxTokens,
-		WaitingFor: waitingFor, Goal: rs.Goal, Spin: rs.Spin, Edited: rs.Edited}
+		WaitingFor: waitingFor, Goal: rs.Goal, Spin: rs.Spin, Turn: rs.Turn, Edited: rs.Edited}
 	if st == NeedsYou {
 		// the wait is measured from the ask; a registry "waiting" (a
 		// dialog) is timed by the registry, which is what flipped it.

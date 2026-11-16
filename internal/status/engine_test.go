@@ -768,6 +768,9 @@ func TestPollCarriesSpinAndEdited(t *testing.T) {
 	if r.Spin == nil || r.Spin.Count != 3 || r.Spin.Tool != "Bash" {
 		t.Fatalf("spin = %+v", r.Spin)
 	}
+	if r.Turn.Calls < 3 {
+		t.Fatalf("turn stats not carried: %+v", r.Turn)
+	}
 	if len(r.Edited) != 1 || r.Edited[0].Path != filepath.Join(cwd, "Makefile") {
 		t.Fatalf("edited = %v", r.Edited)
 	}

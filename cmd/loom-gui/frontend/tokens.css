@@ -1196,3 +1196,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tpill-arm.on { color: var(--accent-ink); background: var(--sel); border-style: solid; }
 #f-when-seg { margin-top: 8px; }
 #f-at { margin-top: 8px; width: 100%; font: inherit; color-scheme: light dark; }
+
+/* Drift and stall signals (drift.go) */
+.tpill-drift { color: var(--accent-ink); background: var(--inset); border: 1px solid var(--edge); }

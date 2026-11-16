@@ -4,6 +4,7 @@ import (
 	"github.com/henricktissink/loom/internal/hooklog"
 	"github.com/henricktissink/loom/internal/status"
 	"github.com/henricktissink/loom/internal/store"
+	"time"
 )
 
 // SessionDTO is the flat, JSON-friendly view of a live session the frontend renders.
@@ -93,7 +94,9 @@ type SessionDTO struct {
 	// Spin is the same tool failure repeating in the current turn (spin.go);
 	// Overlaps the other live sessions with pending changes to the same
 	// files (overlap.go).
-	Spin     *SpinDTO     `json:"spin,omitempty"`
+	Spin *SpinDTO `json:"spin,omitempty"`
+	// Drift is the current turn's stall and drift signals (drift.go).
+	Drift    []DriftDTO   `json:"drift,omitempty"`
 	Overlaps []OverlapDTO `json:"overlaps,omitempty"`
 }
 
@@ -137,6 +140,7 @@ func snapshotToDTOs(s status.Snapshot, at *rowAttributor) []SessionDTO {
 			StartedAt:    r.CreatedAt,
 			SeedFailed:   r.SeedStatus == "failed",
 			Spin:         spinDTO(r.Spin),
+			Drift:        driftSignals(r.Turn, string(r.Status), r.Spin != nil, time.Now()),
 		})
 	}
 	return out

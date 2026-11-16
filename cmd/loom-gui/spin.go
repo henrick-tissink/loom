@@ -58,14 +58,17 @@ func (a *App) railRow(name string) (railEntry, bool) {
 	return e, ok
 }
 
-// NudgePrompt composes the Nudge message for a spinning session, for the
-// operator to edit and send.
+// NudgePrompt composes the Nudge message for a spinning or drifting
+// session, for the operator to edit and send.
 func (a *App) NudgePrompt(name string) (string, error) {
 	e, ok := a.railRow(name)
-	if !ok || e.dto.Spin == nil {
-		return "", fmt.Errorf("the session is no longer repeating a failure")
+	switch {
+	case ok && e.dto.Spin != nil:
+		return nudgePrompt(*e.dto.Spin), nil
+	case ok && len(e.dto.Drift) > 0:
+		return driftPrompt(e.dto.Drift), nil
 	}
-	return nudgePrompt(*e.dto.Spin), nil
+	return "", fmt.Errorf("the session is no longer repeating a failure or drifting")
 }
 
 // nudgePrompt names the failure and asks the three questions that break a

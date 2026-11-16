@@ -626,6 +626,24 @@ The GUI keeps the rail's spins (`App.noteSpins`), so `NudgePrompt` composes
 from what the operator sees rather than polling again. The message is sent
 only on a click, through `SendPrompt`.
 
+**Drift.** Beside the failure counts the classifier keeps `TurnStats`
+(`transcript/drift.go`) for the current turn: the timestamp of the record that
+opened it, its tool calls, the test runs failed in a row (Bash calls that
+`IsTestCommand` matches, the hooks' definition, judged by `testRun` as the
+review sheet does: a non-zero exit or a runner's failing summary in the output,
+so piped runs count; a pass resets the streak, and a background run with no
+result yet or a call that never ran changes nothing), its output tokens (claude
+writes one record per content block, each with the message's usage, so tokens
+are taken once per `message.id`), and how many assistant texts opened with an
+agreement ("You're right", "Good catch") in this turn and the four before.
+`ReaderSnapshot` and `status.Row` carry it as `Turn`. `cmd/loom-gui/drift.go`
+turns it into `SessionDTO.Drift` signals against fixed caps (the per-turn ones
+only while the session is running; agreement at any status): 3 failing test
+runs (left to the spin chip while one shows), a running turn of 45 min, 150
+calls, 150k output tokens, 2 agreements. `NudgePrompt` composes the spin
+message when a spin shows, else a drift message that asks for evidence and one
+checkable next step, or the blocker.
+
 **Overlap.** `Classifier.Edited` is the absolute paths of successful
 Edit/Write/MultiEdit/NotebookEdit calls (relative ones resolved against the
 record's `cwd`). `cmd/loom-gui/overlap.go` gives each visible row a set of

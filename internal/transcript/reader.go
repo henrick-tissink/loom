@@ -29,6 +29,8 @@ type ReaderSnapshot struct {
 	Goal      Goal
 	// Spin is the turn's repeating tool failure, or nil (spin.go).
 	Spin *Spin
+	// Turn is the current turn's counts, for drift signals (drift.go).
+	Turn TurnStats
 	// Edited is the files the session wrote through its file tools,
 	// sorted and shared: callers must not modify it.
 	Edited []Edit
@@ -39,7 +41,7 @@ func (r *Reader) snap() ReaderSnapshot {
 		State: r.cls.State(), LastTool: r.cls.LastTool(),
 		Title: r.cls.Title(), CtxTokens: r.cls.CtxTokens(),
 		Ask: r.cls.Ask(), AskAt: r.cls.AskAt(), Goal: r.cls.Goal(),
-		Spin: r.cls.Spin(), Edited: r.cls.Edited(),
+		Spin: r.cls.Spin(), Turn: r.cls.TurnStats(), Edited: r.cls.Edited(),
 	}
 }
 
