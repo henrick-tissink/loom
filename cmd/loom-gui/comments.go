@@ -496,17 +496,20 @@ func (a *App) SessionDiffSince(name string) (DiffDTO, error) {
 	}
 	labels := a.targetLabels()
 	out := DiffDTO{Repos: []RepoDiff{}}
+	var ms []MustReadDTO
 	for _, dir := range sessionDirs(row.SessionRow) {
 		br := ""
 		if dir == row.Cwd {
 			br = branch
 		}
 		base, scope := diffBase(dir, br, started)
-		var d RepoDiff
-		if base == "HEAD" {
+		// Against at HEAD too, so new files' contents are in the patch (the
+		// review sheet's must-read files are marked viewed there); a repo
+		// with no commit yet has no base, and gets the working tree
+		d := gitdiff.Against(dir, base)
+		if d.Error != "" && base == "HEAD" {
 			d = gitDiff(dir)
 		} else {
-			d = gitdiff.Against(dir, base)
 			d.Dirty = d.Error == "" && (d.Patch != "" || len(d.Untracked) > 0)
 		}
 		d.Label = labels[dir]
@@ -515,6 +518,8 @@ func (a *App) SessionDiffSince(name string) (DiffDTO, error) {
 		}
 		out.Repos = append(out.Repos, d)
 		out.Scopes = append(out.Scopes, scope)
+		ms = append(ms, mustReadIn(dir, d.Label, d.Files, d.Untracked)...)
 	}
+	out.MustRead = mustReadMap(ms)
 	return out, nil
 }

@@ -2828,8 +2828,9 @@ function diffLineHtml(l, fi, i, picked) {
     `${l.side ? ` title="Click to comment; shift-click to comment on a range"` : ""}>${num}<span class="dc-code">${esc(l.text)}</span></div>`;
 }
 
-async function openDiff(name) {
+async function openDiff(name, scope) {
   if (document.querySelector(".modal-backdrop")) return;
+  if (scope) diffScope = scope; // the review sheet's must-read files are viewed in "since"
   const s = latestSessions.find((x) => x.name === name);
   const canSend = !!(s && !s.external && !s.background);
   const backdrop = document.createElement("div");
@@ -2912,7 +2913,10 @@ async function openDiff(name) {
       else if (!r.dirty) inner += `<div class="diff-empty">No changes.</div>`;
       else {
         if (r.stat) inner += `<pre class="diff-stat">${esc(r.stat)}</pre>`;
+        const must = (d.mustRead && d.mustRead[r.path]) || {};
         const chunks = splitPatchByFile(r.patch);
+        // files a person must read come first (mustread.go); sort is stable
+        chunks.sort((a, b) => (must[b.file] !== undefined) - (must[a.file] !== undefined));
         // "since" shows new files' contents in the patch, up to a size and a
         // count; the rest are still listed, or they would vanish from view
         const listed = diffScope === "since" ? unshownNew(r.untracked, chunks.map((c) => c.file)) : (r.untracked || []);
@@ -2952,7 +2956,7 @@ async function openDiff(name) {
             }
           });
           inner += `<details class="diff-file" data-key="${esc(key)}"${isOpen ? " open" : ""}>
-            <summary><span class="df-name">${esc(f.file)}</span>${changed ? `<span class="dc-changed" title="Its patch changed after you marked it viewed">changed since viewed</span>` : ""}` +
+            <summary><span class="df-name">${esc(f.file)}</span>${must[f.file] !== undefined ? `<span class="dc-must" title="A file a person must read: passing tests don't prove it">must read · ${esc(must[f.file])}</span>` : ""}${changed ? `<span class="dc-changed" title="Its patch changed after you marked it viewed">changed since viewed</span>` : ""}` +
             `${live.length ? `<span class="dc-count">${live.length} comment${live.length === 1 ? "" : "s"}</span>` : ""}` +
             `<span class="df-counts"><span class="df-add">+${c.add}</span> <span class="df-del">−${c.del}</span></span>` +
             `${notes ? `<label class="dc-viewed" data-viewed="${fi}" title="Viewed files fold away and come back when their patch changes"><input type="checkbox"${viewed ? " checked" : ""} tabindex="-1" /> Viewed</label>` : ""}</summary>
@@ -4079,6 +4083,7 @@ const PROOF = {
 function reviewSheetHtml(r) {
   const now = Math.floor(Date.now() / 1000);
   let h = "";
+  if ((r.mustRead || []).length) h += `<section class="rs-sec" id="rs-mr"></section>`;
   h += `<section class="rs-sec"><h3>Risks</h3>`;
   h += r.risks.length
     ? `<ul class="rs-risks">${r.risks.map((x) => `<li class="rs-${x.level}">${esc(x.text)}</li>`).join("")}</ul>`
@@ -4165,7 +4170,7 @@ async function openReviewSheet(name) {
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
   backdrop.querySelector("#rs-close").addEventListener("click", close);
   if (pane) {
-    backdrop.querySelector("#rs-diff").addEventListener("click", () => { close(); openDiff(name); });
+    backdrop.querySelector("#rs-diff").addEventListener("click", () => { close(); openDiff(name, "since"); });
     backdrop.querySelector("#rs-reply").addEventListener("click", () => { close(); openReply(name); });
   }
   const body = backdrop.querySelector("#rs-body");
@@ -4183,12 +4188,53 @@ async function openReviewSheet(name) {
     const drawComments = () => mountComments(cmEl, name, notes.v, pane, setNotes, () => { close(); });
     drawComments();
     redrawSO = mountSecondOpinion(body.querySelector("#rs-so"), name, r.secondOpinion, notes, setNotes);
-    // opening the sheet is the review (attention.go)
+    // opening the sheet is the review (attention.go), unless a file a
+    // person must read is not yet marked viewed at its current patch
+    const unread = await mountMustRead(body.querySelector("#rs-mr"), r.mustRead || [], name, notes.v, pane ? () => { close(); openDiff(name, "since"); } : null);
+    if (!backdrop.isConnected) return;
     const mark = bound("MarkReviewed");
-    if (mark) mark([name]).then(() => poll()).catch(() => {});
+    if (mark && !unread) mark([name]).then(() => poll()).catch(() => {});
   } catch (e) {
     body.innerHTML = `<div class="diff-empty">${esc(String(e))}</div>`;
   }
+}
+
+// ---- the review sheet's must-read files (mustread.go) ----
+// Files a repo's .loom/must-read (or the built-in defaults) says a person
+// reads: each shows whether it is marked viewed at its current patch in the
+// diff's "since" view. Returns how many are not, so the sheet is not marked
+// reviewed while any is. A new file too large for the diff can't be marked
+// there, so it doesn't hold the mark back; it says to open it.
+async function mountMustRead(el, list, name, notes, openDiffFn) {
+  if (!el || !list.length) return 0;
+  const hashes = new Map(); // repo \0 file -> patch hash
+  let diffErr = "";
+  try {
+    const d = await window.go.main.App.SessionDiffSince(name);
+    for (const r of d.repos || []) for (const c of splitPatchByFile(r.patch)) hashes.set(r.path + "\u0000" + c.file, hashPatch(c.body));
+  } catch (e) { diffErr = String(e); }
+  const viewed = (notes && notes.viewed) || {};
+  let unread = 0;
+  const rows = list.map((m) => {
+    const h = hashes.get(m.repo + "\u0000" + m.file);
+    const seen = viewed[viewedKey("since", m.repo, m.file)];
+    let word, cls, tip;
+    if (diffErr) { word = "unknown"; cls = "dim"; tip = "The diff could not be read"; unread++; }
+    else if (!h) { word = "open it"; cls = "dim"; tip = "Not shown in the diff (too large, or not a regular file): open it to read it"; }
+    else if (seen === h) { word = "viewed"; cls = "ok"; tip = "Marked viewed at its current patch"; }
+    else { word = seen ? "changed" : "unread"; cls = "bad"; tip = seen ? "Its patch changed after you marked it viewed" : "Not marked viewed in the diff"; unread++; }
+    return `<li><span class="rs-proof rs-${cls}" title="${esc(tip)}">${word}</span><span class="rs-check">` +
+      `<span class="rs-cname mr-file" data-path="${esc(m.path || m.file)}" title="Open the file">${esc(m.file)}</span>` +
+      `<span class="rs-evidence">${esc(m.why)}${list.some((x) => x.label !== m.label) ? ` · ${esc(m.label)}` : ""} · from ${esc(m.source)}</span></span></li>`;
+  }).join("");
+  el.innerHTML = `<h3>Must read <span class="rs-dim">${list.length - unread} of ${list.length} viewed</span></h3>` +
+    `<ul class="rs-checks">${rows}</ul>` +
+    (unread ? `<p class="rs-dim">Not marked reviewed until each is marked viewed in the diff.${openDiffFn ? ` <button class="btn-ghost mr-diff">Open diff</button>` : ""}</p>` : "") +
+    (diffErr ? `<p class="rs-dim">${esc(diffErr)}</p>` : "");
+  el.querySelectorAll("[data-path]").forEach((x) => x.addEventListener("click", () => openFileToken(x.getAttribute("data-path"))));
+  const b = el.querySelector(".mr-diff");
+  if (b) b.addEventListener("click", openDiffFn);
+  return unread;
 }
 
 // ---- the review sheet's second opinion (secondopinion.go) ----

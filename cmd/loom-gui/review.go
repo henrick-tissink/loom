@@ -39,6 +39,9 @@ type ReviewDTO struct {
 	Changes    []ReviewRepo         `json:"changes"`
 	Worktree   *WorktreeDTO         `json:"worktree,omitempty"`
 	Risks      []ReviewRisk         `json:"risks"`
+	// MustRead is the changed files a person must read (mustread.go), over
+	// the same span as the diff's "since" view.
+	MustRead []MustReadDTO `json:"mustRead"`
 	// Audited says which changes the shortcut checks read, one line per
 	// directory: they look at more than Changes (commits too).
 	Audited []string `json:"audited"`
@@ -121,6 +124,7 @@ type repoAudit struct {
 	label string
 	scope string // what was read: "uncommitted and new files", plus commits since …
 	flags []diffaudit.Flag
+	must  []MustReadDTO
 	err   string
 }
 
@@ -141,7 +145,10 @@ func lastGuardRun(recs []hooklog.Record) *hooklog.Record {
 
 func buildReview(in reviewIn) ReviewDTO {
 	d := in.dto
-	out := ReviewDTO{Name: d.Name, Checks: []ReviewCheck{}, Tests: []transcript.TestRun{}, Changes: []ReviewRepo{}, Risks: []ReviewRisk{}, Audited: []string{}, Worktree: d.Worktree}
+	out := ReviewDTO{Name: d.Name, Checks: []ReviewCheck{}, Tests: []transcript.TestRun{}, Changes: []ReviewRepo{}, Risks: []ReviewRisk{}, Audited: []string{}, Worktree: d.Worktree, MustRead: []MustReadDTO{}}
+	for _, a := range in.audits {
+		out.MustRead = append(out.MustRead, a.must...)
+	}
 	risk := func(level, f string, a ...any) {
 		out.Risks = append(out.Risks, ReviewRisk{level, fmt.Sprintf(f, a...)})
 	}
@@ -193,6 +200,13 @@ func buildReview(in reviewIn) ReviewDTO {
 	}
 
 	// Risks, worst first.
+	if n := len(out.MustRead); n > 0 {
+		var fs []string
+		for _, m := range out.MustRead {
+			fs = append(fs, m.File+" ("+m.Why+")")
+		}
+		risk("bad", "%s a person must read changed: %s. Passing tests don't prove %s; read %s in the diff.", plural(n, "1 file", fmt.Sprintf("%d files", n)), list(fs), plural(n, "it", "them"), plural(n, "it", "each"))
+	}
 	if d.Spin != nil {
 		risk("bad", "It is repeating a failure: %s, %d times this turn.", d.Spin.Tool, d.Spin.Count)
 	}
@@ -386,7 +400,9 @@ func auditDir(dir, label, branch string, started int64) repoAudit {
 	if d.Error != "" {
 		return repoAudit{label: label, err: d.Error}
 	}
-	return repoAudit{label: label, scope: scope, flags: diffaudit.Audit(d.Patch)}
+	// the same span as the diff's "since" view: at HEAD that view is the
+	// working tree, whose new files Against also lists
+	return repoAudit{label: label, scope: scope, flags: diffaudit.Audit(d.Patch), must: mustReadIn(dir, label, d.Files, d.Untracked)}
 }
 
 // diffBase is where a session's work in dir starts, and that scope in

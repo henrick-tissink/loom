@@ -27,6 +27,9 @@ type DiffDTO struct {
 	Repos []RepoDiff `json:"repos"`
 	// Scopes says, per repo, what the diff covers (SessionDiffSince only).
 	Scopes []string `json:"scopes,omitempty"`
+	// MustRead is, by section path and file, why a person must read it
+	// (mustread.go).
+	MustRead map[string]map[string]string `json:"mustRead"`
 }
 
 // gitDiff collects the uncommitted changes in cwd (tracked vs HEAD, plus
@@ -56,6 +59,7 @@ func (a *App) SessionDiff(name string) DiffDTO {
 		}
 	}
 	labels := a.targetLabels()
+	var ms []MustReadDTO
 	for _, dir := range dirs {
 		d := gitDiff(dir)
 		d.Label = labels[dir]
@@ -66,7 +70,9 @@ func (a *App) SessionDiff(name string) DiffDTO {
 			d.Label = filepath.Base(dir)
 		}
 		out.Repos = append(out.Repos, d)
+		ms = append(ms, mustReadIn(dir, d.Label, d.Files, d.Untracked)...)
 	}
+	out.MustRead = mustReadMap(ms)
 	return out
 }
 

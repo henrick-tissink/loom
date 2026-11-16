@@ -712,6 +712,18 @@ which runs only when the user asks for it.
   agent files 26, silenced checks 21, possible secrets 14 and skipped
   tests 13. Before those last three rules, FluentAssertions' `.Should()`
   alone produced 164 false "assert nothing" flags and `# noqa` 89.
+- **Must read** (`internal/mustread`, `cmd/loom-gui/mustread.go`): the
+  files `gitdiff.Against` names in the shortcut checks' span are matched
+  against the repository root's `.loom/must-read`, or `mustread.Defaults`
+  without one; patterns compile to gitignore-like, case-insensitive
+  regexps. git names changed files from the root but untracked ones from
+  the session's directory, so those are matched with the directory's
+  prefix and reported as the diff names them. `ReviewDTO.MustRead` lists
+  them and they open the risks (`bad`); `DiffDTO.MustRead` (both scopes)
+  keys them by section path and file for the diff's order and badge. The
+  frontend hashes each one's chunk of the "since" patch as the diff view
+  does and calls `MarkReviewed` on open only when every one is viewed at
+  that hash; a file with no chunk (too large) doesn't hold it back.
 - **Risks** are rules over the above and the row's spin, overlap and held
   chip, worst first: a possible secret is `bad`, the other shortcut checks
   `warn`. `Audited` says per directory what the shortcut checks read.
