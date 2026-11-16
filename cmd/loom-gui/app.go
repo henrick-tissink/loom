@@ -38,7 +38,13 @@ type App struct {
 	corr       *correctionStore // corrections taught or held against rules (teach.go)
 	ledger     *ledgerStore     // settled worktrees on the Work page (ledger.go)
 	planDir    string           // approved plans, ~/.loom/plans (plan.go)
-	tasks      *taskfile.Cache  // task files, for ended sessions (attention.go)
+	queue      *queueStore      // queued launches and resumes at reset (queue.go)
+	limits     func() []UsageWindowDTO
+	limitTails limitCache
+	// queueLaunch and queueSend replace the launch and the prompt in tests.
+	queueLaunch func(QueuedRun) (string, error)
+	queueSend   func(name, text string) error
+	tasks       *taskfile.Cache // task files, for ended sessions (attention.go)
 
 	// disc is the Agent Discipline layer (discipline.go); nil in tests that
 	// do not set one.
@@ -166,6 +172,9 @@ func (a *App) ListSessions() (out []SessionDTO) {
 		out[i].Jobs = a.scripts.info(out[i].Cwd)
 		if out[i].Status == "needs_you" {
 			out[i].PlanReady = a.planReady(out[i].Name)
+		}
+		if out[i].Status == "idle" || out[i].Status == "needs_you" {
+			out[i].Limit = a.limitFor(out[i].Name)
 		}
 	}
 	if a.hooks != nil {

@@ -152,17 +152,17 @@ body {
 .tb-right { --wails-draggable: no-drag; display: flex; align-items: center; gap: 6px; }
 
 /* ---- dock tokens (the projects strip, New, search, prefs) ---- */
-#new-session, #search-btn, #prefs-btn, #disc-btn, #usage-btn, #work-btn, #pp-collapse {
+#new-session, #search-btn, #prefs-btn, #disc-btn, #usage-btn, #work-btn, #queue-btn, #pp-collapse {
   --wails-draggable: no-drag;
   display: grid; place-items: center;
   width: 40px; height: 40px; border-radius: 12px; cursor: pointer;
   color: var(--text-faint); background: transparent; border: 0; padding: 0;
   transition: color 0.12s ease, background 0.12s ease;
 }
-#new-session:hover, #search-btn:hover, #prefs-btn:hover, #disc-btn:hover, #usage-btn:hover, #work-btn:hover, #pp-collapse:hover { color: var(--text); background: var(--sel); }
+#new-session:hover, #search-btn:hover, #prefs-btn:hover, #disc-btn:hover, #usage-btn:hover, #work-btn:hover, #queue-btn:hover, #pp-collapse:hover { color: var(--text); background: var(--sel); }
 .ic { stroke-linecap: round; stroke-linejoin: round; }
 .ic * { stroke-width: var(--icon-stroke); vector-effect: non-scaling-stroke; }
-#new-session svg, #search-btn svg, #prefs-btn svg, #disc-btn svg, #usage-btn svg, #work-btn svg { width: 16px; height: 16px; }
+#new-session svg, #search-btn svg, #prefs-btn svg, #disc-btn svg, #usage-btn svg, #work-btn svg, #queue-btn svg { width: 16px; height: 16px; }
 #new-session { color: var(--accent-ink); background: var(--accent-soft); }
 #new-session:hover { color: var(--on-accent); background: var(--accent); }
 #pp-collapse { font-size: var(--t-lead); line-height: 1; }
@@ -447,12 +447,12 @@ body {
 [hidden] { display: none !important; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field label { font-size: var(--t-micro); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); font-weight: 700; }
-.field select, .field textarea {
+.field select, .field textarea, .field input[type="datetime-local"] {
   font-family: var(--font-mono); font-size: var(--t-body); color: var(--text);
   background: var(--inset); border: 1px solid transparent; border-radius: 12px;
   padding: 10px 12px; width: 100%;
 }
-.field select:focus, .field textarea:focus { outline: none; border-color: var(--accent-line); }
+.field select:focus, .field textarea:focus, .field input[type="datetime-local"]:focus { outline: none; border-color: var(--accent-line); }
 .field textarea { resize: vertical; min-height: 60px; font-family: var(--font-ui); font-size: var(--t-body); }
 .modal-error { color: var(--error); font-size: var(--t-small); min-height: 0; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
@@ -759,7 +759,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 /* agent discipline: the dock dot, the island and the gate sheet */
 #disc-btn, #usage-btn { position: relative; }
-#disc-btn.on, #usage-btn.on, #work-btn.on { color: var(--text); background: var(--sel); }
+#disc-btn.on, #usage-btn.on, #work-btn.on, #queue-btn.on { color: var(--text); background: var(--sel); }
 .disc-dot { position: absolute; right: 8px; bottom: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); box-shadow: 0 0 0 2px var(--rail); }
 .disc-dot.hollow { background: transparent !important; box-shadow: inset 0 0 0 1.5px var(--text-faint); }
 .tpill-restart { color: var(--over); background: var(--over-bg); }
@@ -1182,3 +1182,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .plan-fb { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; }
 .plan-fb textarea { flex: 1; min-height: 3.5em; font: inherit; }
 .rs-inline { display: inline; }
+
+/* Queue and resume at reset (queue.go) */
+#queue-btn { position: relative; }
+#queue-btn[data-count]:not([data-count=""])::after {
+  content: attr(data-count); position: absolute; top: 4px; right: 4px;
+  min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px;
+  font-size: var(--t-micro); line-height: 14px; text-align: center;
+  color: var(--on-accent); background: var(--accent);
+}
+.tpill-limit { color: var(--st-error); background: var(--inset); }
+.tpill-arm { color: var(--text-faint); background: var(--inset); cursor: pointer; border: 1px dashed var(--edge); }
+.tpill-arm.on { color: var(--accent-ink); background: var(--sel); border-style: solid; }
+#f-when-seg { margin-top: 8px; }
+#f-at { margin-top: 8px; width: 100%; font: inherit; color-scheme: light dark; }

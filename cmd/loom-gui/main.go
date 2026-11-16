@@ -146,6 +146,9 @@ func run() error {
 	app.corr = newCorrectionStore(filepath.Join(cfg.LoomDir, "corrections.json"), time.Now)
 	app.ledger = newLedgerStore(filepath.Join(cfg.LoomDir, "ledger.json"))
 	app.planDir = filepath.Join(cfg.LoomDir, "plans")
+	app.queue = newQueueStore(filepath.Join(cfg.LoomDir, "queue.json"))
+	app.limits = readLimits(cfg.LoomDir)
+	go app.runQueue(nil)
 	app.tasks = taskfile.NewCache(taskfile.Dir(cfg.ClaudeConfigDir))
 	app.summarizer = &memory.Summarizer{Store: st, Binary: "claude", WorkDir: cfg.LoomDir}
 	// Second opinions run on their own; quitting loom stops them.

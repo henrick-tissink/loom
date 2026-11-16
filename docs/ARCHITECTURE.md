@@ -81,6 +81,7 @@ shows, retirements included), hands the terminal to `tmux attach` for
 | `~/.loom/corrections.json` | GUI (rw, atomic) | corrections taught as rules or counted against them (§5.5) |
 | `~/.loom/ledger.json` | GUI (rw, atomic) | settled worktrees on the Work page (§4.2) |
 | `~/.loom/plans/<sid>.md` | GUI (w on approve, atomic) | plans approved from the plan card, shown on the review sheet |
+| `~/.loom/queue.json` | GUI (rw, atomic) | queued runs and resume-at-reset arms, with what each launched or sent |
 | `~/.claude/projects/**` | Claude (Loom: **read-only**) | transcripts — main + subagent |
 | `~/.claude/sessions/<pid>.json` | Claude (Loom: read-only) | per-process session registry: current session id, tmux target, status, kind and background job id |
 | `claude agents --json --all` | Claude (Loom: runs it, read-only) | background sessions, including the ones the supervisor has stopped |
@@ -279,6 +280,29 @@ behaviours were checked live on 2.1.325. The plan file is read only from a
 `plans` directory under the home or the claude config directory. An approved
 plan is copied to `~/.loom/plans/<sid>.md`, only after its key was sent, and
 shown on the review sheet.
+
+**Launch queue and resume at reset.** `queue.go` keeps queued runs and
+armed resumes in `~/.loom/queue.json` (atomic rewrite under a mutex). A limit
+is read from the transcript, not the pane: `transcript.LastLimit` reads the
+tail and returns the last non-sidechain user/assistant record only if it is
+Claude Code's synthetic limit message (`"error":"rate_limit"` with
+`quotaLimits.resetsAt`, verified on 2.1.283), cached by file size and mtime.
+`ListSessions` attaches it to idle and needs-you rows. A scheduler goroutine
+ticks every 30 s. Each tick launches due runs through `LaunchSession` with the
+Done-when appended to the seed, unless a plan window from the usage status
+file is at 95% or more and has not reset, or a live session's transcript ends on
+a limit that has not reset (the only witness when the status-line tap is off).
+A run more than 5 minutes past its time is marked late only when this tick
+follows a gap of over 90 s (loom closed, or the machine slept), so a run the
+limits held is not late. An armed resume fires once its `resetsAt` is a minute
+gone. It reads the transcript again and sends `continue` (through `SendPrompt`,
+which refuses while a dialog is open) only if the session is live and its
+last record is still the same limit. An open dialog (claude's registry) makes
+it wait for the next tick. Otherwise it records why and disarms. `Queue()`
+joins each run and resume to its session (the rail row when live, else the
+store, task-file cache and indexed outcome), so the digest does not depend on
+the rail's 30-row Finished list.
+Nothing wakes a sleeping machine; ticks resume on wake.
 
 **PR / MR status.** Every row, live or finished, shows the pull request
 (GitHub) or merge request (GitLab) of the branch the session last worked on.

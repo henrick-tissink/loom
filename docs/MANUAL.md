@@ -220,6 +220,16 @@ The branch button in the sidebar opens **Work**: one row for every claude worktr
 
 Code that only exists in a transcript is not found here.
 
+## 7d. Queue and resume at reset
+
+**Resume at reset.** A session that stopped on a usage limit shows **limit · resets <time>** on its row, read from the limit record Claude Code writes into the transcript. Click **resume at reset** to arm it. A minute after the limit resets, loom sends `continue` to the session, but only if it is still live and still stopped on that same limit. If a dialog is open then, it waits until the dialog is answered. If you typed something in the meantime, or the session ended, nothing is sent and the Queue page says why. Click **resume armed** to disarm.
+
+**Queue a run.** In New session, **Queue…** holds the run instead of launching it. A queued run needs a seed prompt and a **Done when**: what must be true when it stops, and the check that proves it. The Done-when is added to the seed so the session puts it in its task file. Choose **After the limit resets** (launch as soon as loom sees room) or **At a time**. A queued run takes one target and one attempt.
+
+loom launches queued runs only while it is open. It never wakes a sleeping machine, so a run that fell due while the laptop slept launches when it wakes, marked **late**. Nothing launches while a plan window is 95% used (known only with the status-line tap on) or while a live session is stopped on a usage limit that has not reset; the Queue page says which. A run held this way is not marked late.
+
+**The Queue page.** The clock button in the sidebar (with a count of pending runs) lists pending runs with **Cancel**, then a digest of launched runs and resumes. Each one is joined to its session's status, task-file finish line (checks done, ✓/✗ from the stop guard) and outcome. State lives in `~/.loom/queue.json`.
+
 ## 8. Under the hood
 
 | Thing | Where |

@@ -45,6 +45,8 @@ type SessionDTO struct {
 	RemoteURL string `json:"remoteUrl"`
 	// PlanReady: the pane shows claude's plan-approval dialog (plan.go).
 	PlanReady bool `json:"planReady,omitempty"`
+	// Limit: the session stopped on a usage limit (queue.go).
+	Limit *LimitDTO `json:"limit,omitempty"`
 	// CheckpointAt is when the session last wrote a hand-over checkpoint
 	// (unix seconds; 0 = never) and NextStep its one-line next step.
 	CheckpointAt int64  `json:"checkpointAt"`

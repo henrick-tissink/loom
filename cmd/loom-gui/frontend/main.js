@@ -215,6 +215,18 @@ function waitingSuffix(s) {
   return ` <span class="tage">${esc(s.waitingFor)}</span>`;
 }
 
+// limitPillHtml is a session stopped on a usage limit: when it resets, and
+// a toggle that has loom send "continue" once it has (queue.go).
+function limitPillHtml(s) {
+  if (!s.limit || s.external || s.background) return "";
+  const t = new Date(s.limit.resetsAt * 1000);
+  const soon = s.limit.resetsAt - Date.now() / 1000 < 86400;
+  const when = soon ? t.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : t.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+  const armed = s.limit.armed;
+  return ` <span class="tpill tpill-limit" title="${esc(s.limit.text || "Stopped on a usage limit")}">limit · resets ${esc(when)}</span>` +
+    ` <span class="tpill tpill-arm${armed ? " on" : ""}" data-arm="${esc(s.name)}" data-on="${armed ? "0" : "1"}" title="${esc(armed ? "Armed: loom sends \u201ccontinue\u201d a minute after the reset, if the session is still stopped on this limit and no dialog is open. Click to disarm." : "Resume at reset: loom sends \u201ccontinue\u201d a minute after the limit resets")}">${armed ? "resume armed" : "resume at reset"}</span>`;
+}
+
 // taskPillHtml is the finish line from the session's task file: Done-when
 // ticks for a delivery task, a word for a consultation, nothing when the
 // session never pinned one — which is itself information. It is what tells
@@ -1054,7 +1066,7 @@ function appendLiveRow(s, projLabel) {
   li.style.setProperty("--tc", color);
   li.innerHTML =
     `<span class="tglyph i-${esc(s.status)}">${icon(STATUS_ICON[s.status] || STATUS_ICON.unknown)}</span>` +
-    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${bestOfTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}${spinChip(s)}${overlapChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
+    `<span class="tinfo"><span class="tname">${esc(displayName(s))}</span><span class="tproj">${esc(projLabel != null ? projLabel : s.project)}${externalTag(s)}${worktreeTag(s)}${prTag(s)}${jobsTag(s)}${bestOfTag(s)}${phoneTag(s)}${seedTag(s)}${restartTag(s)}${taskPillHtml(s)}${limitPillHtml(s)}${goalPillHtml(s)}${heldChip(s)}${spinChip(s)}${overlapChip(s)}</span>${askLineHtml(s)}${ctxGaugeHtml(s.ctxTokens)}${budgetChipHtml(s)}</span>` +
     `<span class="tright"><span class="tstatus" style="color:${color}">${esc(statusWord(s.status))}${waitingSuffix(s)}${idleSuffix(s)}${s.snoozed ? " · snoozed" : ""}</span><span class="tactions"></span></span>`;
   li.addEventListener("click", () => selectSession(s.name));
   rowsTarget.appendChild(li);
@@ -2578,6 +2590,17 @@ document.addEventListener("click", (e) => {
   openPlanCard(pill.dataset.plan);
 }, true);
 
+document.addEventListener("click", async (e) => {
+  const pill = e.target.closest && e.target.closest(".tpill-arm[data-arm]");
+  if (!pill) return;
+  e.stopPropagation();
+  e.preventDefault();
+  const fn = bound("ArmResume");
+  if (!fn) return;
+  try { await fn(pill.dataset.arm, pill.dataset.on === "1"); } catch (err) { pill.title = String(err); pill.classList.add("tpill-bad"); return; }
+  poll();
+}, true);
+
 async function openPlanCard(name) {
   if (document.querySelector(".modal-backdrop")) return;
   const s = latestSessions.find((x) => x.name === name);
@@ -3434,6 +3457,12 @@ let work = null, workErr = "", workBusy = false, workTimer = null, workConfirm =
 function renderWorkBtn() {
   const btn = document.getElementById("work-btn");
   if (btn) btn.classList.toggle("on", stageView.kind === "work");
+  const qb = document.getElementById("queue-btn");
+  if (qb) {
+    qb.classList.toggle("on", stageView.kind === "queue");
+    const n = queueData ? queueData.runs.filter(queuePending).length : 0;
+    qb.dataset.count = n ? String(n) : "";
+  }
 }
 
 async function workPoll() {
@@ -3535,6 +3564,98 @@ function renderWork() {
     await workPoll();
     renderWork();
   });
+}
+
+// ---- Queue: held launches, resume-at-reset, and the digest (queue.go) ----
+// Pending runs can be cancelled; launched runs and resumes are joined to
+// their session's live or finished row for status, finish line and outcome.
+let queueData = null, queueErr = "", queueTimer = null;
+const queuePending = (r) => !r.launchedAt && !r.cancelled && !r.err;
+
+async function queuePoll() {
+  const fn = bound("Queue");
+  if (!fn) return;
+  try { queueData = await fn(); queueErr = ""; } catch (e) { queueErr = String(e); }
+  renderWorkBtn();
+  if (stageView.kind === "queue") renderQueue();
+}
+
+function openQueue() {
+  teardownTerminal();
+  activeName = null;
+  stageView = { kind: "queue" };
+  renderQueue();
+  renderRail();
+  renderUsageDot();
+  queuePoll();
+  clearInterval(queueTimer);
+  queueTimer = setInterval(() => { if (stageView.kind === "queue") queuePoll(); else { clearInterval(queueTimer); queueTimer = null; } }, 5000);
+}
+
+function fmtQTime(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+}
+
+// The session as Queue() joined it on the Go side, live or ended, so the
+// digest doesn't depend on the rail's Finished page.
+function queueSessionCell(sessions, name) {
+  const s = name && sessions ? sessions[name] : null;
+  if (!s) return `<span class="wk-sub">${name ? "session gone" : ""}</span>`;
+  const out = s.outcome ? `<div class="wk-sub">${esc(s.outcome)}</div>` : "";
+  // only a live session has a pane to open; an ended one is read here
+  const label = latestSessions.some((x) => x.name === name) ? `<a href="#" class="q-open" data-name="${esc(name)}">${esc(s.title || name)}</a>` : `<span class="wk-name">${esc(s.title || name)}</span>`;
+  return `${label} <span class="tage">${esc(statusWord(s.status))}</span> ${taskPillHtml(s)}${out}`;
+}
+
+function renderQueue() {
+  const stage = document.getElementById("stage");
+  if (!stage || stageView.kind !== "queue") return;
+  renderWorkBtn();
+  const q = queueData || { runs: [], resumes: [], sessions: {} };
+  const pending = q.runs.filter(queuePending);
+  const done = q.runs.filter((r) => !queuePending(r));
+  const firstLine = (t) => esc((t || "").split("\n")[0]);
+  const target = (p) => esc((p || "").split("/").pop() || p);
+  const pendingHtml = pending.length
+    ? `<table class="wk-table"><tr><th>run</th><th>target</th><th>when</th><th></th></tr>${pending.map((r) => `<tr>
+        <td><div class="wk-name" title="${esc(r.seed)}">${firstLine(r.seed)}</div><div class="wk-sub" title="${esc(r.doneWhen)}">Done when: ${firstLine(r.doneWhen)}</div></td>
+        <td title="${esc(r.project)}">${target(r.project)}${r.worktree ? ` <span class="wk-sub">worktree</span>` : ""}</td>
+        <td>${r.at ? esc(fmtQTime(r.at)) : "when the limits have room"}</td>
+        <td class="wk-act"><button class="sh-btn q-cancel" data-id="${esc(r.id)}">Cancel</button></td></tr>`).join("")}</table>`
+    : `<div class="po-empty">Nothing queued. Queue a run from New session.</div>`;
+  const doneHtml = done.length
+    ? `<table class="wk-table"><tr><th>run</th><th>launched</th><th>session</th></tr>${done.map((r) => `<tr class="${r.cancelled ? "wk-settled" : ""}">
+        <td><div class="wk-name" title="${esc(r.seed)}">${firstLine(r.seed)}</div><div class="wk-sub" title="${esc(r.doneWhen)}">Done when: ${firstLine(r.doneWhen)}</div></td>
+        <td>${r.cancelled ? "cancelled" : r.err ? `<span class="wk-err">${esc(r.err)}</span>` : esc(fmtQTime(r.launchedAt))}${r.lateBy ? ` <span class="tpill tpill-held" title="Due ${esc(fmtQTime(r.at))}; loom was not running or the machine slept">late ${fmtAge(r.lateBy)}</span>` : ""}</td>
+        <td>${r.session ? queueSessionCell(q.sessions, r.session) : ""}</td></tr>`).join("")}</table>`
+    : "";
+  const resHtml = q.resumes.length
+    ? `<table class="wk-table"><tr><th>session</th><th>limit reset</th><th>resume</th></tr>${q.resumes.map((r) => `<tr>
+        <td>${queueSessionCell(q.sessions, r.session)}</td>
+        <td>${esc(fmtQTime(r.resetsAt))}</td>
+        <td>${r.resumedAt ? `continued ${esc(fmtQTime(r.resumedAt))}` : r.err ? `<span class="wk-err">${esc(r.err)}</span>` : r.armed ? "armed" : "disarmed"}</td></tr>`).join("")}</table>`
+    : "";
+  const sig = JSON.stringify([q, queueErr]);
+  if (stage.dataset.queueSig === sig && stage.querySelector("#q-root")) return;
+  stage.dataset.queueSig = sig;
+  stage.innerHTML = `
+    <div id="stage-header" class="stage-head po-head"><span class="sh-name">Queue</span></div>
+    <div class="po" id="q-root">
+      <div class="modal-error">${esc(queueErr)}</div>
+      ${q.held ? `<p class="usg-note"><b>Holding:</b> ${esc(q.held)}</p>` : ""}
+      <p class="usg-note">Queued runs launch at their time, or once the plan windows have room; nothing launches while a window is 95% used. loom launches them only while it runs: a run that fell due while the machine slept launches on wake, marked late.</p>
+      <div class="po-block"><h3>Pending</h3>${pendingHtml}</div>
+      ${doneHtml ? `<div class="po-block"><h3>Launched</h3>${doneHtml}</div>` : ""}
+      ${resHtml ? `<div class="po-block"><h3>Resume at reset</h3>${resHtml}</div>` : ""}
+    </div>`;
+  stage.querySelectorAll(".q-cancel").forEach((b) => b.addEventListener("click", async () => {
+    const fn = bound("CancelQueued");
+    if (!fn) return;
+    b.disabled = true;
+    try { await fn(b.dataset.id); } catch (e) { queueErr = String(e); }
+    queuePoll();
+  }));
+  stage.querySelectorAll(".q-open").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); selectSession(a.dataset.name); }));
 }
 
 // A session started before the last hook flip still runs the previous
@@ -4558,6 +4679,9 @@ async function openGateSheet(action) {
 document.getElementById("disc-btn").addEventListener("click", openDiscipline);
 document.getElementById("usage-btn").addEventListener("click", openUsage);
 document.getElementById("work-btn").addEventListener("click", openWork);
+document.getElementById("queue-btn").addEventListener("click", openQueue);
+queuePoll();
+setInterval(() => { if (stageView.kind !== "queue") queuePoll(); }, 30000);
 discPoll(false);
 setInterval(() => discPoll(false), DISC_POLL_MS);
 usagePoll();
@@ -4652,9 +4776,20 @@ async function openLauncher(preselect, seed) {
         <label for="f-seed">Seed prompt (optional)</label>
         <textarea id="f-seed" placeholder="Initial prompt or /slash-command"></textarea>
       </div>
+      <div class="field" id="f-queue-field" hidden>
+        <label for="f-donewhen">Done when (required)</label>
+        <textarea id="f-donewhen" placeholder="tests: $ go test ./... -count=1&#10;What must be true when it stops, and the check that proves it"></textarea>
+        <div class="seg" id="f-when-seg">
+          <button class="seg-b active" data-when="room">After the limit resets</button>
+          <button class="seg-b" data-when="at">At a time</button>
+        </div>
+        <input type="datetime-local" id="f-at" hidden />
+        <div class="f-hint">The Done-when goes into the seed for the task file. Runs launch only while loom is open; none launch while a plan window is 95% used.</div>
+      </div>
       <div class="modal-error" id="f-error"></div>
       <div class="modal-actions">
         <button class="btn-ghost" id="f-cancel">Cancel</button>
+        <button class="btn-ghost" id="f-queue" title="Hold this run and launch it later">Queue…</button>
         <button class="btn-launch" id="f-launch">Launch</button>
       </div>
     </div>`;
@@ -4728,6 +4863,53 @@ async function openLauncher(preselect, seed) {
     wtBox.disabled = many;
     backdrop.querySelector("#f-attempts-hint").hidden = !many;
     backdrop.querySelector('label[for="f-seed"]').textContent = many ? "Seed prompt (required)" : "Seed prompt (optional)";
+  });
+
+  // Queue: the same run, held until a time or until the limits have room.
+  const queueBtn = backdrop.querySelector("#f-queue");
+  const queueField = backdrop.querySelector("#f-queue-field");
+  const atInput = backdrop.querySelector("#f-at");
+  let queueWhen = "room";
+  backdrop.querySelector("#f-when-seg").addEventListener("click", (e) => {
+    const b = e.target.closest(".seg-b");
+    if (!b) return;
+    e.preventDefault();
+    queueWhen = b.dataset.when;
+    backdrop.querySelectorAll("#f-when-seg .seg-b").forEach((x) => x.classList.toggle("active", x === b));
+    atInput.hidden = queueWhen !== "at";
+  });
+  queueBtn.addEventListener("click", async () => {
+    const errEl = backdrop.querySelector("#f-error");
+    if (queueField.hidden) {
+      queueField.hidden = false;
+      queueBtn.textContent = "Queue";
+      queueBtn.className = "btn-launch";
+      launchBtn.hidden = true;
+      backdrop.querySelector('label[for="f-seed"]').textContent = "Seed prompt (required)";
+      backdrop.querySelector("#f-donewhen").focus();
+      return;
+    }
+    if (picker === "multi" || attemptsSel.value !== "1") { errEl.textContent = "A queued run takes one target and one attempt."; return; }
+    const path = backdrop.querySelector("#f-project").value;
+    const seed = backdrop.querySelector("#f-seed").value;
+    const doneWhen = backdrop.querySelector("#f-donewhen").value;
+    if (!path) { errEl.textContent = "Pick a project to queue."; return; }
+    if (!seed.trim()) { errEl.textContent = "A queued run needs a seed prompt."; return; }
+    if (!doneWhen.trim()) { errEl.textContent = "A queued run needs a Done-when: what must be true, and how to check it."; return; }
+    let at = 0;
+    if (queueWhen === "at") {
+      const t = atInput.value ? new Date(atInput.value).getTime() : NaN;
+      if (!isFinite(t)) { errEl.textContent = "Pick a time."; return; }
+      at = Math.floor(t / 1000);
+    }
+    const fn = bound("QueueRun");
+    if (!fn) return;
+    queueBtn.disabled = true;
+    try {
+      await fn(path, backdrop.querySelector("#f-model").value, backdrop.querySelector("#f-mode").value, seed, doneWhen, wtBox.checked, at);
+    } catch (e) { errEl.textContent = "Queue failed: " + e; queueBtn.disabled = false; return; }
+    close();
+    openQueue();
   });
 
   const launchBtn = backdrop.querySelector("#f-launch");
